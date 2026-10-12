@@ -1,3 +1,15 @@
+## ImpulseM fork
+
+This is the ImpulseM fork of [centrifuge-js](https://github.com/centrifugal/centrifuge-js), published to npm as [`@impulsem/centrifuge`](https://www.npmjs.com/package/@impulsem/centrifuge). Its API matches upstream, so the API documentation below applies unless noted otherwise. Install and import instructions in this README refer to `@impulsem/centrifuge`, not to the upstream `centrifuge` package.
+
+The package has its own versioning, starting at `1.0.0`, independent of upstream `centrifuge-js` versions. Releases are listed on the [ImpulseM.Centrifugo.Client.JS releases page](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS/releases).
+
+Related ImpulseM projects:
+
+* [ImpulseM.Centrifugo](https://github.com/Impulse-m/ImpulseM.Centrifugo) - the server (Docker image `ghcr.io/impulse-m/impulsem.centrifugo`)
+* [ImpulseM.Centrifugo.Client.Swift](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift) - iOS client (Swift Package Manager)
+* [ImpulseM.Centrifugo.Client.Java](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Java) - Android client
+
 This SDK provides a client to connect to [Centrifugo](https://github.com/centrifugal/centrifugo) or any [Centrifuge-based](https://github.com/centrifugal/centrifuge) server using pure WebSocket or one of the alternative transports (HTTP-streaming, SSE/EventSource, experimental WebTransport) from web browser, ReactNative, or NodeJS environments.
 
 > [!IMPORTANT]  
@@ -5,7 +17,7 @@ This SDK provides a client to connect to [Centrifugo](https://github.com/centrif
 
 The features implemented by this SDK can be found in [SDK feature matrix](https://centrifugal.dev/docs/transports/client_sdk#sdk-feature-matrix).
 
-> `centrifuge-js` v5.x is compatible with [Centrifugo](https://github.com/centrifugal/centrifugo) server v6, v5 and v4, and [Centrifuge](https://github.com/centrifugal/centrifuge) >= 0.25.0. For Centrifugo v2, Centrifugo v3 and Centrifuge < 0.25.0 you should use `centrifuge-js` v2.x.
+> `@impulsem/centrifuge` is based on `centrifuge-js` v5.x and is compatible with [Centrifugo](https://github.com/centrifugal/centrifugo) server v6, v5 and v4, and [Centrifuge](https://github.com/centrifugal/centrifuge) >= 0.25.0. For Centrifugo v2, Centrifugo v3 and Centrifuge < 0.25.0 you should use `centrifuge-js` v2.x.
 
 * [Install](#install)
 * [Quick start](#quick-start)
@@ -40,22 +52,22 @@ The features implemented by this SDK can be found in [SDK feature matrix](https:
 SDK can be installed via `npm`:
 
 ```bash
-npm install centrifuge
+npm install @impulsem/centrifuge
 ```
 
 And then in your project:
 
 ```javascript
-import { Centrifuge } from 'centrifuge';
+import { Centrifuge } from '@impulsem/centrifuge';
 ```
 
-In browser, you can import SDK from [unpkg](https://app.unpkg.com/centrifuge@latest) CDN (replace `5.0.0` with a concrete version number you want to use, see [releases](https://github.com/centrifugal/centrifuge-js/releases)):
+In browser, you can import SDK from [unpkg](https://app.unpkg.com/@impulsem/centrifuge@latest) CDN (replace `1.0.0` with a concrete version number you want to use, see [releases](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS/releases)):
 
 ```html
-<script src="https://unpkg.com/centrifuge@5.0.0/dist/centrifuge.js"></script>
+<script src="https://unpkg.com/@impulsem/centrifuge@1.0.0/dist/centrifuge.js"></script>
 ```
 
-See also [centrifuge-js on jsdelivr](https://www.jsdelivr.com/package/npm/centrifuge). Note that `centrifuge-js` browser builds target [ES6](https://caniuse.com/es6).
+The same files are available from jsDelivr: `https://cdn.jsdelivr.net/npm/@impulsem/centrifuge@1.0.0/dist/centrifuge.js`, see [@impulsem/centrifuge on jsdelivr](https://www.jsdelivr.com/package/npm/@impulsem/centrifuge). Note that `@impulsem/centrifuge` browser builds target [ES6](https://caniuse.com/es6).
 
 **By default, library works with JSON only**, if you want to send binary payloads go to [Protobuf support](#protobuf-support) section to see how to import client with Protobuf support.
 
@@ -150,13 +162,13 @@ If you want to use SockJS you must also import SockJS client before centrifuge.j
 
 ```html
 <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js" type="text/javascript"></script>
-<script src="https://unpkg.com/centrifuge@5.0.0/dist/centrifuge.js" type="text/javascript"></script>
+<script src="https://unpkg.com/@impulsem/centrifuge@1.0.0/dist/centrifuge.js" type="text/javascript"></script>
 ```
 
 Or provide it explicitly as a dependency:
 
 ```javascript
-import { Centrifuge } from 'centrifuge'
+import { Centrifuge } from '@impulsem/centrifuge'
 import SockJS from 'sockjs-client'
 
 const transports = [{
@@ -491,7 +503,7 @@ If the token sets connection expiration then the client SDK will keep the token 
 An example of possible `getToken` function implementation:
 
 ```javascript
-import { Centrifuge, UnauthorizedError } from 'centrifuge';
+import { Centrifuge, UnauthorizedError } from '@impulsem/centrifuge';
 
 async function getToken() {
     if (!loggedIn) {
@@ -718,7 +730,7 @@ If token sets subscription expiration client SDK will keep token refreshed. It d
 An example:
 
 ```javascript
-import { Centrifuge, UnauthorizedError } from 'centrifuge';
+import { Centrifuge, UnauthorizedError } from '@impulsem/centrifuge';
 
 async function getToken(ctx) {
     // ctx argument has a channel.
@@ -974,13 +986,13 @@ Additionally, Client has several top-level methods to call with server-side subs
 To import client which uses Protobuf protocol under the hood:
 
 ```html
-<script src="https://unpkg.com/centrifuge@5.0.0/dist/centrifuge.protobuf.js"></script>
+<script src="https://unpkg.com/@impulsem/centrifuge@1.0.0/dist/centrifuge.protobuf.js"></script>
 ```
 
 Or if you are developing with npm:
 
 ```javascript
-import { Centrifuge } from 'centrifuge/build/protobuf';
+import { Centrifuge } from '@impulsem/centrifuge/build/protobuf';
 ```
 
 This client uses [protobuf.js](https://github.com/dcodeIO/ProtoBuf.js/) under the hood.
@@ -1005,7 +1017,7 @@ npm install ws
 At this point you have 2 options. Explicitly pass WebSocket object to Centrifuge.
 
 ```javascript
-import { Centrifuge } from 'centrifuge';
+import { Centrifuge } from '@impulsem/centrifuge';
 import WebSocket from 'ws';
 
 var centrifuge = new Centrifuge('ws://localhost:8000/connection/websocket', {
@@ -1016,7 +1028,7 @@ var centrifuge = new Centrifuge('ws://localhost:8000/connection/websocket', {
 Or define it globally:
 
 ```javascript
-import { Centrifuge } from 'centrifuge';
+import { Centrifuge } from '@impulsem/centrifuge';
 import WebSocket from 'ws';
 
 global.WebSocket = WebSocket;
@@ -1050,11 +1062,11 @@ var centrifuge = new Centrifuge('ws://localhost:8000/connection/websocket', {
 });
 ```
 
-See a basic example with React Native where this technique is used [in this comment](https://github.com/centrifugal/centrifuge-js/issues/224#issuecomment-1538820023).
+See a basic example with React Native where this technique is used in the upstream centrifuge-js discussion [#224](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS/issues) (upstream issue 224).
 
 ## Using with React Native on Android
 
-If you have issues with the connection on Android when using React Native – [check out this comment](https://github.com/centrifugal/centrifuge-js/issues/242#issuecomment-2569474401) – you may be using non-secure endpoint schemes and need to explicitly allow it.
+If you have issues with the connection on Android when using React Native – [check out the upstream centrifuge-js discussion](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS/issues) (upstream issue 242) – you may be using non-secure endpoint schemes and need to explicitly allow it.
 
 ## Errors in callbacks
 
