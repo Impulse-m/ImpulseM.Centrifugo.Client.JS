@@ -7,7 +7,9 @@
 #     owner: Impulse-m
 #     repository: ImpulseM.Centrifugo.Client.JS
 #     workflow: release.yml
+#     environment: release
 #   This filename must not change.
+# - The GitHub environment "release" allows deployments only from the master branch and v* tags.
 
 name: release
 
@@ -23,8 +25,7 @@ on:
         type: string
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
@@ -101,6 +102,8 @@ jobs:
     name: Test
     needs:
       - validate
+    permissions:
+      contents: read
     uses: ./.github/workflows/ci.yml
 
   publish:
@@ -109,6 +112,7 @@ jobs:
       - validate
       - test
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: read
       id-token: write
@@ -163,6 +167,8 @@ jobs:
       - validate
       - publish
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       VERSION: ${{ needs.validate.outputs.version }}
     steps:
@@ -184,6 +190,8 @@ jobs:
       - publish
       - tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       VERSION: ${{ needs.validate.outputs.version }}
       PRERELEASE: ${{ needs.validate.outputs.prerelease }}
