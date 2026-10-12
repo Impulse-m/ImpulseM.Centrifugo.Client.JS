@@ -1,24 +1,208 @@
-name: Release workflow
+# Publishes @impulsem/centrifuge to npm with Trusted Publishing (OIDC), no npm token.
+#
+# Prerequisites:
+# - The package must exist on npm before trusted publishing works.
+#   Publish the first version manually once.
+# - The npm package settings must have a trusted publisher with:
+#     owner: Impulse-m
+#     repository: ImpulseM.Centrifugo.Client.JS
+#     workflow: release.yml
+#   This filename must not change.
+
+name: release
+
 on:
   push:
     tags:
-      - '*'
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without the leading v, e.g. 1.0.0 or 1.1.0-rc.1'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-  release:
-    environment: release
+  validate:
+    name: Validate version
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Resolve and validate version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="${REF_NAME#v}"
+          fi
+
+          semver='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+          if ! [[ "$version" =~ $semver ]]; then
+            echo "::error::Invalid version '${version}'. Expected semver without the leading v, e.g. 1.0.0 or 1.1.0-rc.1."
+            exit 1
+          fi
+
+          tag="v${version}"
+          prerelease=false
+          if [[ "$version" == *-* ]]; then
+            prerelease=true
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            remote_tag="$(git ls-remote --tags origin "refs/tags/${tag}")"
+            if [ -n "$remote_tag" ]; then
+              echo "::error::Tag ${tag} already exists on origin."
+              exit 1
+            fi
+          fi
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::GitHub Release ${tag} already exists."
+            exit 1
+          fi
+
+          if [ "$prerelease" = "false" ]; then
+            highest="$(gh release list --exclude-pre-releases --limit 1000 --json tagName --jq '.[].tagName' | sed 's/^v//' | sort -V | tail -n 1)"
+            if [ -n "$highest" ]; then
+              newest="$(printf '%s\n%s\n' "$highest" "$version" | sort -V | tail -n 1)"
+              if [ "$highest" = "$version" ] || [ "$newest" != "$version" ]; then
+                echo "::error::Version ${version} is not greater than the latest release v${highest}."
+                exit 1
+              fi
+            fi
+          fi
+
+          {
+            echo "version=${version}"
+            echo "prerelease=${prerelease}"
+          } >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Test
+    needs:
+      - validate
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to npmjs
+    needs:
+      - validate
+      - test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
+
       - name: Install dependencies
-        run: yarn install
-      - name: Release on npm
+        run: yarn install --frozen-lockfile --ignore-scripts
+
+      - name: Set package version
+        run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Build
+        run: yarn build-all
+
+      - name: Pack
+        run: npm pack --ignore-scripts --pack-destination dist
+
+      - name: Publish
         run: |
-          npm config set //registry.npmjs.org/:_authToken ${NPM_TOKEN}
-          npm publish --ignore-scripts
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          args=(--access public --ignore-scripts)
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--tag next)
+          fi
+
+          npm publish "${args[@]}"
+
+      - name: Upload package archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-package
+          path: dist/*.tgz
+          if-no-files-found: error
+
+  tag:
+    name: Create tag
+    if: github.event_name == 'workflow_dispatch'
+    needs:
+      - validate
+      - publish
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Create and push tag
+        run: |
+          git tag "v${VERSION}" "$GITHUB_SHA"
+          git push origin "refs/tags/v${VERSION}"
+
+  release:
+    name: Create GitHub Release
+    if: ${{ always() && needs.publish.result == 'success' && (needs.tag.result == 'success' || needs.tag.result == 'skipped') }}
+    needs:
+      - validate
+      - publish
+      - tag
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download package archive
+        uses: actions/download-artifact@v8
+        with:
+          name: npm-package
+          path: dist
+
+      - name: Create GitHub Release
+        run: |
+          args=(--verify-tag --generate-notes)
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          else
+            args+=(--latest)
+          fi
+
+          gh release create "v${VERSION}" "${args[@]}" dist/*.tgz

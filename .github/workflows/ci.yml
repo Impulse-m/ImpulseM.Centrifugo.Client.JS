@@ -1,10 +1,13 @@
 name: Test workflow
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_call:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Prevent duplicate builds on internal PRs.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    # Prevent duplicate builds on internal PRs. Also runs when called from release.yml.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     strategy:
       matrix:
         node-version: [22, 24, 26]
