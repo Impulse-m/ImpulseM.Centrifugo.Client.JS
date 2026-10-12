@@ -1,0 +1,96 @@
+name: upstream-sync
+
+# Weekly check of how far master is behind upstream. Keeps one open issue labelled upstream-sync with the
+# number of upstream commits, the newest upstream tag and the files a merge would conflict in. The issue is
+# closed when master catches up.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  UPSTREAM_BRANCH: master
+  LABEL: upstream-sync
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Compare with upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Without it gh picks the upstream remote added below as the repository to work with.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # The same file is used in every fork, the upstream is picked by the repository name.
+          case "${GITHUB_REPOSITORY#*/}" in
+            ImpulseM.Centrifugo) UPSTREAM_REPO=centrifugal/centrifugo ;;
+            ImpulseM.Centrifugo.Core) UPSTREAM_REPO=centrifugal/centrifuge ;;
+            ImpulseM.Centrifugo.Protocol) UPSTREAM_REPO=centrifugal/protocol ;;
+            ImpulseM.Centrifugo.Client.JS) UPSTREAM_REPO=centrifugal/centrifuge-js ;;
+            ImpulseM.Centrifugo.Client.Swift) UPSTREAM_REPO=centrifugal/centrifuge-swift ;;
+            ImpulseM.Centrifugo.Client.Java) UPSTREAM_REPO=centrifugal/centrifuge-java ;;
+            *) echo "No upstream known for ${GITHUB_REPOSITORY}" >&2; exit 1 ;;
+          esac
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          # No upstream tags locally: upstream has old tags with the same names as our releases (v1.0.0, ...).
+          git fetch --quiet --no-tags upstream "${UPSTREAM_BRANCH}"
+          upstream_ref="upstream/${UPSTREAM_BRANCH}"
+
+          behind=$(git rev-list --count "HEAD..${upstream_ref}")
+          ahead=$(git rev-list --count "${upstream_ref}..HEAD")
+          tag=$(git ls-remote --tags --refs --sort=-v:refname upstream | awk 'NR == 1 { sub("refs/tags/", "", $2); print $2 }')
+          tag=${tag:-none}
+          existing=$(gh issue list --label "${LABEL}" --state open --json number --jq '.[0].number // empty')
+
+          if [ "${behind}" -eq 0 ]; then
+            if [ -n "${existing}" ]; then
+              gh issue close "${existing}" --comment "master is up to date with ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}."
+            fi
+            echo "Up to date with ${UPSTREAM_REPO}."
+            exit 0
+          fi
+
+          # merge-tree prints the tree id, then conflicted paths until the first empty line.
+          merge_out=$(git merge-tree --write-tree --name-only HEAD "${upstream_ref}" || true)
+          conflicts=$(printf '%s\n' "${merge_out}" | tail -n +2 | sed '/^$/,$d')
+          if [ -z "${conflicts}" ]; then
+            conflicts_md="None: upstream merges cleanly."
+          else
+            conflicts_md=$(printf '%s\n' "${conflicts}" | sed 's/^/- `/; s/$/`/')
+          fi
+          commits_md=$(git log -n 50 --format='- %h %s' "HEAD..${upstream_ref}")
+
+          title="Upstream sync: ${behind} commits behind ${UPSTREAM_REPO}"
+          body=$(printf '%s\n' \
+            "master is **${behind}** commits behind \`${UPSTREAM_REPO}@${UPSTREAM_BRANCH}\` and **${ahead}** commits ahead." \
+            "" \
+            "Newest upstream tag: \`${tag}\`." \
+            "" \
+            "### Files a merge would conflict in" \
+            "" \
+            "${conflicts_md}" \
+            "" \
+            "### Upstream commits (newest first, up to 50)" \
+            "" \
+            "${commits_md}" \
+            "" \
+            "Updated by the upstream-sync workflow on $(date -u +%Y-%m-%d).")
+
+          gh label create "${LABEL}" --color "0e8a16" --description "Fork is behind upstream" --force > /dev/null
+          if [ -n "${existing}" ]; then
+            gh issue edit "${existing}" --title "${title}" --body "${body}" > /dev/null
+            echo "Updated issue #${existing}."
+          else
+            gh issue create --label "${LABEL}" --title "${title}" --body "${body}"
+          fi
