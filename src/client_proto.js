@@ -43,6 +43,9 @@ export const centrifugal = $root.centrifugal = (() => {
                  * @property {number|null} [code] Error code
                  * @property {string|null} [message] Error message
                  * @property {boolean|null} [temporary] Error temporary
+                 * @property {number|null} [app_code] Error app_code
+                 * @property {string|null} [app_type] Error app_type
+                 * @property {Object.<string,string>|null} [metadata] Error metadata
                  */
 
                 /**
@@ -54,6 +57,7 @@ export const centrifugal = $root.centrifugal = (() => {
                  * @param {centrifugal.centrifuge.protocol.IError=} [properties] Properties to set
                  */
                 function Error(properties) {
+                    this.metadata = {};
                     if (properties)
                         for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                             if (properties[keys[i]] != null && keys[i] !== "__proto__")
@@ -85,6 +89,30 @@ export const centrifugal = $root.centrifugal = (() => {
                 Error.prototype.temporary = false;
 
                 /**
+                 * Error app_code.
+                 * @member {number} app_code
+                 * @memberof centrifugal.centrifuge.protocol.Error
+                 * @instance
+                 */
+                Error.prototype.app_code = 0;
+
+                /**
+                 * Error app_type.
+                 * @member {string} app_type
+                 * @memberof centrifugal.centrifuge.protocol.Error
+                 * @instance
+                 */
+                Error.prototype.app_type = "";
+
+                /**
+                 * Error metadata.
+                 * @member {Object.<string,string>} metadata
+                 * @memberof centrifugal.centrifuge.protocol.Error
+                 * @instance
+                 */
+                Error.prototype.metadata = $util.emptyObject;
+
+                /**
                  * Encodes the specified Error message. Does not implicitly {@link centrifugal.centrifuge.protocol.Error.verify|verify} messages.
                  * @function encode
                  * @memberof centrifugal.centrifuge.protocol.Error
@@ -106,6 +134,13 @@ export const centrifugal = $root.centrifugal = (() => {
                         writer.uint32(/* id 2, wireType 2 =*/18).string(message.message);
                     if (message.temporary != null && Object.hasOwnProperty.call(message, "temporary"))
                         writer.uint32(/* id 3, wireType 0 =*/24).bool(message.temporary);
+                    if (message.app_code != null && Object.hasOwnProperty.call(message, "app_code"))
+                        writer.uint32(/* id 1000, wireType 0 =*/8000).int32(message.app_code);
+                    if (message.app_type != null && Object.hasOwnProperty.call(message, "app_type"))
+                        writer.uint32(/* id 1001, wireType 2 =*/8010).string(message.app_type);
+                    if (message.metadata != null && Object.hasOwnProperty.call(message, "metadata"))
+                        for (let keys = Object.keys(message.metadata), i = 0; i < keys.length; ++i)
+                            writer.uint32(/* id 1002, wireType 2 =*/8018).fork().uint32(/* id 1, wireType 2 =*/10).string(keys[i]).uint32(/* id 2, wireType 2 =*/18).string(message.metadata[keys[i]]).ldelim();
                     return writer;
                 };
 
@@ -140,7 +175,7 @@ export const centrifugal = $root.centrifugal = (() => {
                         long = 0;
                     if (long > $Reader.recursionLimit)
                         throw Error("maximum nesting depth exceeded");
-                    let end, message;
+                    let end, message, key, value;
                     if (length === undefined)
                         end = reader.len;
                     else {
@@ -166,6 +201,45 @@ export const centrifugal = $root.centrifugal = (() => {
                             }
                         case 3: {
                                 message.temporary = reader.bool();
+                                break;
+                            }
+                        case 1000: {
+                                message.app_code = reader.int32();
+                                break;
+                            }
+                        case 1001: {
+                                message.app_type = reader.string();
+                                break;
+                            }
+                        case 1002: {
+                                if (message.metadata === $util.emptyObject)
+                                    message.metadata = {};
+                                let end2 = reader.uint32() + reader.pos;
+                                if (end2 > reader.len)
+                                    throw RangeError("index out of range");
+                                reader.len = end2;
+                                key = "";
+                                value = "";
+                                while (reader.pos < end2) {
+                                    let tag2 = reader.uint32();
+                                    switch (tag2 >>> 3) {
+                                    case 1:
+                                        key = reader.string();
+                                        break;
+                                    case 2:
+                                        value = reader.string();
+                                        break;
+                                    default:
+                                        reader.skipType(tag2 & 7, long);
+                                        break;
+                                    }
+                                }
+                                if (reader.pos !== end2)
+                                    throw RangeError("index out of range");
+                                reader.len = end;
+                                if (key === "__proto__")
+                                    $util.makeProp(message.metadata, key);
+                                message.metadata[key] = value;
                                 break;
                             }
                         default:
@@ -221,6 +295,20 @@ export const centrifugal = $root.centrifugal = (() => {
                     if (message.temporary != null && Object.hasOwnProperty.call(message, "temporary"))
                         if (typeof message.temporary !== "boolean")
                             return "temporary: boolean expected";
+                    if (message.app_code != null && Object.hasOwnProperty.call(message, "app_code"))
+                        if (!$util.isInteger(message.app_code))
+                            return "app_code: integer expected";
+                    if (message.app_type != null && Object.hasOwnProperty.call(message, "app_type"))
+                        if (!$util.isString(message.app_type))
+                            return "app_type: string expected";
+                    if (message.metadata != null && Object.hasOwnProperty.call(message, "metadata")) {
+                        if (!$util.isObject(message.metadata))
+                            return "metadata: object expected";
+                        let key = Object.keys(message.metadata);
+                        for (let i = 0; i < key.length; ++i)
+                            if (!$util.isString(message.metadata[key[i]]))
+                                return "metadata: string{k:string} expected";
+                    }
                     return null;
                 };
 
@@ -882,6 +970,7 @@ export const centrifugal = $root.centrifugal = (() => {
                  * @property {centrifugal.centrifuge.protocol.IRPCResult|null} [rpc] Reply rpc
                  * @property {centrifugal.centrifuge.protocol.IRefreshResult|null} [refresh] Reply refresh
                  * @property {centrifugal.centrifuge.protocol.ISubRefreshResult|null} [sub_refresh] Reply sub_refresh
+                 * @property {number|Long|null} [time] Reply time
                  */
 
                 /**
@@ -1012,6 +1101,14 @@ export const centrifugal = $root.centrifugal = (() => {
                 Reply.prototype.sub_refresh = null;
 
                 /**
+                 * Reply time.
+                 * @member {number|Long} time
+                 * @memberof centrifugal.centrifuge.protocol.Reply
+                 * @instance
+                 */
+                Reply.prototype.time = $util.Long ? $util.Long.fromBits(0,0,false) : 0;
+
+                /**
                  * Encodes the specified Reply message. Does not implicitly {@link centrifugal.centrifuge.protocol.Reply.verify|verify} messages.
                  * @function encode
                  * @memberof centrifugal.centrifuge.protocol.Reply
@@ -1055,6 +1152,8 @@ export const centrifugal = $root.centrifugal = (() => {
                         $root.centrifugal.centrifuge.protocol.RefreshResult.encode(message.refresh, writer.uint32(/* id 14, wireType 2 =*/114).fork(), q + 1).ldelim();
                     if (message.sub_refresh != null && Object.hasOwnProperty.call(message, "sub_refresh"))
                         $root.centrifugal.centrifuge.protocol.SubRefreshResult.encode(message.sub_refresh, writer.uint32(/* id 15, wireType 2 =*/122).fork(), q + 1).ldelim();
+                    if (message.time != null && Object.hasOwnProperty.call(message, "time"))
+                        writer.uint32(/* id 1000, wireType 0 =*/8000).int64(message.time);
                     return writer;
                 };
 
@@ -1159,6 +1258,10 @@ export const centrifugal = $root.centrifugal = (() => {
                             }
                         case 15: {
                                 message.sub_refresh = $root.centrifugal.centrifuge.protocol.SubRefreshResult.decode(reader, reader.uint32(), undefined, long + 1);
+                                break;
+                            }
+                        case 1000: {
+                                message.time = reader.int64();
                                 break;
                             }
                         default:
@@ -1273,6 +1376,9 @@ export const centrifugal = $root.centrifugal = (() => {
                         if (error)
                             return "sub_refresh." + error;
                     }
+                    if (message.time != null && Object.hasOwnProperty.call(message, "time"))
+                        if (!$util.isInteger(message.time) && !(message.time && $util.isInteger(message.time.low) && $util.isInteger(message.time.high)))
+                            return "time: integer|Long expected";
                     return null;
                 };
 
@@ -4279,6 +4385,7 @@ export const centrifugal = $root.centrifugal = (() => {
                  * @property {number|Long|null} [flag] ConnectRequest flag
                  * @property {string|null} [profile] ConnectRequest profile
                  * @property {string|null} [dict] ConnectRequest dict
+                 * @property {string|null} [instance] ConnectRequest instance
                  */
 
                 /**
@@ -4371,6 +4478,14 @@ export const centrifugal = $root.centrifugal = (() => {
                 ConnectRequest.prototype.dict = "";
 
                 /**
+                 * ConnectRequest instance.
+                 * @member {string} instance
+                 * @memberof centrifugal.centrifuge.protocol.ConnectRequest
+                 * @instance
+                 */
+                ConnectRequest.prototype.instance = "";
+
+                /**
                  * Encodes the specified ConnectRequest message. Does not implicitly {@link centrifugal.centrifuge.protocol.ConnectRequest.verify|verify} messages.
                  * @function encode
                  * @memberof centrifugal.centrifuge.protocol.ConnectRequest
@@ -4408,6 +4523,8 @@ export const centrifugal = $root.centrifugal = (() => {
                         writer.uint32(/* id 8, wireType 2 =*/66).string(message.dict);
                     if (message.profile != null && Object.hasOwnProperty.call(message, "profile"))
                         writer.uint32(/* id 9, wireType 2 =*/74).string(message.profile);
+                    if (message.instance != null && Object.hasOwnProperty.call(message, "instance"))
+                        writer.uint32(/* id 1000, wireType 2 =*/8002).string(message.instance);
                     return writer;
                 };
 
@@ -4548,6 +4665,10 @@ export const centrifugal = $root.centrifugal = (() => {
                                 message.dict = reader.string();
                                 break;
                             }
+                        case 1000: {
+                                message.instance = reader.string();
+                                break;
+                            }
                         default:
                             reader.skipType(tag & 7, long);
                             break;
@@ -4631,6 +4752,9 @@ export const centrifugal = $root.centrifugal = (() => {
                     if (message.dict != null && Object.hasOwnProperty.call(message, "dict"))
                         if (!$util.isString(message.dict))
                             return "dict: string expected";
+                    if (message.instance != null && Object.hasOwnProperty.call(message, "instance"))
+                        if (!$util.isString(message.instance))
+                            return "instance: string expected";
                     return null;
                 };
 
@@ -4671,6 +4795,8 @@ export const centrifugal = $root.centrifugal = (() => {
                  * @property {number|Long|null} [time] ConnectResult time
                  * @property {number|Long|null} [flag] ConnectResult flag
                  * @property {centrifugal.centrifuge.protocol.IDictionary|null} [dict] ConnectResult dict
+                 * @property {string|null} [user] ConnectResult user
+                 * @property {string|null} [auth_class] ConnectResult auth_class
                  */
 
                 /**
@@ -4794,6 +4920,22 @@ export const centrifugal = $root.centrifugal = (() => {
                 ConnectResult.prototype.dict = null;
 
                 /**
+                 * ConnectResult user.
+                 * @member {string} user
+                 * @memberof centrifugal.centrifuge.protocol.ConnectResult
+                 * @instance
+                 */
+                ConnectResult.prototype.user = "";
+
+                /**
+                 * ConnectResult auth_class.
+                 * @member {string} auth_class
+                 * @memberof centrifugal.centrifuge.protocol.ConnectResult
+                 * @instance
+                 */
+                ConnectResult.prototype.auth_class = "";
+
+                /**
                  * Encodes the specified ConnectResult message. Does not implicitly {@link centrifugal.centrifuge.protocol.ConnectResult.verify|verify} messages.
                  * @function encode
                  * @memberof centrifugal.centrifuge.protocol.ConnectResult
@@ -4838,6 +4980,10 @@ export const centrifugal = $root.centrifugal = (() => {
                         writer.uint32(/* id 12, wireType 0 =*/96).int64(message.flag);
                     if (message.dict != null && Object.hasOwnProperty.call(message, "dict"))
                         $root.centrifugal.centrifuge.protocol.Dictionary.encode(message.dict, writer.uint32(/* id 13, wireType 2 =*/106).fork(), q + 1).ldelim();
+                    if (message.user != null && Object.hasOwnProperty.call(message, "user"))
+                        writer.uint32(/* id 1000, wireType 2 =*/8002).string(message.user);
+                    if (message.auth_class != null && Object.hasOwnProperty.call(message, "auth_class"))
+                        writer.uint32(/* id 1001, wireType 2 =*/8010).string(message.auth_class);
                     return writer;
                 };
 
@@ -4967,6 +5113,14 @@ export const centrifugal = $root.centrifugal = (() => {
                                 message.dict = $root.centrifugal.centrifuge.protocol.Dictionary.decode(reader, reader.uint32(), undefined, long + 1);
                                 break;
                             }
+                        case 1000: {
+                                message.user = reader.string();
+                                break;
+                            }
+                        case 1001: {
+                                message.auth_class = reader.string();
+                                break;
+                            }
                         default:
                             reader.skipType(tag & 7, long);
                             break;
@@ -5059,6 +5213,12 @@ export const centrifugal = $root.centrifugal = (() => {
                         if (error)
                             return "dict." + error;
                     }
+                    if (message.user != null && Object.hasOwnProperty.call(message, "user"))
+                        if (!$util.isString(message.user))
+                            return "user: string expected";
+                    if (message.auth_class != null && Object.hasOwnProperty.call(message, "auth_class"))
+                        if (!$util.isString(message.auth_class))
+                            return "auth_class: string expected";
                     return null;
                 };
 
@@ -5262,6 +5422,8 @@ export const centrifugal = $root.centrifugal = (() => {
                  * @property {string|null} [version] RefreshResult version
                  * @property {boolean|null} [expires] RefreshResult expires
                  * @property {number|null} [ttl] RefreshResult ttl
+                 * @property {string|null} [user] RefreshResult user
+                 * @property {string|null} [auth_class] RefreshResult auth_class
                  */
 
                 /**
@@ -5312,6 +5474,22 @@ export const centrifugal = $root.centrifugal = (() => {
                 RefreshResult.prototype.ttl = 0;
 
                 /**
+                 * RefreshResult user.
+                 * @member {string} user
+                 * @memberof centrifugal.centrifuge.protocol.RefreshResult
+                 * @instance
+                 */
+                RefreshResult.prototype.user = "";
+
+                /**
+                 * RefreshResult auth_class.
+                 * @member {string} auth_class
+                 * @memberof centrifugal.centrifuge.protocol.RefreshResult
+                 * @instance
+                 */
+                RefreshResult.prototype.auth_class = "";
+
+                /**
                  * Encodes the specified RefreshResult message. Does not implicitly {@link centrifugal.centrifuge.protocol.RefreshResult.verify|verify} messages.
                  * @function encode
                  * @memberof centrifugal.centrifuge.protocol.RefreshResult
@@ -5335,6 +5513,10 @@ export const centrifugal = $root.centrifugal = (() => {
                         writer.uint32(/* id 3, wireType 0 =*/24).bool(message.expires);
                     if (message.ttl != null && Object.hasOwnProperty.call(message, "ttl"))
                         writer.uint32(/* id 4, wireType 0 =*/32).uint32(message.ttl);
+                    if (message.user != null && Object.hasOwnProperty.call(message, "user"))
+                        writer.uint32(/* id 1000, wireType 2 =*/8002).string(message.user);
+                    if (message.auth_class != null && Object.hasOwnProperty.call(message, "auth_class"))
+                        writer.uint32(/* id 1001, wireType 2 =*/8010).string(message.auth_class);
                     return writer;
                 };
 
@@ -5401,6 +5583,14 @@ export const centrifugal = $root.centrifugal = (() => {
                                 message.ttl = reader.uint32();
                                 break;
                             }
+                        case 1000: {
+                                message.user = reader.string();
+                                break;
+                            }
+                        case 1001: {
+                                message.auth_class = reader.string();
+                                break;
+                            }
                         default:
                             reader.skipType(tag & 7, long);
                             break;
@@ -5457,6 +5647,12 @@ export const centrifugal = $root.centrifugal = (() => {
                     if (message.ttl != null && Object.hasOwnProperty.call(message, "ttl"))
                         if (!$util.isInteger(message.ttl))
                             return "ttl: integer expected";
+                    if (message.user != null && Object.hasOwnProperty.call(message, "user"))
+                        if (!$util.isString(message.user))
+                            return "user: string expected";
+                    if (message.auth_class != null && Object.hasOwnProperty.call(message, "auth_class"))
+                        if (!$util.isString(message.auth_class))
+                            return "auth_class: string expected";
                     return null;
                 };
 
@@ -9710,6 +9906,13 @@ export const centrifugal = $root.centrifugal = (() => {
                  * @interface IRPCRequest
                  * @property {Uint8Array|null} [data] RPCRequest data
                  * @property {string|null} [method] RPCRequest method
+                 * @property {Object.<string,string>|null} [headers] RPCRequest headers
+                 * @property {number|Long|null} [msg_id] RPCRequest msg_id
+                 * @property {Array.<number|Long>|null} [ack] RPCRequest ack
+                 * @property {boolean|null} [retransmit] RPCRequest retransmit
+                 * @property {Array.<number|Long>|null} [after] RPCRequest after
+                 * @property {boolean|null} [without_updates] RPCRequest without_updates
+                 * @property {number|Long|null} [cancel] RPCRequest cancel
                  */
 
                 /**
@@ -9721,6 +9924,9 @@ export const centrifugal = $root.centrifugal = (() => {
                  * @param {centrifugal.centrifuge.protocol.IRPCRequest=} [properties] Properties to set
                  */
                 function RPCRequest(properties) {
+                    this.headers = {};
+                    this.ack = [];
+                    this.after = [];
                     if (properties)
                         for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                             if (properties[keys[i]] != null && keys[i] !== "__proto__")
@@ -9744,6 +9950,62 @@ export const centrifugal = $root.centrifugal = (() => {
                 RPCRequest.prototype.method = "";
 
                 /**
+                 * RPCRequest headers.
+                 * @member {Object.<string,string>} headers
+                 * @memberof centrifugal.centrifuge.protocol.RPCRequest
+                 * @instance
+                 */
+                RPCRequest.prototype.headers = $util.emptyObject;
+
+                /**
+                 * RPCRequest msg_id.
+                 * @member {number|Long} msg_id
+                 * @memberof centrifugal.centrifuge.protocol.RPCRequest
+                 * @instance
+                 */
+                RPCRequest.prototype.msg_id = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+                /**
+                 * RPCRequest ack.
+                 * @member {Array.<number|Long>} ack
+                 * @memberof centrifugal.centrifuge.protocol.RPCRequest
+                 * @instance
+                 */
+                RPCRequest.prototype.ack = $util.emptyArray;
+
+                /**
+                 * RPCRequest retransmit.
+                 * @member {boolean} retransmit
+                 * @memberof centrifugal.centrifuge.protocol.RPCRequest
+                 * @instance
+                 */
+                RPCRequest.prototype.retransmit = false;
+
+                /**
+                 * RPCRequest after.
+                 * @member {Array.<number|Long>} after
+                 * @memberof centrifugal.centrifuge.protocol.RPCRequest
+                 * @instance
+                 */
+                RPCRequest.prototype.after = $util.emptyArray;
+
+                /**
+                 * RPCRequest without_updates.
+                 * @member {boolean} without_updates
+                 * @memberof centrifugal.centrifuge.protocol.RPCRequest
+                 * @instance
+                 */
+                RPCRequest.prototype.without_updates = false;
+
+                /**
+                 * RPCRequest cancel.
+                 * @member {number|Long} cancel
+                 * @memberof centrifugal.centrifuge.protocol.RPCRequest
+                 * @instance
+                 */
+                RPCRequest.prototype.cancel = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+                /**
                  * Encodes the specified RPCRequest message. Does not implicitly {@link centrifugal.centrifuge.protocol.RPCRequest.verify|verify} messages.
                  * @function encode
                  * @memberof centrifugal.centrifuge.protocol.RPCRequest
@@ -9763,6 +10025,29 @@ export const centrifugal = $root.centrifugal = (() => {
                         writer.uint32(/* id 1, wireType 2 =*/10).bytes(message.data);
                     if (message.method != null && Object.hasOwnProperty.call(message, "method"))
                         writer.uint32(/* id 2, wireType 2 =*/18).string(message.method);
+                    if (message.headers != null && Object.hasOwnProperty.call(message, "headers"))
+                        for (let keys = Object.keys(message.headers), i = 0; i < keys.length; ++i)
+                            writer.uint32(/* id 1000, wireType 2 =*/8002).fork().uint32(/* id 1, wireType 2 =*/10).string(keys[i]).uint32(/* id 2, wireType 2 =*/18).string(message.headers[keys[i]]).ldelim();
+                    if (message.msg_id != null && Object.hasOwnProperty.call(message, "msg_id"))
+                        writer.uint32(/* id 1001, wireType 0 =*/8008).uint64(message.msg_id);
+                    if (message.ack != null && message.ack.length) {
+                        writer.uint32(/* id 1002, wireType 2 =*/8018).fork();
+                        for (let i = 0; i < message.ack.length; ++i)
+                            writer.uint64(message.ack[i]);
+                        writer.ldelim();
+                    }
+                    if (message.retransmit != null && Object.hasOwnProperty.call(message, "retransmit"))
+                        writer.uint32(/* id 1003, wireType 0 =*/8024).bool(message.retransmit);
+                    if (message.after != null && message.after.length) {
+                        writer.uint32(/* id 1004, wireType 2 =*/8034).fork();
+                        for (let i = 0; i < message.after.length; ++i)
+                            writer.uint64(message.after[i]);
+                        writer.ldelim();
+                    }
+                    if (message.without_updates != null && Object.hasOwnProperty.call(message, "without_updates"))
+                        writer.uint32(/* id 1005, wireType 0 =*/8040).bool(message.without_updates);
+                    if (message.cancel != null && Object.hasOwnProperty.call(message, "cancel"))
+                        writer.uint32(/* id 1006, wireType 0 =*/8048).uint64(message.cancel);
                     return writer;
                 };
 
@@ -9797,7 +10082,7 @@ export const centrifugal = $root.centrifugal = (() => {
                         long = 0;
                     if (long > $Reader.recursionLimit)
                         throw Error("maximum nesting depth exceeded");
-                    let end, message;
+                    let end, message, key, value;
                     if (length === undefined)
                         end = reader.len;
                     else {
@@ -9819,6 +10104,87 @@ export const centrifugal = $root.centrifugal = (() => {
                             }
                         case 2: {
                                 message.method = reader.string();
+                                break;
+                            }
+                        case 1000: {
+                                if (message.headers === $util.emptyObject)
+                                    message.headers = {};
+                                let end2 = reader.uint32() + reader.pos;
+                                if (end2 > reader.len)
+                                    throw RangeError("index out of range");
+                                reader.len = end2;
+                                key = "";
+                                value = "";
+                                while (reader.pos < end2) {
+                                    let tag2 = reader.uint32();
+                                    switch (tag2 >>> 3) {
+                                    case 1:
+                                        key = reader.string();
+                                        break;
+                                    case 2:
+                                        value = reader.string();
+                                        break;
+                                    default:
+                                        reader.skipType(tag2 & 7, long);
+                                        break;
+                                    }
+                                }
+                                if (reader.pos !== end2)
+                                    throw RangeError("index out of range");
+                                reader.len = end;
+                                if (key === "__proto__")
+                                    $util.makeProp(message.headers, key);
+                                message.headers[key] = value;
+                                break;
+                            }
+                        case 1001: {
+                                message.msg_id = reader.uint64();
+                                break;
+                            }
+                        case 1002: {
+                                if (!(message.ack && message.ack.length))
+                                    message.ack = [];
+                                if ((tag & 7) === 2) {
+                                    let end2 = reader.uint32() + reader.pos;
+                                    if (end2 > reader.len)
+                                        throw RangeError("index out of range");
+                                    reader.len = end2;
+                                    while (reader.pos < end2)
+                                        message.ack.push(reader.uint64());
+                                    if (reader.pos !== end2)
+                                        throw RangeError("index out of range");
+                                    reader.len = end;
+                                } else
+                                    message.ack.push(reader.uint64());
+                                break;
+                            }
+                        case 1003: {
+                                message.retransmit = reader.bool();
+                                break;
+                            }
+                        case 1004: {
+                                if (!(message.after && message.after.length))
+                                    message.after = [];
+                                if ((tag & 7) === 2) {
+                                    let end2 = reader.uint32() + reader.pos;
+                                    if (end2 > reader.len)
+                                        throw RangeError("index out of range");
+                                    reader.len = end2;
+                                    while (reader.pos < end2)
+                                        message.after.push(reader.uint64());
+                                    if (reader.pos !== end2)
+                                        throw RangeError("index out of range");
+                                    reader.len = end;
+                                } else
+                                    message.after.push(reader.uint64());
+                                break;
+                            }
+                        case 1005: {
+                                message.without_updates = reader.bool();
+                                break;
+                            }
+                        case 1006: {
+                                message.cancel = reader.uint64();
                                 break;
                             }
                         default:
@@ -9871,6 +10237,40 @@ export const centrifugal = $root.centrifugal = (() => {
                     if (message.method != null && Object.hasOwnProperty.call(message, "method"))
                         if (!$util.isString(message.method))
                             return "method: string expected";
+                    if (message.headers != null && Object.hasOwnProperty.call(message, "headers")) {
+                        if (!$util.isObject(message.headers))
+                            return "headers: object expected";
+                        let key = Object.keys(message.headers);
+                        for (let i = 0; i < key.length; ++i)
+                            if (!$util.isString(message.headers[key[i]]))
+                                return "headers: string{k:string} expected";
+                    }
+                    if (message.msg_id != null && Object.hasOwnProperty.call(message, "msg_id"))
+                        if (!$util.isInteger(message.msg_id) && !(message.msg_id && $util.isInteger(message.msg_id.low) && $util.isInteger(message.msg_id.high)))
+                            return "msg_id: integer|Long expected";
+                    if (message.ack != null && Object.hasOwnProperty.call(message, "ack")) {
+                        if (!Array.isArray(message.ack))
+                            return "ack: array expected";
+                        for (let i = 0; i < message.ack.length; ++i)
+                            if (!$util.isInteger(message.ack[i]) && !(message.ack[i] && $util.isInteger(message.ack[i].low) && $util.isInteger(message.ack[i].high)))
+                                return "ack: integer|Long[] expected";
+                    }
+                    if (message.retransmit != null && Object.hasOwnProperty.call(message, "retransmit"))
+                        if (typeof message.retransmit !== "boolean")
+                            return "retransmit: boolean expected";
+                    if (message.after != null && Object.hasOwnProperty.call(message, "after")) {
+                        if (!Array.isArray(message.after))
+                            return "after: array expected";
+                        for (let i = 0; i < message.after.length; ++i)
+                            if (!$util.isInteger(message.after[i]) && !(message.after[i] && $util.isInteger(message.after[i].low) && $util.isInteger(message.after[i].high)))
+                                return "after: integer|Long[] expected";
+                    }
+                    if (message.without_updates != null && Object.hasOwnProperty.call(message, "without_updates"))
+                        if (typeof message.without_updates !== "boolean")
+                            return "without_updates: boolean expected";
+                    if (message.cancel != null && Object.hasOwnProperty.call(message, "cancel"))
+                        if (!$util.isInteger(message.cancel) && !(message.cancel && $util.isInteger(message.cancel.low) && $util.isInteger(message.cancel.high)))
+                            return "cancel: integer|Long expected";
                     return null;
                 };
 
@@ -9899,6 +10299,7 @@ export const centrifugal = $root.centrifugal = (() => {
                  * @memberof centrifugal.centrifuge.protocol
                  * @interface IRPCResult
                  * @property {Uint8Array|null} [data] RPCResult data
+                 * @property {boolean|null} [cached] RPCResult cached
                  */
 
                 /**
@@ -9925,6 +10326,14 @@ export const centrifugal = $root.centrifugal = (() => {
                 RPCResult.prototype.data = $util.newBuffer([]);
 
                 /**
+                 * RPCResult cached.
+                 * @member {boolean} cached
+                 * @memberof centrifugal.centrifuge.protocol.RPCResult
+                 * @instance
+                 */
+                RPCResult.prototype.cached = false;
+
+                /**
                  * Encodes the specified RPCResult message. Does not implicitly {@link centrifugal.centrifuge.protocol.RPCResult.verify|verify} messages.
                  * @function encode
                  * @memberof centrifugal.centrifuge.protocol.RPCResult
@@ -9942,6 +10351,8 @@ export const centrifugal = $root.centrifugal = (() => {
                         throw Error("max depth exceeded");
                     if (message.data != null && Object.hasOwnProperty.call(message, "data"))
                         writer.uint32(/* id 1, wireType 2 =*/10).bytes(message.data);
+                    if (message.cached != null && Object.hasOwnProperty.call(message, "cached"))
+                        writer.uint32(/* id 1000, wireType 0 =*/8000).bool(message.cached);
                     return writer;
                 };
 
@@ -9996,6 +10407,10 @@ export const centrifugal = $root.centrifugal = (() => {
                                 message.data = reader.bytes();
                                 break;
                             }
+                        case 1000: {
+                                message.cached = reader.bool();
+                                break;
+                            }
                         default:
                             reader.skipType(tag & 7, long);
                             break;
@@ -10043,6 +10458,9 @@ export const centrifugal = $root.centrifugal = (() => {
                     if (message.data != null && Object.hasOwnProperty.call(message, "data"))
                         if (!(message.data && typeof message.data.length === "number" || $util.isString(message.data)))
                             return "data: buffer expected";
+                    if (message.cached != null && Object.hasOwnProperty.call(message, "cached"))
+                        if (typeof message.cached !== "boolean")
+                            return "cached: boolean expected";
                     return null;
                 };
 

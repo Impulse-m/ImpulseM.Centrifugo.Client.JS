@@ -20,6 +20,15 @@ export namespace centrifugal {
 
                 /** Error temporary */
                 temporary?: (boolean|null);
+
+                /** Error app_code */
+                app_code?: (number|null);
+
+                /** Error app_type */
+                app_type?: (string|null);
+
+                /** Error metadata */
+                metadata?: ({ [k: string]: string }|null);
             }
 
             /** Represents an Error. */
@@ -39,6 +48,15 @@ export namespace centrifugal {
 
                 /** Error temporary. */
                 public temporary: boolean;
+
+                /** Error app_code. */
+                public app_code: number;
+
+                /** Error app_type. */
+                public app_type: string;
+
+                /** Error metadata. */
+                public metadata: { [k: string]: string };
 
                 /**
                  * Encodes the specified Error message. Does not implicitly {@link centrifugal.centrifuge.protocol.Error.verify|verify} messages.
@@ -356,6 +374,9 @@ export namespace centrifugal {
 
                 /** Reply sub_refresh */
                 sub_refresh?: (centrifugal.centrifuge.protocol.ISubRefreshResult|null);
+
+                /** Reply time */
+                time?: (number|Long|null);
             }
 
             /** Represents a Reply. */
@@ -408,6 +429,9 @@ export namespace centrifugal {
 
                 /** Reply sub_refresh. */
                 public sub_refresh?: (centrifugal.centrifuge.protocol.ISubRefreshResult|null);
+
+                /** Reply time. */
+                public time: (number|Long);
 
                 /**
                  * Encodes the specified Reply message. Does not implicitly {@link centrifugal.centrifuge.protocol.Reply.verify|verify} messages.
@@ -1586,6 +1610,9 @@ export namespace centrifugal {
 
                 /** ConnectRequest dict */
                 dict?: (string|null);
+
+                /** ConnectRequest instance */
+                instance?: (string|null);
             }
 
             /** Represents a ConnectRequest. */
@@ -1623,6 +1650,9 @@ export namespace centrifugal {
 
                 /** ConnectRequest dict. */
                 public dict: string;
+
+                /** ConnectRequest instance. */
+                public instance: string;
 
                 /**
                  * Encodes the specified ConnectRequest message. Does not implicitly {@link centrifugal.centrifuge.protocol.ConnectRequest.verify|verify} messages.
@@ -1715,6 +1745,12 @@ export namespace centrifugal {
 
                 /** ConnectResult dict */
                 dict?: (centrifugal.centrifuge.protocol.IDictionary|null);
+
+                /** ConnectResult user */
+                user?: (string|null);
+
+                /** ConnectResult auth_class */
+                auth_class?: (string|null);
             }
 
             /** Represents a ConnectResult. */
@@ -1764,6 +1800,12 @@ export namespace centrifugal {
 
                 /** ConnectResult dict. */
                 public dict?: (centrifugal.centrifuge.protocol.IDictionary|null);
+
+                /** ConnectResult user. */
+                public user: string;
+
+                /** ConnectResult auth_class. */
+                public auth_class: string;
 
                 /**
                  * Encodes the specified ConnectResult message. Does not implicitly {@link centrifugal.centrifuge.protocol.ConnectResult.verify|verify} messages.
@@ -1898,6 +1940,12 @@ export namespace centrifugal {
 
                 /** RefreshResult ttl */
                 ttl?: (number|null);
+
+                /** RefreshResult user */
+                user?: (string|null);
+
+                /** RefreshResult auth_class */
+                auth_class?: (string|null);
             }
 
             /** Represents a RefreshResult. */
@@ -1920,6 +1968,12 @@ export namespace centrifugal {
 
                 /** RefreshResult ttl. */
                 public ttl: number;
+
+                /** RefreshResult user. */
+                public user: string;
+
+                /** RefreshResult auth_class. */
+                public auth_class: string;
 
                 /**
                  * Encodes the specified RefreshResult message. Does not implicitly {@link centrifugal.centrifuge.protocol.RefreshResult.verify|verify} messages.
@@ -3572,6 +3626,27 @@ export namespace centrifugal {
 
                 /** RPCRequest method */
                 method?: (string|null);
+
+                /** RPCRequest headers */
+                headers?: ({ [k: string]: string }|null);
+
+                /** RPCRequest msg_id */
+                msg_id?: (number|Long|null);
+
+                /** RPCRequest ack */
+                ack?: ((number|Long)[]|null);
+
+                /** RPCRequest retransmit */
+                retransmit?: (boolean|null);
+
+                /** RPCRequest after */
+                after?: ((number|Long)[]|null);
+
+                /** RPCRequest without_updates */
+                without_updates?: (boolean|null);
+
+                /** RPCRequest cancel */
+                cancel?: (number|Long|null);
             }
 
             /** Represents a RPCRequest. */
@@ -3588,6 +3663,27 @@ export namespace centrifugal {
 
                 /** RPCRequest method. */
                 public method: string;
+
+                /** RPCRequest headers. */
+                public headers: { [k: string]: string };
+
+                /** RPCRequest msg_id. */
+                public msg_id: (number|Long);
+
+                /** RPCRequest ack. */
+                public ack: (number|Long)[];
+
+                /** RPCRequest retransmit. */
+                public retransmit: boolean;
+
+                /** RPCRequest after. */
+                public after: (number|Long)[];
+
+                /** RPCRequest without_updates. */
+                public without_updates: boolean;
+
+                /** RPCRequest cancel. */
+                public cancel: (number|Long);
 
                 /**
                  * Encodes the specified RPCRequest message. Does not implicitly {@link centrifugal.centrifuge.protocol.RPCRequest.verify|verify} messages.
@@ -3644,6 +3740,9 @@ export namespace centrifugal {
 
                 /** RPCResult data */
                 data?: (Uint8Array|null);
+
+                /** RPCResult cached */
+                cached?: (boolean|null);
             }
 
             /** Represents a RPCResult. */
@@ -3657,6 +3756,9 @@ export namespace centrifugal {
 
                 /** RPCResult data. */
                 public data: Uint8Array;
+
+                /** RPCResult cached. */
+                public cached: boolean;
 
                 /**
                  * Encodes the specified RPCResult message. Does not implicitly {@link centrifugal.centrifuge.protocol.RPCResult.verify|verify} messages.
