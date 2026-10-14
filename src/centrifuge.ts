@@ -29,6 +29,7 @@ import {
 } from './extensions';
 
 import { RpcCallbacks, RpcTracker } from './rpc_tracker';
+import { RefreshSlot } from './refresh_slot';
 
 import {
   State, Options, SubscriptionState, ClientEvents, AuthContext,
@@ -177,12 +178,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   // User and auth class the server confirmed for the connection, from its connect or refresh reply.
   private _user: string = '';
   private _authClass: string = '';
-  // The refresh() call in flight, and its token: a call with the same token (or none) made meanwhile
-  // shares its promise.
-  private _authRefresh: Promise<AuthContext> | null = null;
-  private _authRefreshToken?: string;
-  // The refresh command in flight, of any kind: the next one waits for it to settle.
-  private _refreshInFlight: Promise<void> | null = null;
+  // The refresh commands and refresh() calls, one at a time, see RefreshSlot.
+  private _refreshSlot: RefreshSlot;
   // The rpc calls tracked for retransmit, see RpcTracker.
   private _rpc: RpcTracker;
 
@@ -263,6 +260,11 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       serverTime: (): number => this.serverTime(),
       rpcOptionsSupported: (): boolean => this._rpcOptionsSupported,
     }, maxPendingRpc, this._config.timeout);
+    this._refreshSlot = new RefreshSlot({
+      isConnected: (): boolean => this._isConnected(),
+      waitConnected: (): Promise<void> => this._methodCall(null),
+      createError: (code: number, message: string): any => this._createErrorObject(code, message),
+    });
     this._configure();
 
     if (this._debugEnabled) {
@@ -540,25 +542,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
    * refused identity change, keeps the identity of the connection.
    */
   refresh(token?: string): Promise<AuthContext> {
-    const pending: Promise<AuthContext> | null = this._authRefresh;
-    if (pending !== null && (token === undefined || token === this._authRefreshToken)) {
-      return pending;
-    }
     // Another token goes after the refresh in flight: each token is sent in turn, and its
     // caller gets the identity of its own token.
-    const refresh: Promise<AuthContext> = pending === null
-      ? this._refreshNow(token)
-      : pending.then(() => this._refreshNow(token), () => this._refreshNow(token));
-    this._authRefresh = refresh;
-    this._authRefreshToken = token;
-    const settled = (): void => {
-      if (this._authRefresh === refresh) {
-        this._authRefresh = null;
-        this._authRefreshToken = undefined;
-      }
-    };
-    refresh.then(settled, settled);
-    return refresh;
+    return this._refreshSlot.call(token, (newToken: string | undefined): Promise<AuthContext> => this._refreshNow(newToken));
   }
 
   /** setData allows setting connection data. This only affects the next connection attempt,
@@ -621,7 +607,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     try {
       await this._methodCall();
       // After the connection: a refresh in flight is confirmed on it, and the call goes out under that identity.
-      await this._waitAuthRefresh();
+      await this._refreshSlot.settled();
     } finally {
       if (counted) {
         this._rpc.release();
@@ -1761,18 +1747,20 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     return req;
   }
 
-  private _methodCall(): any {
+  // Resolves once connected. Rejects with a timeout after the given milliseconds, or never
+  // times out when timeout is null: then it rejects only when the client is disconnected for good.
+  private _methodCall(timeout: number | null = this._config.timeout): any {
     if (this._isConnected()) {
       return Promise.resolve();
     }
     return new Promise((res, rej) => {
       const id = this._nextPromiseId();
-      const timeout = setTimeout(() => {
+      const timer = timeout === null ? null : setTimeout(() => {
         delete this._promises[id];
         rej({ code: errorCodes.timeout, message: 'timeout' });
-      }, this._config.timeout);
+      }, timeout);
       this._promises[id] = {
-        timeout: timeout,
+        timeout: timer,
         resolve: res,
         reject: rej
       };
@@ -2264,42 +2252,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     return { user: this._user, authClass: this._authClass, ttl: result.ttl ?? 0 };
   }
 
-  // Resolves once the client is connected. Unlike _methodCall there is no timeout: a refresh
-  // waiting for a reconnect is sent on that connect, however long it takes. Rejects when the
-  // client is disconnected for good.
-  private _waitConnected(): Promise<void> {
-    if (this._isConnected()) {
-      return Promise.resolve();
-    }
-    return new Promise<void>((resolve, reject) => {
-      this._promises[this._nextPromiseId()] = { timeout: null, resolve: resolve, reject: reject };
-    });
-  }
-
-  // Resolves with the release of the refresh slot once the client is connected and no other
-  // refresh command is in flight. The slot is held until the release is called. Rejects when the
-  // client is disconnected for good.
-  private async _claimRefreshSlot(): Promise<() => void> {
-    while (this._refreshInFlight !== null || !this._isConnected()) {
-      if (this._refreshInFlight !== null) {
-        await this._refreshInFlight;
-      } else {
-        await this._waitConnected();
-      }
-    }
-    let release: () => void = (): void => {};
-    const slot: Promise<void> = new Promise<void>((resolve: () => void): void => {
-      release = resolve;
-    });
-    this._refreshInFlight = slot;
-    return (): void => {
-      if (this._refreshInFlight === slot) {
-        this._refreshInFlight = null;
-      }
-      release();
-    };
-  }
-
   // Sends a refresh command, one at a time with the other refresh commands (the explicit and the
   // timer-driven ones), once connected. Resolves with the reply context. Rejects with the
   // rejection context of the command, or with the error alone when the client is disconnected for
@@ -2307,7 +2259,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private async _sendRefreshCommand(token: string): Promise<CallResolveContext> {
     let release: () => void;
     try {
-      release = await this._claimRefreshSlot();
+      release = await this._refreshSlot.claim();
     } catch (error) {
       throw { error: error };
     }
@@ -2316,22 +2268,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     } finally {
       release();
     }
-  }
-
-  // A call made during a refresh goes out under the identity the refresh confirms. A failed
-  // refresh is reported to its caller, the call goes out under the identity the connection kept.
-  // A refresh command in flight, timer-driven ones included, is waited for too.
-  private async _waitAuthRefresh(): Promise<void> {
-    const pending: Promise<unknown> | null = this._authRefresh ?? this._refreshInFlight;
-    if (pending === null) {
-      return;
-    }
-    try {
-      await pending;
-    } catch {
-      // Reported by refresh() to its caller.
-    }
-    await this._waitAuthRefresh();
   }
 
   private _refreshResponse(result: any) {

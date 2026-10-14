@@ -3,6 +3,7 @@ import { FakeCentrifugoServer, holdReply } from './fakeServer';
 import { errorCodes } from './codes';
 import { AuthContext, Options, State } from './types';
 import { CodecCase, codecCases } from './test_codecs';
+import { maxRefreshCalls } from './refresh_slot';
 
 // The identity of a connection: the user and auth class of the connect and refresh replies,
 // the 'auth' event and the refresh() call. Every case runs over both codecs (see test_codecs.ts).
@@ -434,6 +435,22 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase) => 
     await reconnected;
 
     expect(connectCommands()[1].connect.token).toBe('timer-token');
+  });
+
+  test('refresh calls waiting for a connection are bounded by maxRefreshCalls', async () => {
+    const c: Centrifuge = create();
+    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? { id: cmd.id, refresh: {} } : undefined);
+    const pending: Promise<AuthContext>[] = [];
+    for (let i: number = 0; i < maxRefreshCalls; i++) {
+      pending.push(c.refresh(`token-${i}`));
+    }
+    await expect(c.refresh('one-too-many')).rejects.toMatchObject({ code: errorCodes.limitExceeded });
+
+    await connect(c);
+    await Promise.all(pending);
+
+    const tokens: string[] = Array.from({ length: maxRefreshCalls }, (_: unknown, i: number): string => `token-${i}`);
+    expect(refreshCommands().map((cmd: any): string => cmd.refresh.token)).toEqual(tokens);
   });
 
   for (const code of [103, 109]) {
