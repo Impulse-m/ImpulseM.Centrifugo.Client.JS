@@ -2,7 +2,7 @@ import { Centrifuge } from './centrifuge';
 import { Centrifuge as ProtobufCentrifuge } from './protobuf';
 import { FakeCentrifugoServer, FakeCodec, holdReply } from './fakeServer';
 import { errorCodes } from './codes';
-import { Options, State, TransportName } from './types';
+import { Options, RpcResult, State, TransportName } from './types';
 import WebSocket from 'ws';
 
 // Tracked RPC calls: message ids, the retransmit of calls that lost their transport, the queue
@@ -73,7 +73,7 @@ function isCancel(cmd: any): boolean {
 
 // Keeps a rejection of a call that a test does not await from failing the run.
 function quiet<T>(promise: Promise<T>): Promise<T> {
-  promise.catch(() => {});
+  promise.catch((): void => {});
   return promise;
 }
 
@@ -81,12 +81,12 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
   let server: FakeCentrifugoServer;
   const clients: Centrifuge[] = [];
 
-  beforeEach(async () => {
+  beforeEach(async (): Promise<void> => {
     server = await FakeCentrifugoServer.start(codecCase.serverCodec);
     server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25, flag: rpcOptionsWireFlag };
   });
 
-  afterEach(async () => {
+  afterEach(async (): Promise<void> => {
     for (const c of clients) {
       c.disconnect();
     }
@@ -95,13 +95,15 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
   });
 
   function create(options?: Partial<Options>): Centrifuge {
-    const c = codecCase.createClient(server.url, options);
+    const c: Centrifuge = codecCase.createClient(server.url, options);
     clients.push(c);
     return c;
   }
 
   async function connect(c: Centrifuge): Promise<void> {
-    const connected = new Promise<void>(resolve => c.once('connected', () => resolve()));
+    const connected: Promise<void> = new Promise<void>((resolve: () => void): void => {
+      c.once('connected', (): void => resolve());
+    });
     c.connect();
     await connected;
     expect(c.state).toBe(State.Connected);
@@ -113,14 +115,14 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
 
   // Holds the replies of the calls, retransmits included, until the test sends them.
   function holdCalls(): void {
-    server.onCommand = (cmd: any) => (isCall(cmd) ? holdReply : undefined);
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? holdReply : undefined);
   }
 
-  test('a call that loses its transport runs once and completes with the same reply', async () => {
-    const c = create();
+  test('a call that loses its transport runs once and completes with the same reply', async (): Promise<void> => {
+    const c: Centrifuge = create();
     await connect(c);
     const executed: number[] = [];
-    server.onCommand = (cmd: any) => {
+    server.onCommand = (cmd: any): any => {
       if (!isCall(cmd)) {
         return undefined;
       }
@@ -132,11 +134,11 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       return holdReply;
     };
 
-    const call = c.rpc('work', codecCase.encode({ n: 1 }));
-    const first = await server.waitFor(isCall);
+    const call: Promise<RpcResult> = c.rpc('work', codecCase.encode({ n: 1 }));
+    const first: any = await server.waitFor(isCall);
     server.closeConnection();
-    const resent = await server.waitFor(isRetransmit);
-    const result = await call;
+    const resent: any = await server.waitFor(isRetransmit);
+    const result: RpcResult = await call;
 
     expect(codecCase.decode(result.data)).toEqual({ answer: 42 });
     expect(result.cached).toBe(true);
@@ -146,53 +148,54 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(c.state).toBe(State.Connected);
   });
 
-  test('a reply that is not cached has cached false', async () => {
-    const c = create();
+  test('a reply that is not cached has cached false', async (): Promise<void> => {
+    const c: Centrifuge = create();
     await connect(c);
-    server.onCommand = (cmd: any) => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
-    const result = await c.rpc('echo', codecCase.encode({}));
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
+    const result: RpcResult = await c.rpc('echo', codecCase.encode({}));
     expect(result.cached).toBe(false);
   });
 
-  test('calls waiting on a lost transport are sent again in message id order', async () => {
-    const c = create();
+  test('calls waiting on a lost transport are sent again in message id order', async (): Promise<void> => {
+    const c: Centrifuge = create();
     await connect(c);
     holdCalls();
-    const calls = [
+    const calls: Promise<RpcResult>[] = [
       quiet(c.rpc('a', codecCase.encode(1))),
       quiet(c.rpc('b', codecCase.encode(2))),
       quiet(c.rpc('c', codecCase.encode(3))),
     ];
-    await server.waitFor(cmd => isCall(cmd) && cmd.rpc.method === 'c');
-    const originalIds: number[] = callCommands().map(cmd => cmd.rpc.msg_id);
+    await server.waitFor((cmd: any): boolean => isCall(cmd) && cmd.rpc.method === 'c');
+    const originalIds: number[] = callCommands().map((cmd: any): number => cmd.rpc.msg_id);
 
     server.closeConnection();
-    await server.waitFor(cmd => isRetransmit(cmd) && cmd.rpc.method === 'c');
-    const resent = server.received.filter(isRetransmit);
+    await server.waitFor((cmd: any): boolean => isRetransmit(cmd) && cmd.rpc.method === 'c');
+    const resent: any[] = server.received.filter(isRetransmit);
 
-    expect(resent.map(cmd => cmd.rpc.msg_id)).toEqual(originalIds);
-    expect(resent.map(cmd => cmd.rpc.method)).toEqual(['a', 'b', 'c']);
-    expect(originalIds).toEqual([...originalIds].sort((x, y) => x - y));
+    expect(resent.map((cmd: any): number => cmd.rpc.msg_id)).toEqual(originalIds);
+    expect(resent.map((cmd: any): string => cmd.rpc.method)).toEqual(['a', 'b', 'c']);
+    expect(originalIds).toEqual([...originalIds].sort((x: number, y: number): number => x - y));
 
     for (const cmd of resent) {
       server.send({ id: cmd.id, rpc: { data: codecCase.encode({ method: cmd.rpc.method }) } });
     }
-    const results = await Promise.all(calls);
-    expect(results.map(r => codecCase.decode(r.data))).toEqual([{ method: 'a' }, { method: 'b' }, { method: 'c' }]);
+    const results: RpcResult[] = await Promise.all(calls);
+    expect(results.map((r: RpcResult): any => codecCase.decode(r.data)))
+      .toEqual([{ method: 'a' }, { method: 'b' }, { method: 'c' }]);
   });
 
-  test('a call beyond maxPendingRpc rejects with limitExceeded', async () => {
-    const c = create({ maxPendingRpc: 2 });
+  test('a call beyond maxPendingRpc rejects with limitExceeded', async (): Promise<void> => {
+    const c: Centrifuge = create({ maxPendingRpc: 2 });
     await connect(c);
-    server.onCommand = (cmd: any) => {
+    server.onCommand = (cmd: any): any => {
       if (!isCall(cmd)) {
         return undefined;
       }
       return cmd.rpc.method.startsWith('hold') ? holdReply : { id: cmd.id, rpc: { data: codecCase.encode({}) } };
     };
-    const first = quiet(c.rpc('hold', codecCase.encode(1)));
+    const first: Promise<RpcResult> = quiet(c.rpc('hold', codecCase.encode(1)));
     quiet(c.rpc('hold2', codecCase.encode(2)));
-    await server.waitFor(cmd => isCall(cmd) && cmd.rpc.method === 'hold2');
+    await server.waitFor((cmd: any): boolean => isCall(cmd) && cmd.rpc.method === 'hold2');
 
     await expect(c.rpc('hold', codecCase.encode(3))).rejects.toMatchObject({ code: errorCodes.limitExceeded });
     expect(callCommands()).toHaveLength(2);
@@ -203,28 +206,28 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     await expect(c.rpc('echo', codecCase.encode(4))).resolves.toMatchObject({ cached: false });
   });
 
-  test('the ids of the replies received are sent with the next request', async () => {
-    const c = create();
+  test('the ids of the replies received are sent with the next request', async (): Promise<void> => {
+    const c: Centrifuge = create();
     await connect(c);
-    server.onCommand = (cmd: any) => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
 
     await c.rpc('echo', codecCase.encode(1));
     const firstId: number = callCommands()[0].rpc.msg_id;
     await c.rpc('echo', codecCase.encode(2));
     await c.rpc('echo', codecCase.encode(3));
 
-    const calls = callCommands();
+    const calls: any[] = callCommands();
     expect(calls[0].rpc.ack).toBeUndefined();
     expect(calls[1].rpc.ack).toEqual([firstId]);
     // Each id is sent once.
     expect(calls[2].rpc.ack).toEqual([calls[1].rpc.msg_id]);
   });
 
-  test('a call whose deadline passes while its transport is down rejects with timeout', async () => {
-    const c = create({ timeout: 300 });
+  test('a call whose deadline passes while its transport is down rejects with timeout', async (): Promise<void> => {
+    const c: Centrifuge = create({ timeout: 300 });
     await connect(c);
     holdCalls();
-    const call = quiet(c.rpc('slow', codecCase.encode({})));
+    const call: Promise<RpcResult> = quiet(c.rpc('slow', codecCase.encode({})));
     await server.waitFor(isCall);
 
     server.closeConnection();
@@ -234,11 +237,11 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(c.state).not.toBe(State.Connected);
   });
 
-  test('a retransmitted call keeps its original deadline', async () => {
-    const c = create({ timeout: 300 });
+  test('a retransmitted call keeps its original deadline', async (): Promise<void> => {
+    const c: Centrifuge = create({ timeout: 300 });
     await connect(c);
     holdCalls();
-    const call = quiet(c.rpc('slow', codecCase.encode({})));
+    const call: Promise<RpcResult> = quiet(c.rpc('slow', codecCase.encode({})));
     await server.waitFor(isCall);
 
     server.closeConnection();
@@ -248,10 +251,10 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     await expect(call).rejects.toMatchObject({ code: errorCodes.timeout });
   });
 
-  test('a call aborted before it is sent rejects with cancelled and sends nothing', async () => {
-    const c = create();
+  test('a call aborted before it is sent rejects with cancelled and sends nothing', async (): Promise<void> => {
+    const c: Centrifuge = create();
     await connect(c);
-    const controller = new AbortController();
+    const controller: AbortController = new AbortController();
     controller.abort();
 
     await expect(c.rpc('x', codecCase.encode({}), { signal: controller.signal }))
@@ -259,74 +262,77 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(callCommands()).toHaveLength(0);
   });
 
-  test('a call aborted after it is sent sends a cancel and rejects with cancelled', async () => {
-    const c = create();
+  test('a call aborted after it is sent sends a cancel and rejects with cancelled', async (): Promise<void> => {
+    const c: Centrifuge = create();
     await connect(c);
     holdCalls();
-    const controller = new AbortController();
-    const call = c.rpc('x', codecCase.encode({}), { signal: controller.signal });
-    const sent = await server.waitFor(isCall);
+    const controller: AbortController = new AbortController();
+    const call: Promise<RpcResult> = c.rpc('x', codecCase.encode({}), { signal: controller.signal });
+    const sent: any = await server.waitFor(isCall);
 
     controller.abort();
     await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
 
-    const cancel = await server.waitFor(isCancel);
+    const cancel: any = await server.waitFor(isCancel);
     expect(cancel.rpc.cancel).toBe(sent.rpc.msg_id);
     expect(cancel.rpc.method).toBeUndefined();
   });
 
-  test('the reply of an aborted call still reaches the server as an ack', async () => {
-    const c = create();
+  test('the reply of an aborted call still reaches the server as an ack', async (): Promise<void> => {
+    const c: Centrifuge = create();
     await connect(c);
     holdCalls();
-    const controller = new AbortController();
-    const call = c.rpc('x', codecCase.encode({}), { signal: controller.signal });
-    const sent = await server.waitFor(isCall);
+    const controller: AbortController = new AbortController();
+    const call: Promise<RpcResult> = c.rpc('x', codecCase.encode({}), { signal: controller.signal });
+    const sent: any = await server.waitFor(isCall);
     controller.abort();
     await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
 
     server.send({ id: sent.id, error: { code: 3001, message: 'cancelled' } });
-    server.onCommand = (cmd: any) => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
     // The late reply is handled before the reply of the next call, so the call after it carries
     // the acknowledgement.
     await c.rpc('echo', codecCase.encode(1));
     await c.rpc('echo', codecCase.encode(2));
 
     // The first echo was sent before the late reply arrived, its own reply is acknowledged too.
-    const echoes = callCommands().filter(cmd => cmd.rpc.method === 'echo');
+    const echoes: any[] = callCommands().filter((cmd: any): boolean => cmd.rpc.method === 'echo');
     expect(echoes[1].rpc.ack).toEqual([sent.rpc.msg_id, echoes[0].rpc.msg_id]);
   });
 
-  test('a call aborted while its transport is down sends the cancel with the next connection', async () => {
-    const c = create({ minReconnectDelay: 200, maxReconnectDelay: 200 });
+  test('a call aborted while its transport is down sends the cancel with the next connection', async (): Promise<void> => {
+    const c: Centrifuge = create({ minReconnectDelay: 200, maxReconnectDelay: 200 });
     await connect(c);
     holdCalls();
-    const controller = new AbortController();
-    const call = c.rpc('x', codecCase.encode({}), { signal: controller.signal });
-    const sent = await server.waitFor(isCall);
+    const controller: AbortController = new AbortController();
+    const call: Promise<RpcResult> = c.rpc('x', codecCase.encode({}), { signal: controller.signal });
+    const sent: any = await server.waitFor(isCall);
 
-    const connecting = new Promise<void>(resolve => c.once('connecting', () => resolve()));
+    const connecting: Promise<void> = new Promise<void>((resolve: () => void): void => {
+      c.once('connecting', (): void => resolve());
+    });
     server.closeConnection();
     await connecting;
     controller.abort();
     await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
 
-    const cancel = await server.waitFor(isCancel);
+    const cancel: any = await server.waitFor(isCancel);
     expect(cancel.rpc.cancel).toBe(sent.rpc.msg_id);
-    expect(server.received.some(cmd => isRetransmit(cmd) && cmd.rpc.msg_id === sent.rpc.msg_id)).toBe(false);
+    expect(server.received.some((cmd: any): boolean => isRetransmit(cmd) && cmd.rpc.msg_id === sent.rpc.msg_id))
+      .toBe(false);
   });
 
-  test('message ids are strictly increasing and fit 53 bits', async () => {
-    const c = create();
+  test('message ids are strictly increasing and fit 53 bits', async (): Promise<void> => {
+    const c: Centrifuge = create();
     await connect(c);
-    server.onCommand = (cmd: any) => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
-    for (let i = 0; i < 5; i++) {
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
+    for (let i: number = 0; i < 5; i++) {
       await c.rpc('echo', codecCase.encode(i));
     }
 
-    const ids: number[] = callCommands().map(cmd => cmd.rpc.msg_id);
+    const ids: number[] = callCommands().map((cmd: any): number => cmd.rpc.msg_id);
     expect(ids).toHaveLength(5);
-    for (let i = 0; i < ids.length; i++) {
+    for (let i: number = 0; i < ids.length; i++) {
       expect(Number.isSafeInteger(ids[i])).toBe(true);
       expect(ids[i]).toBeLessThanOrEqual(Number.MAX_SAFE_INTEGER);
       if (i > 0) {
@@ -338,11 +344,11 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(Math.abs(seconds - Date.now() / 1000)).toBeLessThan(60);
   });
 
-  test('the message id time part follows the server time of the replies', async () => {
-    const c = create();
+  test('the message id time part follows the server time of the replies', async (): Promise<void> => {
+    const c: Centrifuge = create();
     await connect(c);
     const serverTimeMs: number = Date.now() + 3600 * 1000;
-    server.onCommand = (cmd: any) => (isCall(cmd)
+    server.onCommand = (cmd: any): any => (isCall(cmd)
       ? { id: cmd.id, rpc: { data: codecCase.encode({}) }, time: serverTimeMs }
       : undefined);
     await c.rpc('echo', codecCase.encode({}));
@@ -353,10 +359,10 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(Math.abs(seconds - serverTimeMs / 1000)).toBeLessThan(60);
   });
 
-  test('a reply error is surfaced unchanged and the call is not sent again', async () => {
-    const c = create();
+  test('a reply error is surfaced unchanged and the call is not sent again', async (): Promise<void> => {
+    const c: Centrifuge = create();
     await connect(c);
-    server.onCommand = (cmd: any) => (isCall(cmd)
+    server.onCommand = (cmd: any): any => (isCall(cmd)
       ? { id: cmd.id, error: { code: 3001, message: 'msg_id_reused', temporary: false } }
       : undefined);
 
@@ -367,13 +373,13 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(callCommands()).toHaveLength(1);
   });
 
-  test('calls over a legacy connection are plain and fail on a lost transport as before', async () => {
+  test('calls over a legacy connection are plain and fail on a lost transport as before', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25 };
-    const c = create();
+    const c: Centrifuge = create();
     await connect(c);
     holdCalls();
-    const call = quiet(c.rpc('x', codecCase.encode({})));
-    const sent = await server.waitFor(isCall);
+    const call: Promise<RpcResult> = quiet(c.rpc('x', codecCase.encode({})));
+    const sent: any = await server.waitFor(isCall);
 
     expect(sent.rpc.msg_id).toBeUndefined();
     server.closeConnection();
@@ -381,33 +387,33 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(server.received.some(isRetransmit)).toBe(false);
   });
 
-  test('a signal on a legacy connection rejects with unsupported without sending the call', async () => {
+  test('a signal on a legacy connection rejects with unsupported without sending the call', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25 };
-    const c = create();
+    const c: Centrifuge = create();
     await connect(c);
-    const controller = new AbortController();
+    const controller: AbortController = new AbortController();
 
     await expect(c.rpc('x', codecCase.encode({}), { signal: controller.signal }))
       .rejects.toMatchObject({ code: errorCodes.unsupported });
     expect(callCommands()).toHaveLength(0);
   });
 
-  test('the instance is sent with the connect command when it is set', async () => {
+  test('the instance is sent with the connect command when it is set', async (): Promise<void> => {
     const instance: string = 'AbCdEfGhIjKlMnOpQrStUv';
-    const c = create({ instance: instance });
+    const c: Centrifuge = create({ instance: instance });
     await connect(c);
-    const connectCmd = server.received.find(cmd => cmd.connect !== undefined);
+    const connectCmd: any = server.received.find((cmd: any): boolean => cmd.connect !== undefined);
     expect(connectCmd.connect.instance).toBe(instance);
   });
 
-  test('no instance is sent when none is set', async () => {
-    const c = create();
+  test('no instance is sent when none is set', async (): Promise<void> => {
+    const c: Centrifuge = create();
     await connect(c);
-    const connectCmd = server.received.find(cmd => cmd.connect !== undefined);
+    const connectCmd: any = server.received.find((cmd: any): boolean => cmd.connect !== undefined);
     expect(connectCmd.connect.instance).toBeUndefined();
   });
 
-  test('an instance that does not match the pattern throws a configuration error', () => {
+  test('an instance that does not match the pattern throws a configuration error', (): void => {
     const invalid: string[] = [
       'short',
       'a'.repeat(21),
@@ -426,7 +432,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     }
   });
 
-  test('a maxPendingRpc below 1 throws a configuration error', () => {
+  test('a maxPendingRpc below 1 throws a configuration error', (): void => {
     let thrown: any = null;
     try {
       codecCase.createClient(server.url, { maxPendingRpc: 0 });
