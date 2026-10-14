@@ -355,4 +355,48 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase) => 
 
     expect(refreshCommands()[1].refresh.token).toBe('timer-token');
   });
+
+  test('a timer refresh and an explicit refresh never have two refresh commands in flight', async () => {
+    const inFlight: number[] = [];
+    let overlapped: boolean = false;
+    let timerRequested: () => void = () => undefined;
+    const timerRequest = new Promise<void>(resolve => {
+      timerRequested = resolve;
+    });
+    server.connectResult = { client: 'fake-client', version: '0.0.0', expires: true, ttl: 1 };
+    server.onCommand = (cmd: any) => {
+      if (cmd.refresh === undefined) {
+        return undefined;
+      }
+      if (inFlight.length > 0) {
+        overlapped = true;
+      }
+      inFlight.push(cmd.id);
+      return holdReply;
+    };
+    const c = create({
+      token: 'initial-token',
+      getToken: async () => {
+        timerRequested();
+        return 'timer-token';
+      },
+    });
+    await connect(c);
+
+    const explicit = c.refresh('explicit-token');
+    // The timer fires on the ttl of the connect reply, while the explicit refresh is still in flight.
+    await timerRequest;
+    const explicitCommand = await server.waitFor(cmd => cmd.refresh !== undefined && cmd.refresh.token === 'explicit-token');
+    // The timer refresh waits for the explicit one: it is sent only after that reply.
+    server.send({ id: explicitCommand.id, refresh: { expires: true, ttl: 60 } });
+    inFlight.shift();
+    await explicit;
+
+    const timerCommand = await server.waitFor(cmd => cmd.refresh !== undefined && cmd.refresh.token === 'timer-token');
+    server.send({ id: timerCommand.id, refresh: {} });
+    inFlight.shift();
+
+    expect(overlapped).toBe(false);
+    expect(refreshCommands().map(cmd => cmd.refresh.token)).toEqual(['explicit-token', 'timer-token']);
+  });
 });

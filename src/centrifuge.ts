@@ -177,6 +177,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   // shares its promise.
   private _authRefresh: Promise<AuthContext> | null = null;
   private _authRefreshToken?: string;
+  // The refresh command in flight, of any kind: the next one waits for it to settle.
+  private _refreshInFlight: Promise<void> | null = null;
   // The rpc calls tracked for retransmit, and the generator of their message ids.
   private _rpcQueue: RpcQueue = new RpcQueue();
   private _msgIds: MsgIdGenerator = new MsgIdGenerator();
@@ -592,10 +594,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   async rpc(method: string, data: any, opts?: RpcOptions): Promise<RpcResult> {
     const headers = opts?.headers;
     const signal = opts?.signal;
-    if (this._authRefresh !== null) {
-      await this._waitAuthRefresh();
-    }
     await this._methodCall();
+    // After the connection: a refresh in flight is confirmed on it, and the call goes out under that identity.
+    await this._waitAuthRefresh();
     // Checked once connected: the capability belongs to the connection the call goes out on.
     if (!this._rpcOptionsSupported) {
       if (hasHeaders(headers)) {
@@ -2319,11 +2320,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         return;
       }
 
-      const cmd = {
-        refresh: { token: self._token }
-      };
-
-      self._call(cmd, false).then(resolveCtx => {
+      self._sendRefreshCommand(self._token).then(resolveCtx => {
         try {
           self._refreshResponse(resolveCtx.reply.refresh);
         } catch (err) {
@@ -2404,16 +2401,22 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       // The connect that comes next carries the token, and the refresh confirms it on that connection.
       this._token = newToken;
     }
-    let result: any;
+    let ctx: CallResolveContext;
     try {
-      await this._waitConnected();
-      result = await this._callPromise({ refresh: { token: newToken } }, (reply: any) => reply.refresh);
-    } catch (err) {
+      ctx = await this._sendRefreshCommand(newToken);
+    } catch (rejectCtx: any) {
+      if (rejectCtx.next !== undefined) {
+        rejectCtx.next();
+      }
       // Refused or not sent: the reconnects keep the token the server accepted before.
       if (this._token === newToken) {
         this._token = previousToken;
       }
-      throw err;
+      throw rejectCtx.error;
+    }
+    const result: any = ctx.reply.refresh;
+    if (ctx.next !== undefined) {
+      ctx.next();
     }
     this._token = newToken;
     this._debug('connection token refreshed');
@@ -2433,17 +2436,62 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     });
   }
 
+  // Resolves with the release of the refresh slot once the client is connected and no other
+  // refresh command is in flight. The slot is held until the release is called. Rejects when the
+  // client is disconnected for good.
+  private async _claimRefreshSlot(): Promise<() => void> {
+    while (this._refreshInFlight !== null || !this._isConnected()) {
+      if (this._refreshInFlight !== null) {
+        await this._refreshInFlight;
+      } else {
+        await this._waitConnected();
+      }
+    }
+    let release: () => void = (): void => {};
+    const slot: Promise<void> = new Promise<void>((resolve: () => void): void => {
+      release = resolve;
+    });
+    this._refreshInFlight = slot;
+    return (): void => {
+      if (this._refreshInFlight === slot) {
+        this._refreshInFlight = null;
+      }
+      release();
+    };
+  }
+
+  // Sends a refresh command, one at a time with the other refresh commands (the explicit and the
+  // timer-driven ones), once connected. Resolves with the reply context. Rejects with the
+  // rejection context of the command, or with the error alone when the client is disconnected for
+  // good before the command could go out.
+  private async _sendRefreshCommand(token: string): Promise<CallResolveContext> {
+    let release: () => void;
+    try {
+      release = await this._claimRefreshSlot();
+    } catch (error) {
+      throw { error: error };
+    }
+    try {
+      return await this._call({ refresh: { token: token } }, false);
+    } finally {
+      release();
+    }
+  }
+
   // A call made during a refresh goes out under the identity the refresh confirms. A failed
   // refresh is reported to its caller, the call goes out under the identity the connection kept.
+  // A refresh-command in flight, timer-driven ones included, counts too.
   private async _waitAuthRefresh(): Promise<void> {
-    if (this._authRefresh === null) {
+    const pending: Promise<unknown> | null = this._authRefresh ?? this._refreshInFlight;
+    if (pending === null) {
       return;
     }
     try {
-      await this._authRefresh;
+      await pending;
     } catch {
       // Reported by refresh() to its caller.
     }
+    await this._waitAuthRefresh();
   }
 
   private _refreshResponse(result: any) {
