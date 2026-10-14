@@ -114,8 +114,8 @@ interface serverSubscription {
   subscribed?: boolean;
 }
 
-type CallResolveContext = { reply: any; next?: () => void };
-type CallRejectContext = { error: any; next?: () => void };
+export type CallResolveContext = { reply: any; next?: () => void };
+export type CallRejectContext = { error: any; next?: () => void };
 
 export class UnauthorizedError extends Error {
   constructor(message: any) {

@@ -1,27 +1,14 @@
 import { errorCodes } from './codes';
 import { hasHeaders } from './extensions';
 import { MsgIdGenerator, RpcQueue, TrackedRpc } from './rpc_queue';
+import type { CallRejectContext, CallResolveContext } from './centrifuge';
 import { RpcResult } from './types';
-
-
-/** A reply of the server. Its next() continues the dispatch of the replies. */
-export interface RpcReplyContext {
-  reply: any;
-  next?: () => void;
-}
-
-
-/** A failed command: an error reply of the server, or a failure of the client. */
-export interface RpcFailureContext {
-  error: any;
-  next?: () => void;
-}
 
 
 /** The callbacks of a command waiting for its reply, as the client keeps them by command id. */
 export interface RpcCallbacks {
-  callback: (ctx: RpcReplyContext) => void;
-  errback: (ctx: RpcFailureContext) => void;
+  callback: (ctx: CallResolveContext) => void;
+  errback: (ctx: CallRejectContext) => void;
   // Called instead of errback when the connection is lost before the reply.
   lost?: () => void;
   timeout: ReturnType<typeof setTimeout> | null;
@@ -163,8 +150,8 @@ export class RpcTracker {
     call.commandId = id;
     const acks: number[] = this.takeAcks(rpc);
     this.host.setCallbacks(id, {
-      callback: (ctx: RpcReplyContext): void => this.replied(call, ctx),
-      errback: (ctx: RpcFailureContext): void => this.failed(call, ctx),
+      callback: (ctx: CallResolveContext): void => this.replied(call, ctx),
+      errback: (ctx: CallRejectContext): void => this.failed(call, ctx),
       lost: (): void => this.lost(call, acks),
       timeout: null,
     });
@@ -197,8 +184,8 @@ export class RpcTracker {
     const rpc: any = { cancel: msgId };
     const acks: number[] = this.takeAcks(rpc);
     this.host.setCallbacks(id, {
-      callback: (ctx: RpcReplyContext): void => ctx.next?.(),
-      errback: (ctx: RpcFailureContext): void => ctx.next?.(),
+      callback: (ctx: CallResolveContext): void => ctx.next?.(),
+      errback: (ctx: CallRejectContext): void => ctx.next?.(),
       lost: (): void => {
         this.cancels.push(msgId);
         this.restoreAcks(acks);
@@ -219,7 +206,7 @@ export class RpcTracker {
 
   // A reply of the server: it settles the call, or only acknowledges it when the call settled
   // before (aborted or expired).
-  private replied(call: TrackedRpc, ctx: RpcReplyContext): void {
+  private replied(call: TrackedRpc, ctx: CallResolveContext): void {
     this.answered(call, ctx, (): void => {
       const result: any = ctx.reply.rpc || {};
       call.resolve({
@@ -232,7 +219,7 @@ export class RpcTracker {
 
   // An error reply of the server, surfaced unchanged. It is not retried: the server's codes for a
   // rejected message id are configurable, so there is no signal to retry on.
-  private failed(call: TrackedRpc, ctx: RpcFailureContext): void {
+  private failed(call: TrackedRpc, ctx: CallRejectContext): void {
     this.answered(call, ctx, (): void => call.reject(ctx.error));
   }
 
