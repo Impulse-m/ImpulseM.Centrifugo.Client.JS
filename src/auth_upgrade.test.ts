@@ -399,4 +399,59 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase) => 
     expect(overlapped).toBe(false);
     expect(refreshCommands().map(cmd => cmd.refresh.token)).toEqual(['explicit-token', 'timer-token']);
   });
+
+  test('the token of the next connect is the last accepted refresh, a timer refresh queued behind an explicit one included', async () => {
+    let timerTokenRequested: () => void = () => undefined;
+    const timerRequest = new Promise<void>(resolve => {
+      timerTokenRequested = resolve;
+    });
+    server.connectResult = { client: 'fake-client', version: '0.0.0', expires: true, ttl: 1 };
+    server.onCommand = (cmd: any) => {
+      if (cmd.refresh === undefined) {
+        return undefined;
+      }
+      return cmd.refresh.token === 'anon-token' ? holdReply : { id: cmd.id, refresh: {} };
+    };
+    const c: Centrifuge = create({
+      token: 'initial-token',
+      getToken: async () => {
+        timerTokenRequested();
+        return 'timer-token';
+      },
+    });
+    await connect(c);
+
+    const anon: Promise<AuthContext> = c.refresh('anon-token');
+    // The timer fires while the explicit refresh is in flight, and waits for it.
+    await timerRequest;
+    const anonCommand: any = await server.waitFor(cmd => cmd.refresh !== undefined && cmd.refresh.token === 'anon-token');
+    server.send({ id: anonCommand.id, refresh: {} });
+    await anon;
+    await server.waitFor(cmd => cmd.refresh !== undefined && cmd.refresh.token === 'timer-token');
+
+    const reconnected = new Promise<void>(resolve => c.once('connected', () => resolve()));
+    server.closeConnection();
+    await reconnected;
+
+    expect(connectCommands()[1].connect.token).toBe('timer-token');
+  });
+
+  for (const code of [103, 109]) {
+    test(`a timer refresh refused with ${code} keeps the connection and reports an error`, async () => {
+      server.connectResult = { client: 'fake-client', version: '0.0.0', expires: true, ttl: 1 };
+      server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? {
+        id: cmd.id,
+        error: { code: code, message: 'refused' },
+      } : undefined);
+      const c: Centrifuge = create({ getToken: async () => 'timer-token' });
+      const failed: Promise<any> = new Promise<any>(resolve => c.once('error', (ctx: any) => resolve(ctx)));
+      await connect(c);
+
+      const reported: any = await failed;
+
+      expect(reported).toMatchObject({ type: 'refresh', error: { code: code } });
+      expect(c.state).toBe(State.Connected);
+      expect(refreshCommands()).toHaveLength(1);
+    });
+  }
 });

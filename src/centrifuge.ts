@@ -25,6 +25,7 @@ import {
 
 import {
   rpcOptionsFlag, hasFlag, serverErrorFields, hasHeaders, serverTimeOffsetFrom, isValidInstance,
+  refreshErrorKeepsConnection,
 } from './extensions';
 
 import { RpcCallbacks, RpcTracker } from './rpc_tracker';
@@ -2156,14 +2157,17 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         self._failUnauthorized();
         return;
       }
-      self._token = token;
-      self._debug('connection token refreshed');
-
       if (!self._isConnected()) {
+        // The connect that comes next carries the token.
+        self._token = token;
+        self._debug('connection token refreshed');
         return;
       }
 
-      self._sendRefreshCommand(self._token).then(resolveCtx => {
+      self._sendRefreshCommand(token).then(resolveCtx => {
+        // Kept once the server accepted it, as refresh() keeps it: a refused token is not used by the reconnects.
+        self._token = token;
+        self._debug('connection token refreshed');
         try {
           self._refreshResponse(resolveCtx.reply.refresh);
         } catch (err) {
@@ -2218,6 +2222,12 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         error: err
       }, () => {
         this._refreshTimeout = setTimeout(() => this._refresh(), this._getRefreshRetryDelay());
+      });
+    } else if (refreshErrorKeepsConnection(err.code)) {
+      // Reported as refresh() reports it: the connection keeps its identity.
+      this.emit('error', {
+        type: 'refresh',
+        error: err
       });
     } else {
       this._disconnect(err.code, err.message, false);

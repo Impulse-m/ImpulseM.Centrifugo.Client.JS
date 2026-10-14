@@ -67,6 +67,17 @@ export function isValidInstance(instance: string): boolean {
 }
 
 /**
+ * Whether a server error of a refresh keeps the connection, on a timer-driven refresh as on an
+ * explicit one. 103 refuses a transition that would change the identity, and the connection keeps its
+ * identity. 109 means the token expired: the server ends the connection with the reconnect code
+ * (3005) when its expiry passes, so the client does not drop the connection itself.
+ * @internal
+ */
+export function refreshErrorKeepsConnection(code: number): boolean {
+  return code === 103 || code === 109;
+}
+
+/**
  * Whether an RPC options object asks for headers. An empty headers object sends nothing,
  * so it counts as no headers.
  * @internal
