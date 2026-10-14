@@ -121,7 +121,8 @@ export class RpcTracker {
   /**
    * Acts on a connection that confirmed the capability: sends the cancels and the calls waiting
    * for a connection, in message id order, each with its original deadline. Without the capability
-   * the waiting calls are rejected, as the connection cannot take them.
+   * the waiting calls are rejected with connectionClosed: they were written on a lost connection
+   * and may have run, so they are not sent again.
    */
   sendWaiting(): void {
     const cancels: number[] = this.cancels;
@@ -129,10 +130,7 @@ export class RpcTracker {
     if (!this.host.rpcOptionsSupported()) {
       for (const call of this.queue.waiting()) {
         this.settle(call);
-        call.reject(this.host.createError(
-          errorCodes.unsupported,
-          'rpc options are not supported by the server'
-        ));
+        call.reject(this.host.createError(errorCodes.connectionClosed, 'connection closed'));
       }
       return;
     }

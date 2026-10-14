@@ -392,6 +392,21 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(server.received.some(isRetransmit)).toBe(false);
   });
 
+  test('a call tracked on a supported connection rejects with connectionClosed when the next connection is legacy', async (): Promise<void> => {
+    const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    holdCalls();
+    const call: Promise<RpcResult> = quiet(c.rpc('x', codecCase.encode({})));
+    await server.waitFor(isCall);
+
+    server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25 };
+    server.closeConnection();
+
+    // The call may have run on the lost connection, so it is not reported as unsent (errorCodes.unsupported).
+    await expect(call).rejects.toMatchObject({ code: errorCodes.connectionClosed });
+    expect(server.received.some(isRetransmit)).toBe(false);
+  });
+
   test('a signal on a legacy connection rejects with unsupported without sending the call', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25 };
     const c: Centrifuge = create();
