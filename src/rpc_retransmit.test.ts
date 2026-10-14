@@ -593,6 +593,18 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(callCommands()).toHaveLength(0);
   });
 
+  test('an already aborted signal on a legacy connection rejects with unsupported, and nothing is sent', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25 };
+    const c: Centrifuge = create();
+    await connect(c);
+    const controller: AbortController = new AbortController();
+    controller.abort();
+
+    await expect(c.rpc('x', codecCase.encode({}), { signal: controller.signal }))
+      .rejects.toMatchObject({ code: errorCodes.unsupported });
+    expect(callCommands()).toHaveLength(0);
+  });
+
   test('the instance is sent with the connect command when it is set', async (): Promise<void> => {
     const instance: string = 'AbCdEfGhIjKlMnOpQrStUv';
     const c: Centrifuge = create({ instance: instance });

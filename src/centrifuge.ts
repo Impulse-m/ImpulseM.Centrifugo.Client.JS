@@ -593,6 +593,13 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     const headers = opts?.headers;
     const signal = opts?.signal;
     if (signal?.aborted) {
+      // A connection that cannot carry a call with a signal rejects it with unsupported, as below.
+      if (this._isConnected() && (!this._rpcOptionsSupported || !this._config.instance)) {
+        throw this._createErrorObject(
+          errorCodes.unsupported,
+          this._rpcOptionsSupported ? 'rpc cancel needs the instance option' : 'rpc cancel is not supported by the server'
+        );
+      }
       throw this._createErrorObject(errorCodes.cancelled, 'cancelled');
     }
     // The deadline of the call counts from now, across its wait and its attempts.
