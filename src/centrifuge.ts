@@ -1753,9 +1753,12 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   }
 
   // After the connection: a refresh in flight is confirmed on it, and the call goes out under that identity.
+  // A connection lost meanwhile ends the refresh too, so the wait starts again for the next connection.
   private async _callReady(deadline: number): Promise<void> {
-    await this._methodCall(Math.max(0, deadline - Date.now()));
-    await this._refreshSlot.settled();
+    do {
+      await this._methodCall(Math.max(0, deadline - Date.now()));
+      await this._refreshSlot.settled();
+    } while (!this._isConnected());
   }
 
   // Resolves once connected. Rejects with a timeout after the given milliseconds, or never

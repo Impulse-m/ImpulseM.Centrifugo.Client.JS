@@ -174,6 +174,31 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       .toEqual([{ method: 'a' }, { method: 'b' }, { method: 'c' }]);
   });
 
+  test('a call made during a refresh that the connection loss ends is sent on the next connection', async (): Promise<void> => {
+    const c: Centrifuge = create({ timeout: 2000, minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? holdReply : undefined);
+    const refreshing: Promise<unknown> = quiet(c.refresh('next-token'));
+    await server.waitFor((cmd: any): boolean => cmd.refresh !== undefined);
+
+    // The call waits for the refresh in flight, which the connection loss ends.
+    const call: Promise<RpcResult> = c.rpc('x', codecCase.encode({}));
+    server.onCommand = (cmd: any): any => {
+      if (isCall(cmd)) {
+        return { id: cmd.id, rpc: { data: codecCase.encode({ done: true }) } };
+      }
+      return cmd.refresh !== undefined ? holdReply : undefined;
+    };
+    server.closeConnection();
+
+    await expect(refreshing).rejects.toMatchObject({ code: errorCodes.connectionClosed });
+    const result: RpcResult = await call;
+    expect(codecCase.decode(result.data)).toEqual({ done: true });
+    // Sent once, with its message id, on the connection that followed.
+    expect(callCommands()).toHaveLength(1);
+    expect(callCommands()[0].rpc.msg_id).toBeDefined();
+  });
+
   test('a call beyond maxPendingRpc rejects with limitExceeded', async (): Promise<void> => {
     const c: Centrifuge = create({ maxPendingRpc: 2 });
     await connect(c);
