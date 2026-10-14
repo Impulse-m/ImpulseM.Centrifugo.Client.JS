@@ -67,91 +67,30 @@ export function isValidInstance(instance: string): boolean {
 }
 
 /**
- * Whether a server error of a refresh keeps the connection, on a timer-driven refresh as on an
- * explicit one. 103 refuses a transition that would change the identity, and the connection keeps its
- * identity. 109 means the token expired: the server ends the connection with the reconnect code
- * (3005) when its expiry passes, so the client does not drop the connection itself.
+ * Metadata key the server sets on its own rpc errors, to tell the client how to send the call again:
+ * 'new_msg_id' or 'later', see retrySignal. Error metadata of the server cannot carry this key itself.
  * @internal
  */
-export function refreshErrorKeepsConnection(code: number): boolean {
-  return code === 103 || code === 109;
-}
-
-/** A running call timer. clear() stops it, also while its grace period runs. */
-export interface CallTimer {
-  clear(): void;
-}
-
-// A call or no-ping timer running at least this late means the event loop didn't
-// run meanwhile: the process was suspended or blocked (see callTimer).
-export const lateCallTimer: number = 1000;
-// How long such a call still waits for its reply, or the connection for a ping,
-// before failing.
-export const lateCallGrace: number = 1000;
+export const rpcRetryMetadataKey: string = 'x-centrifugo-retry';
 
 /**
- * Runs onDue at the due time, local time in milliseconds. A timer running late by lateCallTimer or
- * more means the process was suspended or blocked, and the data waiting in the socket may not have
- * been processed yet: onDue then waits lateCallGrace more, so that data is processed first.
+ * Whether a server error of a timer-driven refresh is reported and retried with backoff and a fresh
+ * token: a client error (code below 100), a temporary error, and 109 (the token the getter returned was
+ * refused as expired). Any other error is not retried. An explicit refresh() is never retried.
  * @internal
  */
-export function callTimer(due: number, onDue: () => void): CallTimer {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  timer = setTimeout((): void => {
-    const late: boolean = Date.now() - due >= lateCallTimer;
-    timer = setTimeout((): void => {
-      timer = null;
-      onDue();
-    }, late ? lateCallGrace : 0);
-  }, Math.max(0, due - Date.now()));
-  return {
-    clear: (): void => {
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-    },
-  };
+export function refreshRetries(code: number, temporary: boolean): boolean {
+  return code < 100 || temporary || code === 109;
 }
 
 /**
- * Settles like the promise, unless the deadline passes first (the timeout error) or the signal
- * aborts first (the cancelled error). The timer and the abort listener are removed once it settled.
+ * Whether a server error of a timer-driven refresh keeps the connection, without a retry. 103 refuses
+ * the identity change of the token the getter returned, and the same token would be refused again: the
+ * connection keeps its identity, and the server ends it at its expiry.
  * @internal
  */
-export function raceCall<T>(
-  promise: Promise<T>,
-  deadline: number,
-  signal: AbortSignal | undefined,
-  timeoutError: () => any,
-  cancelledError: () => any
-): Promise<T> {
-  return new Promise<T>((resolve: (value: T) => void, reject: (error: any) => void): void => {
-    let timer: CallTimer | null = null;
-    const finish = (): void => {
-      if (timer !== null) {
-        timer.clear();
-        timer = null;
-      }
-      signal?.removeEventListener('abort', onAbort);
-    };
-    const onAbort = (): void => {
-      finish();
-      reject(cancelledError());
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
-    timer = callTimer(deadline, (): void => {
-      finish();
-      reject(timeoutError());
-    });
-    promise.then((value: T): void => {
-      finish();
-      resolve(value);
-    }, (error: any): void => {
-      finish();
-      reject(error);
-    });
-  });
+export function refreshKeepsConnection(code: number): boolean {
+  return code === 103;
 }
 
 /**

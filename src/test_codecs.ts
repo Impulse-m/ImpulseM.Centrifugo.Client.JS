@@ -37,6 +37,19 @@ export async function connectClient(c: Centrifuge): Promise<void> {
   await connected;
 }
 
+/**
+ * Lets the socket deliver what it has, until the condition holds. Timers are not advanced here: a test
+ * that runs on a fake clock moves it itself.
+ */
+export async function until(condition: () => boolean): Promise<void> {
+  for (let i: number = 0; i < 10000 && !condition(); i++) {
+    await new Promise<void>((resolve: () => void): void => {
+      setImmediate(resolve);
+    });
+  }
+  expect(condition()).toBe(true);
+}
+
 /** Disconnects the clients and empties the list. */
 export function disconnectAll(clients: Centrifuge[]): void {
   for (const c of clients) {
