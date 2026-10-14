@@ -1049,6 +1049,11 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     } catch (e) {
       this._debug('error writing commands', e);
       this._handleWriteError(commands);
+      // A tracked call that could not be written waits for a new connection, as on a lost transport:
+      // the transport is taken as lost, so the call is sent again on the reconnect.
+      if (commands.some((command: any): boolean => command.rpc?.msg_id !== undefined)) {
+        this._disconnect(connectingCodes.transportClosed, 'transport write error', true);
+      }
       return false;
     }
     return true;

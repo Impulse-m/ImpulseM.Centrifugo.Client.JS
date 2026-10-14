@@ -99,6 +99,30 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(c.state).toBe(State.Connected);
   });
 
+  test('a write error on an open transport sends the call again on the reconnect', async (): Promise<void> => {
+    const c: Centrifuge = create();
+    await connect(c);
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({ answer: 7 }) } } : undefined);
+    // The transport stays open, but its next write throws: the next write is the call.
+    const transport: any = (c as any)._transport;
+    const write: (...args: any[]) => void = transport.send.bind(transport);
+    let failNextWrite: boolean = true;
+    transport.send = (...args: any[]): void => {
+      if (failNextWrite) {
+        failNextWrite = false;
+        throw new Error('write failed');
+      }
+      write(...args);
+    };
+
+    const result: RpcResult = await c.rpc('echo', codecCase.encode({}));
+
+    expect(codecCase.decode(result.data)).toEqual({ answer: 7 });
+    expect(callCommands()).toHaveLength(1);
+    expect(callCommands()[0].rpc.retransmit).toBe(true);
+    expect(c.state).toBe(State.Connected);
+  });
+
   test('a reply that is not cached has cached false', async (): Promise<void> => {
     const c: Centrifuge = create();
     await connect(c);
