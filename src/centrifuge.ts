@@ -25,7 +25,7 @@ import {
 
 import {
   rpcOptionsFlag, hasFlag, serverErrorFields, hasHeaders, serverTimeOffsetFrom, rpcConfigError,
-  refreshErrorKeepsConnection, raceCall,
+  refreshErrorKeepsConnection, raceCall, callTimer, lateCallTimer, lateCallGrace,
 } from './extensions';
 
 import { RpcCallbacks, RpcTracker } from './rpc_tracker';
@@ -98,13 +98,6 @@ const defaults: Options = {
 }
 
 const websocketNotFound = 'WebSocket constructor not found, make sure it is available globally or passed as a dependency in Centrifuge options';
-
-// A call or no-ping timer running at least this late means the event loop didn't
-// run meanwhile: the process was suspended or blocked (see _registerCall).
-const lateCallTimer = 1000;
-// How long such a call still waits for its reply, or the connection for a ping,
-// before failing.
-const lateCallGrace = 1000;
 
 interface serverSubscription {
   offset: number;
@@ -967,7 +960,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     for (const id in this._callbacks) {
       if (this._callbacks.hasOwnProperty(id)) {
         const callbacks = this._callbacks[id];
-        clearTimeout(callbacks.timeout);
+        callbacks.timeout?.clear();
         if (callbacks.lost) {
           callbacks.lost();
           continue;
@@ -1015,7 +1008,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         continue;
       }
       const callbacks = this._callbacks[id];
-      clearTimeout(this._callbacks[id].timeout);
+      this._callbacks[id].timeout?.clear();
       delete this._callbacks[id];
       if (callbacks.lost) {
         callbacks.lost();
@@ -1257,7 +1250,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     this._connectTimeout = setTimeout(function () {
       // The transport may have opened already, its open callback not run yet, e.g.
       // when a suspended process resumes: let it run first, as for a call (see
-      // _registerCall). The open callback clears this timeout.
+      // callTimer). The open callback clears this timeout.
       const late = Date.now() - connectDue >= lateCallTimer;
       self._connectTimeout = setTimeout(function () {
         self._connectTimeout = null;
@@ -2612,7 +2605,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       }
       // A ping may have been received already but not processed yet, e.g. when a
       // suspended process resumes: let that data be processed first, as for a call
-      // (see _registerCall). Any data received re-arms this timer.
+      // (see callTimer). Any data received re-arms this timer.
       const late = Date.now() - due >= lateCallTimer;
       this._serverPingTimeout = setTimeout(() => {
         if (!this._isConnected()) {
@@ -2684,7 +2677,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       return;
     }
     const callbacks = this._callbacks[id];
-    clearTimeout(this._callbacks[id].timeout);
+    this._callbacks[id].timeout?.clear();
     delete this._callbacks[id];
 
     if (!errorExists(reply)) {
@@ -2942,22 +2935,13 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       errback: errback,
       timeout: null
     };
-    const due = Date.now() + this._config.timeout;
-    this._callbacks[id].timeout = setTimeout(() => {
-      // The reply may have been received already but not processed yet, e.g. when
-      // a suspended process resumes and this overdue timer runs before the data
-      // waiting in the socket. Let that data be processed first: one event loop
-      // turn is enough in Node. A timer running far too late means the process was
-      // suspended or blocked, and browsers don't promise to run the socket events
-      // before it: the reply gets a grace period then.
-      const late = Date.now() - due >= lateCallTimer;
-      this._callbacks[id].timeout = setTimeout(() => {
-        delete this._callbacks[id];
-        if (isFunction(errback)) {
-          errback({ error: this._createErrorObject(errorCodes.timeout, 'timeout') });
-        }
-      }, late ? lateCallGrace : 0);
-    }, this._config.timeout);
+    // A reply already in the socket is processed first when the timer runs late (see callTimer).
+    this._callbacks[id].timeout = callTimer(Date.now() + this._config.timeout, () => {
+      delete this._callbacks[id];
+      if (isFunction(errback)) {
+        errback({ error: this._createErrorObject(errorCodes.timeout, 'timeout') });
+      }
+    });
   }
 
   private _addCommand(command: any) {

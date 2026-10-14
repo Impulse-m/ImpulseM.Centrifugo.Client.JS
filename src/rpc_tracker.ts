@@ -1,5 +1,5 @@
 import { errorCodes } from './codes';
-import { hasHeaders } from './extensions';
+import { CallTimer, callTimer, hasHeaders } from './extensions';
 import { MsgIdGenerator, RpcQueue, TrackedRpc } from './rpc_queue';
 import type { CallRejectContext, CallResolveContext } from './centrifuge';
 import { RpcResult } from './types';
@@ -11,7 +11,7 @@ export interface RpcCallbacks {
   errback: (ctx: CallRejectContext) => void;
   // Called instead of errback when the connection is lost before the reply.
   lost?: () => void;
-  timeout: ReturnType<typeof setTimeout> | null;
+  timeout: CallTimer | null;
 }
 
 
@@ -87,7 +87,7 @@ export class RpcTracker {
         call.detach = (): void => signal.removeEventListener('abort', onAbort);
       }
       this.queue.add(call);
-      call.timer = setTimeout((): void => this.expire(call), Math.max(0, call.deadline - Date.now()));
+      call.timer = callTimer(call.deadline, (): void => this.expire(call));
       this.send(call, false);
     });
   }
@@ -284,7 +284,7 @@ export class RpcTracker {
   private settle(call: TrackedRpc): void {
     call.settled = true;
     if (call.timer !== null) {
-      clearTimeout(call.timer);
+      call.timer.clear();
       call.timer = null;
     }
     call.detach();

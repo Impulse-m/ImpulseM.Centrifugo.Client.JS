@@ -1,3 +1,4 @@
+import { CallTimer } from './extensions';
 import { RpcResult } from './types';
 
 /** Bits of the sequence part of a message id. */
@@ -21,7 +22,7 @@ export interface TrackedRpc {
   // Local time in milliseconds after which the call rejects with a timeout, across all attempts.
   deadline: number;
   commandId: number;
-  timer: ReturnType<typeof setTimeout> | null;
+  timer: CallTimer | null;
   // Set once the promise settled: a reply that still comes for it only acknowledges it.
   settled: boolean;
   // Removes the abort listener of the call's signal, if any.
