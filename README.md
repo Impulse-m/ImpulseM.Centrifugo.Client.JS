@@ -347,7 +347,7 @@ Calls kept this way are bounded by the `maxPendingRpc` option, default `32`: the
 
 A write error of a tracked call on an open transport is handled as a lost transport: the client reconnects, and the call is sent again on that connection with the same message id.
 
-A server error reply rejects the call with the error as the server sent it, including `msg_id_invalid`. This is a deviation from the retransmit rules: the client does not send such a call again, because the server's codes for a rejected message id are configurable and the client has no reliable signal to retry on. The message id of later calls follows the server time, but it never goes back: after a server clock correction backwards larger than the server's window, calls keep failing with `msg_id_invalid` until the clock catches up.
+A server error reply rejects the call with the error as the server sent it, including `msg_id_invalid`. This is a deviation from the retransmit rules: the client does not send such a call again, because the server's codes for a rejected message id are configurable and the client has no reliable signal to retry on.
 
 A call that settles locally, by its deadline or its signal, keeps its callback for one call timeout, so a late reply is still acknowledged. Then the callback is dropped, and a server that never replies does not grow the client.
 

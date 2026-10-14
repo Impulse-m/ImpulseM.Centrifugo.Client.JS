@@ -18,15 +18,23 @@ function trackedCall(msgId: number, commandId: number): TrackedRpc {
   };
 }
 
+// A generator whose lane is the given one: the lane is drawn from Math.random when it is created.
+function generatorWithLane(lane: number): MsgIdGenerator {
+  const random: jest.SpyInstance = jest.spyOn(Math, 'random').mockReturnValue(lane / 2 ** 19);
+  const gen: MsgIdGenerator = new MsgIdGenerator();
+  random.mockRestore();
+  return gen;
+}
+
 describe('MsgIdGenerator', () => {
-  test('the id is the unix second shifted by the sequence bits, plus the sequence', () => {
-    const gen: MsgIdGenerator = new MsgIdGenerator();
+  test('the id is the unix second shifted by the sequence bits, plus the lane', () => {
+    const gen: MsgIdGenerator = generatorWithLane(5);
     const id: number = gen.next(1_700_000_000_500);
-    expect(id).toBe(1_700_000_000 * seqLimit);
+    expect(id).toBe(1_700_000_000 * seqLimit + 5);
   });
 
   test('ids in the same second are consecutive and increasing', () => {
-    const gen: MsgIdGenerator = new MsgIdGenerator();
+    const gen: MsgIdGenerator = generatorWithLane(0);
     const first: number = gen.next(1_700_000_000_000);
     const second: number = gen.next(1_700_000_000_000);
     const third: number = gen.next(1_700_000_000_999);
@@ -34,28 +42,56 @@ describe('MsgIdGenerator', () => {
     expect(third).toBe(first + 2);
   });
 
-  test('ids stay increasing when the clock goes back', () => {
-    const gen: MsgIdGenerator = new MsgIdGenerator();
+  test('a later second restarts the sequence at the lane', () => {
+    const gen: MsgIdGenerator = generatorWithLane(9);
+    gen.next(1_700_000_000_000);
+    gen.next(1_700_000_000_000);
+    const id: number = gen.next(1_700_000_001_000);
+    expect(id).toBe(1_700_000_001 * seqLimit + 9);
+  });
+
+  test('a clock that goes back keeps the time part and the ids keep increasing', () => {
+    const gen: MsgIdGenerator = generatorWithLane(0);
     const first: number = gen.next(1_700_000_005_000);
     const second: number = gen.next(1_700_000_001_000);
     expect(second).toBeGreaterThan(first);
     expect(Math.floor(second / seqLimit)).toBe(1_700_000_005);
   });
 
-  test('a second that runs out of sequence moves to the next second', () => {
-    const gen: MsgIdGenerator = new MsgIdGenerator();
+  test('a second that runs out of sequence moves to the next second, at the lane', () => {
+    const lane: number = 3;
+    const gen: MsgIdGenerator = generatorWithLane(lane);
     const seconds: number = 1_700_000_000;
     let last: number = gen.next(seconds * 1000);
-    for (let i: number = 1; i < seqLimit; i++) {
+    for (let i: number = 1; i < seqLimit - lane; i++) {
       const id: number = gen.next(seconds * 1000);
-      expect(id).toBeGreaterThan(last);
+      expect(id).toBe(last + 1);
       last = id;
     }
-    // The sequence of the second is used up: the next id is in the following second.
+    // The sequence of the second is used up: the next id is in the following second, at the lane.
     const next: number = gen.next(seconds * 1000);
     expect(next).toBeGreaterThan(last);
-    expect(Math.floor(next / seqLimit)).toBe(seconds + 1);
-    expect(next % seqLimit).toBe(0);
+    expect(next).toBe((seconds + 1) * seqLimit + lane);
+  });
+
+  test('resync lowers the time part to the corrected second and takes a fresh lane', () => {
+    const gen: MsgIdGenerator = generatorWithLane(0);
+    const seconds: number = 1_700_000_000;
+    gen.next((seconds + 120) * 1000);
+    const random: jest.SpyInstance = jest.spyOn(Math, 'random').mockReturnValue(7 / 2 ** 19);
+    gen.resync(seconds * 1000);
+    random.mockRestore();
+    const id: number = gen.next(seconds * 1000);
+    expect(Math.floor(id / seqLimit)).toBe(seconds);
+    expect(id % seqLimit).toBe(7);
+  });
+
+  test('two generators created in the same second give different first ids', () => {
+    for (let i: number = 0; i < 20; i++) {
+      const first: MsgIdGenerator = new MsgIdGenerator();
+      const second: MsgIdGenerator = new MsgIdGenerator();
+      expect(first.next(1_700_000_000_000)).not.toBe(second.next(1_700_000_000_000));
+    }
   });
 
   test('ids fit a JavaScript safe integer until the year 2242', () => {
@@ -79,7 +115,7 @@ describe('MsgIdGenerator', () => {
   });
 
   test('a clamped second that runs out of sequence throws instead of losing precision', () => {
-    const gen: MsgIdGenerator = new MsgIdGenerator();
+    const gen: MsgIdGenerator = generatorWithLane(0);
     const farFutureMs: number = Date.UTC(3000, 0, 1);
     gen.next(farFutureMs);
     for (let i: number = 1; i < seqLimit; i++) {

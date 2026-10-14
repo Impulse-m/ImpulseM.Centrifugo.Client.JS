@@ -9,6 +9,14 @@ const msgIdSeqLimit: number = 2 ** msgIdSeqBits;
 /** Largest time part of a message id: the bits left of a safe integer after the sequence. */
 export const msgIdMaxSeconds: number = 2 ** 33 - 1;
 
+/** Lanes are drawn from [0, msgIdLaneLimit): a second always holds at least this many ids. */
+const msgIdLaneLimit: number = 2 ** 19;
+
+// A random lane: a sequence of a second starts there, so two generators in one second rarely share ids.
+function drawLane(): number {
+  return Math.floor(Math.random() * msgIdLaneLimit);
+}
+
 /**
  * A tracked rpc call: registered with a message id, from the call until it settles. It is
  * sent on the current connection (commandId is set), or it waits for the next connection
@@ -32,22 +40,24 @@ export interface TrackedRpc {
 }
 
 /**
- * Generates message ids as unix seconds << 20 | seq. The ids are strictly increasing per
- * generator, and their 53 bits stay exact in a JavaScript number. The time part follows the
- * server time given, but never goes back: a clock that moves backwards keeps the last second.
- * A time beyond msgIdMaxSeconds (the year 2242) is clamped to it.
+ * Generates message ids as unix seconds << 20 | seq, unique per generator within the server window.
+ * The sequence of a second starts at a random lane, so generators created in the same second do not
+ * share ids. The time part follows the server time given, but never goes back: a clock that moves
+ * backwards keeps the last second. A time beyond msgIdMaxSeconds (the year 2242) is clamped to it.
+ * The 53 bits of an id stay exact in a JavaScript number.
  */
 export class MsgIdGenerator {
+  private lane: number = drawLane();
   private lastSeconds: number = -1;
   private lastSeq: number = 0;
 
   /** Next message id for the server time in milliseconds. Throws a RangeError once the id space is used up. */
   next(serverTimeMs: number): number {
-    let seconds: number = Math.min(Math.floor(serverTimeMs / 1000), msgIdMaxSeconds);
+    let seconds: number = this.clampSeconds(serverTimeMs);
     if (seconds < this.lastSeconds) {
       seconds = this.lastSeconds;
     }
-    let seq: number = 0;
+    let seq: number = this.lane;
     if (seconds === this.lastSeconds) {
       seq = this.lastSeq + 1;
       if (seq >= msgIdSeqLimit) {
@@ -56,12 +66,27 @@ export class MsgIdGenerator {
           throw new RangeError('message id space exhausted');
         }
         seconds += 1;
-        seq = 0;
+        seq = this.lane;
       }
     }
     this.lastSeconds = seconds;
     this.lastSeq = seq;
     return seconds * msgIdSeqLimit + seq;
+  }
+
+  /**
+   * Re-syncs the generator to the corrected server time, after the server refused an id as outside its
+   * window: the next id takes the time part of that second and a fresh lane. Only the server's signal
+   * calls this, since the window of the server is not known otherwise.
+   */
+  resync(serverTimeMs: number): void {
+    this.lane = drawLane();
+    this.lastSeconds = this.clampSeconds(serverTimeMs);
+    this.lastSeq = this.lane - 1;
+  }
+
+  private clampSeconds(serverTimeMs: number): number {
+    return Math.min(Math.floor(serverTimeMs / 1000), msgIdMaxSeconds);
   }
 }
 
