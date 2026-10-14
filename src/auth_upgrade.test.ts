@@ -248,6 +248,23 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase) => 
     expect(authEvents.map(ctx => ctx.user)).toEqual(['alice']);
   });
 
+  test('a refused refresh keeps the previous token for the reconnect that follows', async () => {
+    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? {
+      id: cmd.id,
+      error: { code: 103, message: 'transition not allowed' },
+    } : undefined);
+    const c = create({ token: 'old-token' });
+    await connect(c);
+
+    await expect(c.refresh('refused-token')).rejects.toMatchObject({ code: 103 });
+    const reconnected = new Promise<void>(resolve => c.once('connected', () => resolve()));
+    server.closeConnection();
+    await reconnected;
+
+    expect(connectCommands()).toHaveLength(2);
+    expect(connectCommands()[1].connect.token).toBe('old-token');
+  });
+
   test('a refresh reply of a legacy server gives empty user and auth class', async () => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated' };
     server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? { id: cmd.id, refresh: {} } : undefined);

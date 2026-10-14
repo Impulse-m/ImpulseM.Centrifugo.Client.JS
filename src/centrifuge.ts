@@ -2388,11 +2388,24 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     if (!newToken) {
       throw this._createErrorObject(errorCodes.clientRefreshToken, 'refresh token is empty');
     }
+    const previousToken: string = this._token;
+    if (!this._isConnected()) {
+      // The connect that comes next carries the token, and the refresh confirms it on that connection.
+      this._token = newToken;
+    }
+    let result: any;
+    try {
+      await this._methodCall();
+      result = await this._callPromise({ refresh: { token: newToken } }, (reply: any) => reply.refresh);
+    } catch (err) {
+      // Refused or not sent: the reconnects keep the token the server accepted before.
+      if (this._token === newToken) {
+        this._token = previousToken;
+      }
+      throw err;
+    }
     this._token = newToken;
     this._debug('connection token refreshed');
-
-    await this._methodCall();
-    const result: any = await this._callPromise({ refresh: { token: newToken } }, (reply: any) => reply.refresh);
     this._refreshResponse(result);
     return { user: this._user, authClass: this._authClass, ttl: result.ttl ?? 0 };
   }

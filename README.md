@@ -634,7 +634,7 @@ const client = new Centrifuge(
 
 #### Refreshing the connection token on demand
 
-`refresh(token?)` sends a connection token to the server now, the given one or the one `getToken` returns. Use it after the application obtained a new token, for example after a login or a logout. The promise resolves `{ user, authClass, ttl }` with the identity the server confirmed. The token is kept for the reconnects that follow, also when the server refuses it.
+`refresh(token?)` sends a connection token to the server now, the given one or the one `getToken` returns. Use it after the application obtained a new token, for example after a login or a logout. The promise resolves `{ user, authClass, ttl }` with the identity the server confirmed. The token is kept for the reconnects that follow once the server accepts it. When the server refuses the new token, the previous one is kept.
 
 ```javascript
 const identity = await centrifuge.refresh('NEW-CONNECTION-TOKEN');
