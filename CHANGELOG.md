@@ -1,3 +1,19 @@
+5.8.0
+=====
+
+* Add the `auth` event: emitted on connect, and on a refresh reply that changes the user or the auth class. The connected context carries `user` and `authClass`.
+* Add `refresh(token?)`: sends the connection token now, with the given token or the one from `getToken`, and resolves the identity the server confirms. Calls with the same token share a promise, another token waits for the one in flight. At most 32 calls can be in progress.
+* Add the `instance` option: identifies the installation or the browser tab for the server's duplicate detection of retransmitted calls. The client never generates or stores it. A value of another form throws a configuration error when the client is created.
+* Retransmit tracked rpc calls across a lost connection, with the same message id, when the client has an `instance` and the server supports RPC options. A call is kept until it settles, and its deadline counts from the call.
+* Bound the tracked calls with the `maxPendingRpc` option (default `32`): a call beyond it rejects at once with `limitExceeded`.
+* Message ids follow the server time, hold their time part on a small clock correction backwards, and start at a random lane, so two clients of one instance do not share ids.
+* Add the `AbortSignal` option to `rpc`: aborting a sent call sends a cancel to the server. A sent call whose deadline passes sends the same cancel. Cancels waiting for a connection are bounded by `maxPendingRpc`, and a cancel unanswered for one call timeout is dropped.
+* `rpc` resolves with `cached`: `true` when the server answered from the record of an earlier attempt of the same call.
+* Add error codes `16` (`limitExceeded`) and `17` (`cancelled`). Code `15` (`unsupported`) is documented. Codes 15 to 19 are reserved for client-local errors; a server never sends them.
+* Retry signal: a server error that carries the metadata key `x-centrifugo-retry` tells the client that the server did not run the call. The value `new_msg_id` (the message id was refused) sends the call again with a new id, at most twice. The value `later` sends it again with the same id after 250 ms, 500 ms and 1000 ms, at most three times. Other errors are surfaced unchanged.
+* Deviation from upstream: a timer-driven refresh refused with 109 (token expired) is reported and retried with backoff, with a fresh token from `getToken`. Upstream disconnects on it.
+* Deviation from upstream: a timer-driven refresh refused with 103 (permission denied) is reported and keeps the connection with its identity, without a retry. Upstream disconnects on it. The server ends the connection at the token expiry.
+
 5.0.2 and higher
 ================
 
