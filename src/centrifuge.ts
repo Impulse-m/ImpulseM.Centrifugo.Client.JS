@@ -573,7 +573,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     };
 
     const headers = opts?.headers;
-    await this._waitAuthRefresh();
+    if (this._authRefresh !== null) {
+      await this._waitAuthRefresh();
+    }
     await this._methodCall();
     if (hasHeaders(headers)) {
       // Checked once connected: the capability belongs to the connection the call goes out on.
