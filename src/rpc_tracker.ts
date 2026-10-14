@@ -162,15 +162,16 @@ export class RpcTracker {
    * and may have run, so they are not sent again.
    */
   sendWaiting(): void {
-    const cancels: number[] = this.cancels;
-    this.cancels = [];
     if (!this.host.rpcOptionsSupported()) {
+      // The cancels wait for a connection that carries them.
       for (const call of this.queue.waiting()) {
         this.settle(call);
         call.reject(this.host.createError(errorCodes.connectionClosed, 'connection closed'));
       }
       return;
     }
+    const cancels: number[] = this.cancels;
+    this.cancels = [];
     for (const msgId of cancels) {
       this.cancel(msgId);
     }
@@ -178,7 +179,8 @@ export class RpcTracker {
       if (call.deadline <= Date.now()) {
         this.expire(call);
       } else {
-        this.send(call, true);
+        // A call that was never written is not a retransmit: the server has not seen its message id.
+        this.send(call, call.sent);
       }
     }
   }
@@ -256,6 +258,16 @@ export class RpcTracker {
   // Sends the call on the current connection. The command id is new for every attempt, the
   // message id is the call's.
   private send(call: TrackedRpc, retransmit: boolean): void {
+    // A send supersedes a delayed attempt of the call.
+    if (call.resend !== null) {
+      call.resend.clear();
+      call.resend = null;
+    }
+    if (!this.host.isConnected()) {
+      // Not written: the call waits for the connection, and sendWaiting sends it there.
+      call.commandId = 0;
+      return;
+    }
     const rpc: any = {
       method: call.method,
       data: call.data,
@@ -376,10 +388,16 @@ export class RpcTracker {
   // Sends a refused call again, within its attempts. Returns false when the error has to be surfaced.
   private resend(call: TrackedRpc, signal: RetrySignal): boolean {
     if (signal === rpcRetryNewMsgId && call.newIdResends < maxNewIdResends) {
+      // Past the deadline the error is surfaced: every resend is inside it.
+      if (call.deadline <= Date.now()) {
+        return false;
+      }
       call.newIdResends++;
-      // The refused id was never recorded by the server: the call takes an id of the corrected clock.
+      // The refused id was never recorded by the server: the call takes an id of the corrected clock,
+      // and it is not sent yet until the new id goes out.
       this.msgIds.resync(this.host.serverTime());
       call.msgId = this.msgIds.next(this.host.serverTime());
+      call.sent = false;
       this.send(call, false);
       return true;
     }
@@ -388,6 +406,9 @@ export class RpcTracker {
       call.laterResends++;
       // Waits as a waiting call: a connection lost meanwhile sends it with the reconnect.
       call.commandId = 0;
+      if (call.resend !== null) {
+        call.resend.clear();
+      }
       call.resend = callTimer(Math.min(Date.now() + delay, call.deadline), (): void => this.resendLater(call));
       return true;
     }
@@ -397,10 +418,10 @@ export class RpcTracker {
 
   // The delay of a later attempt is over. The deadline timer settles the call once the deadline passed.
   private resendLater(call: TrackedRpc): void {
-    if (call.deadline <= Date.now()) {
+    call.resend = null;
+    if (call.settled || call.deadline <= Date.now()) {
       return;
     }
-    call.resend = null;
     if (call.commandId === 0 && this.host.isConnected()) {
       this.send(call, true);
     }

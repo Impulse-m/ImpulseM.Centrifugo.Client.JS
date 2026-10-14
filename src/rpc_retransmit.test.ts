@@ -961,6 +961,56 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(callCommands()).toHaveLength(1);
   });
 
+  test('a refusal with the new message id signal that arrives past the deadline is surfaced, nothing is sent again', async (): Promise<void> => {
+    const c: Centrifuge = create({ timeout: 100 });
+    await connect(c);
+    holdCalls();
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      const call: Promise<RpcResult> = c.rpc('work', codecCase.encode({}));
+      const first: any = await server.waitFor(isCall);
+
+      // The deadline passed; the timer that settles the call has not run yet.
+      jest.setSystemTime(Date.now() + 200);
+      server.send({ id: first.id, error: retryError('new_msg_id', 107, false) });
+
+      await expect(call).rejects.toMatchObject({ code: 107, metadata: { 'x-centrifugo-retry': 'new_msg_id' } });
+    } finally {
+      jest.useRealTimers();
+    }
+    expect(callCommands()).toHaveLength(1);
+  });
+
+  test('a call refused again after a reconnect inside its later delay is not sent once it is aborted', async (): Promise<void> => {
+    const c: Centrifuge = create({ timeout: 10000, minReconnectDelay: 10, maxReconnectDelay: 50 });
+    await connect(c);
+    const queue: any = (c as any)._rpc.queue;
+    const controller: AbortController = new AbortController();
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, error: retryError('later', 100, true) } : undefined);
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      const call: Promise<RpcResult> = c.rpc('work', codecCase.encode({}), { signal: controller.signal });
+      quiet(call);
+      await until((): boolean => callCommands().length === 1 && queue.waiting().length === 1);
+
+      // The reconnect comes before the first later delay ends: the call goes out with it and is refused again.
+      server.closeConnection();
+      await until((): boolean => c.state !== State.Connected);
+      jest.advanceTimersByTime(60);
+      await until((): boolean => c.state === State.Connected && callCommands().length === 2 && queue.waiting().length === 1);
+
+      controller.abort();
+      const sentBeforeAbort: number = callCommands().length;
+      // Past the first later delay: nothing of the aborted call may go out.
+      jest.advanceTimersByTime(1000);
+      await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
+      await server.waitFor(isCancel);
+      expect(callCommands()).toHaveLength(sentBeforeAbort);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a call with a refusal that carries no retry signal is surfaced at once, nothing is sent again', async (): Promise<void> => {
     const c: Centrifuge = create();
     await connect(c);
