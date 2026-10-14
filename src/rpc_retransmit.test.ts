@@ -1056,6 +1056,31 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(server.received.some(isRetransmit)).toBe(false);
   });
 
+  test('an abort in the connected handler of a legacy connection sends no cancel, the cancel waits for a capable connection', async (): Promise<void> => {
+    const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    holdCalls();
+    const controller: AbortController = new AbortController();
+    const call: Promise<RpcResult> = c.rpc('work', codecCase.encode({}), { signal: controller.signal });
+    const sent: any = await server.waitFor(isCall);
+
+    // The reconnect is to a legacy server: the application aborts in its connected handler, before the
+    // waiting calls are handled.
+    server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25 };
+    c.once('connected', (): void => {
+      controller.abort();
+    });
+    server.closeConnection();
+    await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
+    expect(server.received.filter(isCancel)).toHaveLength(0);
+
+    // The next capable connection carries the cancel.
+    server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25, flag: rpcOptionsWireFlag };
+    server.closeConnection();
+    const cancel: any = await server.waitFor(isCancel);
+    expect(cancel.rpc.cancel).toBe(sent.rpc.msg_id);
+  });
+
   test('a signal on a legacy connection rejects with unsupported without sending the call', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25 };
     const c: Centrifuge = create();

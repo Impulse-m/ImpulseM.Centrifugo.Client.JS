@@ -481,10 +481,10 @@ export class RpcTracker {
   }
 
 
-  // Cancels a sent call: now on the connection, else with the next connection (the server may have
-  // received the call before the connection was lost).
+  // Cancels a sent call: now on the connection when it carries cancels, else with the next connection
+  // that does (the server may have received the call before the connection was lost).
   private cancelSent(msgId: number): void {
-    if (this.host.isConnected()) {
+    if (this.host.isConnected() && this.host.rpcOptionsSupported()) {
       this.cancel(msgId);
     } else {
       this.keepCancel(msgId);
