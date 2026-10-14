@@ -1,33 +1,66 @@
 import { Centrifuge } from './centrifuge';
-import { FakeCentrifugoServer } from './fakeServer';
+import { Centrifuge as ProtobufCentrifuge } from './protobuf';
+import { FakeCentrifugoServer, FakeCodec } from './fakeServer';
 import { errorCodes } from './codes';
 import { State, TransportName } from './types';
 import WebSocket from 'ws';
 
 // RPC options (per-call headers), the rpc capability, server error fields and server
-// time, over the JSON codec. The fake server replies in JSON; the protobuf codec is
-// covered by rpc_options.protobuf.test.ts.
+// time. Every case runs over both codecs: the fake server speaks JSON or protobuf, and the
+// client is the matching Centrifuge class.
 
 // The connect flag of bit 32, as the wire carries it.
 const rpcOptionsWireFlag: number = 4294967296;
 
-function createClient(url: string): Centrifuge {
-  return new Centrifuge([{
-    transport: 'websocket' as TransportName,
-    endpoint: url,
-  }], {
-    websocket: WebSocket,
-    minReconnectDelay: 10,
-    maxReconnectDelay: 50,
-  });
+// RPC data is raw bytes on the protobuf wire, JSON on the JSON wire.
+interface CodecCase {
+  name: string;
+  serverCodec: FakeCodec;
+  createClient: (url: string) => Centrifuge;
+  encode: (value: any) => any;
+  decode: (data: any) => any;
 }
 
-describe('RPC options over JSON', () => {
+const bytes = (value: any): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
+const fromBytes = (data: Uint8Array): any => JSON.parse(new TextDecoder().decode(data));
+
+const codecCases: CodecCase[] = [
+  {
+    name: 'JSON',
+    serverCodec: 'json',
+    createClient: (url: string): Centrifuge => new Centrifuge([{
+      transport: 'websocket' as TransportName,
+      endpoint: url,
+    }], {
+      websocket: WebSocket,
+      minReconnectDelay: 10,
+      maxReconnectDelay: 50,
+    }),
+    encode: (value: any): any => value,
+    decode: (data: any): any => data,
+  },
+  {
+    name: 'protobuf',
+    serverCodec: 'protobuf',
+    createClient: (url: string): Centrifuge => new ProtobufCentrifuge([{
+      transport: 'websocket' as TransportName,
+      endpoint: url,
+    }], {
+      websocket: WebSocket,
+      minReconnectDelay: 10,
+      maxReconnectDelay: 50,
+    }),
+    encode: bytes,
+    decode: fromBytes,
+  },
+];
+
+describe.each(codecCases)('RPC options over $name', (codecCase: CodecCase) => {
   let server: FakeCentrifugoServer;
   const clients: Centrifuge[] = [];
 
   beforeEach(async () => {
-    server = await FakeCentrifugoServer.start();
+    server = await FakeCentrifugoServer.start(codecCase.serverCodec);
   });
 
   afterEach(async () => {
@@ -39,7 +72,7 @@ describe('RPC options over JSON', () => {
   });
 
   async function connect(): Promise<Centrifuge> {
-    const c = createClient(server.url);
+    const c = codecCase.createClient(server.url);
     clients.push(c);
     const connected = new Promise<void>(resolve => c.once('connected', () => resolve()));
     c.connect();
@@ -89,46 +122,73 @@ describe('RPC options over JSON', () => {
     expect(c.capabilities.rpcOptions).toBe(false);
   });
 
+  test('capability is cleared when the transport closes and set again by the next connect reply', async () => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', flag: rpcOptionsWireFlag };
+    const c = await connect();
+    expect(c.capabilities.rpcOptions).toBe(true);
+
+    // The next connect command is the reconnect: the capability must already be cleared then.
+    let capabilityOnReconnect: boolean | undefined;
+    const reconnecting = new Promise<void>(resolve => {
+      server.onCommand = (cmd: any) => {
+        if (cmd.connect !== undefined) {
+          capabilityOnReconnect = c.capabilities.rpcOptions;
+          resolve();
+        }
+        return undefined;
+      };
+    });
+    const reconnected = new Promise<void>(resolve => c.once('connected', () => resolve()));
+
+    server.closeConnection();
+    await reconnecting;
+    await reconnected;
+
+    expect(capabilityOnReconnect).toBe(false);
+    expect(c.capabilities.rpcOptions).toBe(true);
+  });
+
   test('headers are sent with the rpc when the server supports them', async () => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', flag: rpcOptionsWireFlag };
-    server.onCommand = (cmd: any) => (cmd.rpc ? { id: cmd.id, rpc: { data: { ok: true } } } : undefined);
+    server.onCommand = (cmd: any) => (cmd.rpc ? { id: cmd.id, rpc: { data: codecCase.encode({ ok: true }) } } : undefined);
     const c = await connect();
 
-    const result = await c.rpc('echo', { value: 1 }, { headers: { 'example-header': 'example-value' } });
+    const result = await c.rpc('echo', codecCase.encode({ value: 1 }), { headers: { 'example-header': 'example-value' } });
 
-    expect(result.data).toEqual({ ok: true });
+    expect(codecCase.decode(result.data)).toEqual({ ok: true });
     expect(rpcCommands()[0].rpc.headers).toEqual({ 'example-header': 'example-value' });
     expect(rpcCommands()[0].rpc.method).toBe('echo');
   });
 
   test('headers are rejected locally without sending the call in legacy mode', async () => {
-    server.onCommand = (cmd: any) => (cmd.rpc ? { id: cmd.id, rpc: { data: {} } } : undefined);
+    server.onCommand = (cmd: any) => (cmd.rpc ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
     const c = await connect();
 
-    await expect(c.rpc('echo', {}, { headers: { 'example-header': 'example-value' } })).rejects.toMatchObject({
+    await expect(c.rpc('echo', codecCase.encode({}), { headers: { 'example-header': 'example-value' } })).rejects.toMatchObject({
       code: errorCodes.unsupported,
     });
     expect(rpcCommands()).toHaveLength(0);
   });
 
   test('an empty headers object sends the call without headers in legacy mode', async () => {
-    server.onCommand = (cmd: any) => (cmd.rpc ? { id: cmd.id, rpc: { data: 'done' } } : undefined);
+    server.onCommand = (cmd: any) => (cmd.rpc ? { id: cmd.id, rpc: { data: codecCase.encode('done') } } : undefined);
     const c = await connect();
 
-    const result = await c.rpc('echo', {}, { headers: {} });
+    const result = await c.rpc('echo', codecCase.encode({}), { headers: {} });
 
-    expect(result.data).toBe('done');
-    expect(rpcCommands()[0].rpc).not.toHaveProperty('headers');
+    expect(codecCase.decode(result.data)).toBe('done');
+    expect(Object.keys(rpcCommands()[0].rpc.headers ?? {})).toHaveLength(0);
   });
 
   test('the two-argument rpc sends no headers and works in both modes', async () => {
-    server.onCommand = (cmd: any) => (cmd.rpc ? { id: cmd.id, rpc: { data: 'plain' } } : undefined);
+    server.onCommand = (cmd: any) => (cmd.rpc ? { id: cmd.id, rpc: { data: codecCase.encode('plain') } } : undefined);
     const legacy = await connect();
 
-    const result = await legacy.rpc('echo', { value: 1 });
+    const result = await legacy.rpc('echo', codecCase.encode({ value: 1 }));
 
-    expect(result.data).toBe('plain');
-    expect(rpcCommands()[0].rpc).toEqual({ method: 'echo', data: { value: 1 } });
+    expect(codecCase.decode(result.data)).toBe('plain');
+    expect(rpcCommands()[0].rpc).toEqual({ method: 'echo', data: codecCase.encode({ value: 1 }) });
+    expect(Object.keys(rpcCommands()[0].rpc.headers ?? {})).toHaveLength(0);
   });
 
   test('app error fields are surfaced on a failed rpc', async () => {
@@ -145,7 +205,7 @@ describe('RPC options over JSON', () => {
     } : undefined);
     const c = await connect();
 
-    await expect(c.rpc('echo', {})).rejects.toMatchObject({
+    await expect(c.rpc('echo', codecCase.encode({}))).rejects.toMatchObject({
       code: 100,
       message: 'application failure',
       temporary: true,
@@ -161,7 +221,7 @@ describe('RPC options over JSON', () => {
 
     let caught: any;
     try {
-      await c.rpc('echo', {});
+      await c.rpc('echo', codecCase.encode({}));
     } catch (e) {
       caught = e;
     }
@@ -171,21 +231,27 @@ describe('RPC options over JSON', () => {
     expect(caught.appType).toBeUndefined();
     expect(caught.metadata).toBeUndefined();
     expect(caught).not.toHaveProperty('appCode');
+    expect(caught).not.toHaveProperty('appType');
+    expect(caught).not.toHaveProperty('metadata');
   });
 
   test('serverTime is local time before any reply carried a server time', async () => {
-    server.onCommand = (cmd: any) => (cmd.rpc ? { id: cmd.id, rpc: { data: null } } : undefined);
+    server.onCommand = (cmd: any) => (cmd.rpc ? { id: cmd.id, rpc: { data: codecCase.encode(null) } } : undefined);
     const c = await connect();
-    await c.rpc('echo', {});
+    await c.rpc('echo', codecCase.encode({}));
 
     expect(Math.abs(c.serverTime() - Date.now())).toBeLessThan(1000);
   });
 
   test('serverTime follows the server time of a reply', async () => {
     const skewMs = 100000;
-    server.onCommand = (cmd: any) => (cmd.rpc ? { id: cmd.id, time: Date.now() + skewMs, rpc: { data: null } } : undefined);
+    server.onCommand = (cmd: any) => (cmd.rpc ? {
+      id: cmd.id,
+      time: Date.now() + skewMs,
+      rpc: { data: codecCase.encode(null) },
+    } : undefined);
     const c = await connect();
-    await c.rpc('echo', {});
+    await c.rpc('echo', codecCase.encode({}));
 
     expect(Math.abs(c.serverTime() - (Date.now() + skewMs))).toBeLessThan(1000);
   });
@@ -197,15 +263,15 @@ describe('RPC options over JSON', () => {
       }
       return cmd.rpc.method === 'fail'
         ? { id: cmd.id, error: { code: 100, message: 'legacy failure' } }
-        : { id: cmd.id, rpc: { data: 7 } };
+        : { id: cmd.id, rpc: { data: codecCase.encode(7) } };
     };
     const c = await connect();
 
-    const result = await c.rpc('echo', {});
-    expect(result.data).toBe(7);
+    const result = await c.rpc('echo', codecCase.encode({}));
+    expect(codecCase.decode(result.data)).toBe(7);
     expect(c.capabilities.rpcOptions).toBe(false);
     expect(Math.abs(c.serverTime() - Date.now())).toBeLessThan(1000);
 
-    await expect(c.rpc('fail', {})).rejects.toMatchObject({ code: 100, message: 'legacy failure' });
+    await expect(c.rpc('fail', codecCase.encode({}))).rejects.toMatchObject({ code: 100, message: 'legacy failure' });
   });
 });

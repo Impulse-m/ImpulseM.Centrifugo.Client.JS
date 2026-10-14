@@ -1,7 +1,11 @@
 import WebSocket, { WebSocketServer } from 'ws';
+import { ProtobufCodec } from './protobuf.codec';
+import { toOffset } from './utils';
 
-// In-process Centrifugo fake server for tests, speaking the JSON protocol
-// (newline-delimited JSON commands/replies). It is intentionally protocol-level
+// In-process Centrifugo fake server for tests, speaking the JSON protocol by default
+// (newline-delimited JSON commands/replies), or the protobuf protocol when started with
+// the 'protobuf' codec. The commands it captures and the replies it sends are plain
+// objects in both cases. It is intentionally protocol-level
 // and generic: it provides sensible defaults for the connect/subscribe/
 // unsubscribe handshake, captures received commands for assertions, and exposes
 // hooks + raw push senders so new scenarios can be added WITHOUT touching the
@@ -43,10 +47,46 @@ export type PushTarget = number | string;
 
 export type CommandHandler = (cmd: any, server: FakeCentrifugoServer) => any | null | undefined;
 export type SubscribeHandler = (channel: string, req: any) => SubscribeReplyOptions;
+/** Wire codec the fake server speaks. */
+export type FakeCodec = 'json' | 'protobuf';
+
+// The constructor of a decoded message sets empty repeated and map fields, which are not on
+// the wire. Nested messages stay: an empty one is still present, e.g. subscribe: {}. Maps are
+// the plain objects, messages are class instances.
+function isUnsetDefault(field: any): boolean {
+  if (Array.isArray(field)) {
+    return field.length === 0;
+  }
+  return field !== null && typeof field === 'object' && Object.getPrototypeOf(field) === Object.prototype
+    && Object.keys(field).length === 0;
+}
+
+// A decoded protobuf message as a plain object, as the JSON path yields it: only the fields
+// present on the wire, int64 values as numbers, bytes unchanged.
+function plainMessage(value: any): any {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+  if (value !== null && typeof value === 'object' && typeof value.low === 'number' && typeof value.high === 'number') {
+    return toOffset(value);
+  }
+  if (value !== null && typeof value === 'object') {
+    const plain: any = Array.isArray(value) ? [] : {};
+    for (const key of Object.keys(value)) {
+      if (!isUnsetDefault(value[key])) {
+        plain[key] = plainMessage(value[key]);
+      }
+    }
+    return plain;
+  }
+  return value;
+}
 
 export class FakeCentrifugoServer {
   private wss: WebSocketServer;
   private current: WebSocket | null = null;
+  private codec: FakeCodec;
+  private protobuf: ProtobufCodec = new ProtobufCodec();
 
   /** All commands received from the client, in order. */
   readonly received: any[] = [];
@@ -61,11 +101,18 @@ export class FakeCentrifugoServer {
   /** Customize the subscribe result per channel (default: empty result). */
   onSubscribe: SubscribeHandler | null = null;
 
-  private constructor(wss: WebSocketServer) {
+  private constructor(wss: WebSocketServer, codec: FakeCodec) {
     this.wss = wss;
+    this.codec = codec;
     this.wss.on('connection', (ws: WebSocket) => {
       this.current = ws;
       ws.on('message', (data: Buffer) => {
+        if (this.codec === 'protobuf') {
+          for (const cmd of this.protobuf.decodeCommands(new Uint8Array(data))) {
+            this.dispatch(plainMessage(cmd));
+          }
+          return;
+        }
         // JSON protocol frames commands as newline-delimited JSON.
         for (const line of data.toString().trim().split('\n')) {
           if (line) this.dispatch(JSON.parse(line));
@@ -74,10 +121,10 @@ export class FakeCentrifugoServer {
     });
   }
 
-  static async start(): Promise<FakeCentrifugoServer> {
+  static async start(codec: FakeCodec = 'json'): Promise<FakeCentrifugoServer> {
     const wss = new WebSocketServer({ port: 0 });
     await new Promise<void>(resolve => wss.on('listening', () => resolve()));
-    return new FakeCentrifugoServer(wss);
+    return new FakeCentrifugoServer(wss, codec);
   }
 
   get url(): string {
@@ -133,6 +180,10 @@ export class FakeCentrifugoServer {
 
   /** Send a raw reply object. */
   send(reply: any): void {
+    if (this.codec === 'protobuf') {
+      this.current?.send(this.protobuf.encodeReplies([reply]));
+      return;
+    }
     this.current?.send(JSON.stringify(reply));
   }
 
