@@ -337,6 +337,55 @@ centrifuge.rpc("my.method.name", {}).catch(function(err) {
 
 `centrifuge.serverTime()` returns the current time in milliseconds on the server clock. It is estimated from the server time in the last reply that carried one, and falls back to local time when no reply has carried a server time yet.
 
+`rpc` resolves with `{data, cached}`. `cached` is `true` when the server answered from the record of an earlier attempt of the same call, so the handler did not run again.
+
+##### Retransmit of calls across a lost connection
+
+On a connection that supports RPC options, every `rpc` call carries a message id. When the transport is lost while a call waits for its reply, the call is kept instead of failing. After the next connect reply confirms the capability, the call is sent again with the same message id, in message id order, and the reply of the server completes the original call. Each call keeps its original deadline across attempts: the `timeout` option, default `5000` ms, counts from the moment of the call. A call whose deadline passes while the connection is down rejects with error code `errorCodes.timeout`.
+
+Calls kept this way are bounded by the `maxPendingRpc` option, default `32`. An `rpc` call beyond the bound rejects with error code `errorCodes.limitExceeded` (16) and is not sent.
+
+A server error reply rejects the call with the error as the server sent it. The client does not send such a call again, because the server's codes for a rejected message id are configurable.
+
+On a connection without RPC options (legacy mode), calls are sent as plain requests without a message id, are not kept on a lost connection, and reject with `errorCodes.connectionClosed` when the transport is lost, as before.
+
+##### Cancel an rpc call
+
+Pass an `AbortSignal` in the options to cancel a call:
+
+```javascript
+const controller = new AbortController();
+centrifuge.rpc("my.method.name", {}, {signal: controller.signal}).catch(function(err) {
+    // err.code === errorCodes.cancelled (17) when the signal was aborted
+});
+controller.abort();
+```
+
+Aborting sends a cancel for the call to the server, and the call rejects locally with error code `errorCodes.cancelled` (17). A signal that is already aborted sends nothing. A call that waits for a connection is not sent after it is aborted; the cancel goes out with the next connection, in case the server received the call before the connection was lost. Without RPC options, `rpc` with a signal rejects with `errorCodes.unsupported` and the call is not sent.
+
+##### Instance of the client
+
+The `instance` option identifies an installation or a browser tab to the server. It scopes the duplicate detection of retransmitted calls: whoever knows the instance can retransmit and cancel the calls of its scope, so it is a secret. The client never generates it and never stores it. The application generates it and keeps it, per installation or per browser tab. It must be a random value of at least 128 bits, 22 to 64 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`. A value of another form throws a configuration error when the client is created. Do not log it or share it.
+
+A per-tab identifier kept in `sessionStorage` is one way to do it:
+
+```javascript
+function tabInstance() {
+    let instance = sessionStorage.getItem("app-instance");
+    if (!instance) {
+        const bytes = crypto.getRandomValues(new Uint8Array(16));
+        instance = btoa(String.fromCharCode(...bytes))
+            .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+        sessionStorage.setItem("app-instance", instance);
+    }
+    return instance;
+}
+
+const centrifuge = new Centrifuge(endpoint, {instance: tabInstance()});
+```
+
+Without an `instance`, and without a session in the connection token, the server has no scope for duplicate detection of these calls.
+
 #### history method
 
 Allows to get history from a server. This is a top-level analogue of `Subscription.history` method. But accepts a channel as first argument.
@@ -460,6 +509,14 @@ const centrifuge = new Centrifuge('ws://localhost:8000/connection/websocket', {
     }
 });
 ```
+
+#### instance
+
+Identifier of the installation or the browser tab, sent with the connect command for the server's duplicate detection of retransmitted calls. The application supplies it and keeps it; the client never generates or stores it. See [Instance of the client](#instance-of-the-client). Default is empty (no instance).
+
+#### maxPendingRpc
+
+Maximum number of rpc calls kept for retransmit at once, sent or waiting for a connection. Beyond it `rpc` rejects with `errorCodes.limitExceeded`. Default is `32`.
 
 #### debug
 
