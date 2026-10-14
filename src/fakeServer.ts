@@ -22,6 +22,7 @@ import { toOffset } from './utils';
 //   - Push to a subscription:                server.publish(42, { foo: 1 })   // by numeric id (compaction)
 //                                            server.publish('news', { foo: 1 }) // by channel name
 //   - Fully control any command reply:       server.onCommand = (cmd) => cmd.rpc ? { id: cmd.id, error: { code: 1, message: 'x' } } : undefined
+//   - Hold a reply, send it later:           server.onCommand = (cmd) => cmd.refresh ? holdReply : undefined, then server.send({ id, ... })
 //   - Send anything the protocol allows:     server.sendPush({ disconnect: { code: 3000, reason: 'bye' } })
 //   - Drive a reconnect:                     server.closeConnection()
 //   - Assert on what the client sent:        server.received / server.lastSubscribe
@@ -44,6 +45,9 @@ export interface SubscribeReplyOptions {
 
 /** Push target: a numeric channel id (channel compaction) or a channel name. */
 export type PushTarget = number | string;
+
+/** Returned by a command handler to send no reply for the command yet: the test sends it later with send(). */
+export const holdReply: unique symbol = Symbol('holdReply');
 
 export type CommandHandler = (cmd: any, server: FakeCentrifugoServer) => any | null | undefined;
 export type SubscribeHandler = (channel: string, req: any) => SubscribeReplyOptions;
@@ -157,6 +161,9 @@ export class FakeCentrifugoServer {
 
     if (this.onCommand) {
       const reply = this.onCommand(cmd, this);
+      if (reply === holdReply) {
+        return;
+      }
       if (reply !== null && reply !== undefined) {
         this.send(reply);
         return;

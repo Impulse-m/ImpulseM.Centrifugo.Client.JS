@@ -26,6 +26,8 @@ export type ClientEvents = {
   connecting: (ctx: ConnectingContext) => void;
   /** Emitted when the client successfully connects and the server acknowledges the session. */
   connected: (ctx: ConnectedContext) => void;
+  /** Emitted on connect, and whenever the user or auth class of the connection changes after a refresh. */
+  auth: (ctx: AuthContext) => void;
   /** Emitted when the client connection is closed. */
   disconnected: (ctx: DisconnectedContext) => void;
   /** Emitted when an async message pushed by the server (not tied to a channel) is received. */
@@ -204,6 +206,20 @@ export interface ConnectedContext {
   transport: string;
   /** Optional custom data returned by the server in the connect reply. */
   data?: any;
+  /** User the connection belongs to. Empty for an anonymous connection or a server that does not send one. */
+  user?: string;
+  /** Auth class the server assigned to the connection. Empty when the server does not send one. */
+  authClass?: string;
+}
+
+/** Identity of the connection as the server confirmed it on connect or refresh. */
+export interface AuthContext {
+  /** User the connection belongs to. Empty for an anonymous connection or a server that does not send one. */
+  user: string;
+  /** Auth class the server assigned to the connection. Empty when the server does not send one. */
+  authClass: string;
+  /** Seconds until the token expires, as the server sent it. 0 when the server sent no expiration. */
+  ttl: number;
 }
 
 /** Context for the client 'error' event. */

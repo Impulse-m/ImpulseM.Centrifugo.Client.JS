@@ -166,6 +166,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _rpcOptionsSupported: boolean = false;
   // Server time minus local time, learnt from the time of the last reply carrying one.
   private _serverTimeOffset: number | null = null;
+  // User and auth class the server confirmed for the connection, from its connect or refresh reply.
+  private _user: string = '';
+  private _authClass: string = '';
 
   private _debugEnabled: boolean;
   private _config: Options;
@@ -2290,6 +2293,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
     this._session = result.session;
     this._node = result.node;
+    this._user = result.user ?? '';
+    this._authClass = result.auth_class ?? '';
 
     this.startBatching();
     this._sendSubscribeCommands();
@@ -2297,7 +2302,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
     const ctx: any = {
       client: result.client,
-      transport: this._transport.subName()
+      transport: this._transport.subName(),
+      user: this._user,
+      authClass: this._authClass
     };
     if (result.data) {
       ctx.data = result.data;
@@ -2305,6 +2312,12 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
     this.emit('connected', ctx);
     // Same for a 'connected' handler.
+    if (this._transitionSuperseded(transition)) {
+      return;
+    }
+
+    this.emit('auth', { user: this._user, authClass: this._authClass, ttl: result.ttl ?? 0 });
+    // Same for an 'auth' handler.
     if (this._transitionSuperseded(transition)) {
       return;
     }
