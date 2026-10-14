@@ -4,6 +4,7 @@ import { FakeCentrifugoServer, FakeCodec, holdReply } from './fakeServer';
 import { errorCodes } from './codes';
 import { Options, RpcResult, State, TransportName } from './types';
 import WebSocket from 'ws';
+import { format } from 'util';
 
 // Tracked RPC calls: message ids, the retransmit of calls that lost their transport, the queue
 // bound, acknowledgements, deadlines, cancels, legacy connections and the instance option. Every
@@ -441,6 +442,21 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
 
     const connectCmd: any = server.received.find((cmd: any): boolean => cmd.connect !== undefined);
     expect(connectCmd.connect.instance).toBeUndefined();
+  });
+
+  test('the instance is not written to the debug log', async (): Promise<void> => {
+    const instance: string = 'AbCdEfGhIjKlMnOpQrStUv';
+    const debugSpy: jest.SpyInstance = jest.spyOn(console, 'debug').mockImplementation((): void => {});
+    try {
+      const c: Centrifuge = create({ instance: instance, debug: true });
+      await connect(c);
+      const logged: string = debugSpy.mock.calls.map((args: any[]): string => format(...args)).join('\n');
+
+      expect(debugSpy.mock.calls.some((args: any[]): boolean => args[0] === 'config')).toBe(true);
+      expect(logged).not.toContain(instance);
+    } finally {
+      debugSpy.mockRestore();
+    }
   });
 
   test('a maxPendingRpc below 1 throws a configuration error', (): void => {

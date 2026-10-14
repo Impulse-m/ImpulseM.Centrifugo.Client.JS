@@ -799,7 +799,10 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       this._debugEnabled = true;
     }
 
-    this._debug('config', this._config);
+    // The instance is a secret: the debug log shows only whether one is set.
+    const instance: string = this._config.instance;
+    const loggedConfig: Options = { ...this._config, instance: instance === '' ? '' : '<set>' };
+    this._debug('config', loggedConfig);
 
     if (typeof this._endpoint === 'string') {
       // Single address.
