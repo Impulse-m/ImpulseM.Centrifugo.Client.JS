@@ -67,13 +67,6 @@ export function isValidInstance(instance: string): boolean {
 }
 
 /**
- * Metadata key the server sets on its own rpc errors, to tell the client how to send the call again:
- * 'new_msg_id' or 'later', see retrySignal. Error metadata of the server cannot carry this key itself.
- * @internal
- */
-export const rpcRetryMetadataKey: string = 'x-centrifugo-retry';
-
-/**
  * Whether a server error of a timer-driven refresh is reported and retried with backoff and a fresh
  * token: a client error (code below 100), a temporary error, and 109 (the token the getter returned was
  * refused as expired). Any other error is not retried. An explicit refresh() is never retried.

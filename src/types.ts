@@ -500,13 +500,13 @@ export interface SubscriptionDataContext {
 export interface PublishResult {
 }
 
-/** Result of an RPC call. An output type: the client always sets its fields. */
+/** Result of an RPC call. */
 export interface RpcResult {
   /** Arbitrary data returned by the server-side RPC handler. */
   data: any;
   /** True when the server answered from the record of an earlier attempt of this call, e.g.
-   * after a retransmit: the handler did not run again. */
-  cached: boolean;
+   * after a retransmit: the handler did not run again. Set by the client on every reply. */
+  cached?: boolean;
 }
 
 /** Options of an RPC call. */

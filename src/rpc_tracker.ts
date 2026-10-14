@@ -1,10 +1,13 @@
 import { errorCodes } from './codes';
 import { CallTimer, callTimer, raceCall } from './call_timer';
-import { hasHeaders, rpcRetryMetadataKey } from './extensions';
+import { hasHeaders } from './extensions';
 import { MsgIdGenerator, RpcQueue, TrackedRpc } from './rpc_queue';
 import type { CallRejectContext, CallResolveContext } from './centrifuge';
 import { RpcOptions, RpcResult } from './types';
 
+// The metadata key the server sets on its own rpc errors, and its two values, see retrySignal. Error
+// metadata of the server cannot carry this key itself.
+const rpcRetryMetadataKey: string = 'x-centrifugo-retry';
 const rpcRetryNewMsgId: string = 'new_msg_id';
 const rpcRetryLater: string = 'later';
 // Most sends of a call refused with a new message id, and most later attempts, after its first send.
