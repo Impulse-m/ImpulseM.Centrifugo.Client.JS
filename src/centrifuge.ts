@@ -24,8 +24,12 @@ import {
 } from './utils';
 
 import {
+  rpcOptionsFlag, hasFlag, int64ToNumber, serverErrorFields, hasHeaders,
+} from './extensions';
+
+import {
   State, Options, SubscriptionState, ClientEvents,
-  TypedEventEmitter, RpcResult, SubscriptionOptions,
+  TypedEventEmitter, RpcResult, RpcOptions, ClientCapabilities, SubscriptionOptions,
   MapSubscriptionOptions, MapSubscriptionEvents, BaseSubscriptionEvents,
   SharedPollSubscriptionOptions, SharedPollSubscriptionEvents, SharedPollTrackItem,
   HistoryOptions, HistoryResult, PublishResult,
@@ -158,6 +162,10 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _disconnects: number;
   private _abortedTransportId: number;
   private _reconnectAttemptsResetPending: boolean;
+  // Set from the connect reply of the current connection, false until one confirms it.
+  private rpcOptionsSupported: boolean = false;
+  // Server time minus local time, learnt from the time of the last reply carrying one.
+  private serverTimeOffset: number | null = null;
 
   private _debugEnabled: boolean;
   private _config: Options;
@@ -514,16 +522,42 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
   }
 
+  /** Capabilities the server confirmed for the current connection. */
+  get capabilities(): ClientCapabilities {
+    return {
+      rpcOptions: this.rpcOptionsSupported
+    };
+  }
+
+  /**
+   * Current server time in milliseconds, estimated from the time of the last reply the
+   * server sent. Local time when no reply with a server time has been seen yet.
+   */
+  serverTime(): number {
+    return Date.now() + (this.serverTimeOffset ?? 0);
+  }
+
   /** rpc to a server - i.e. a call which waits for a response with data. */
-  async rpc(method: string, data: any): Promise<RpcResult> {
-    const cmd = {
+  async rpc(method: string, data: any, opts?: RpcOptions): Promise<RpcResult> {
+    const cmd: any = {
       rpc: {
         method,
         data
       }
     };
 
+    const headers = opts?.headers;
     await this._methodCall();
+    if (hasHeaders(headers)) {
+      // Checked once connected: the capability belongs to the connection the call goes out on.
+      if (!this.rpcOptionsSupported) {
+        throw this._createErrorObject(
+          errorCodes.unsupported,
+          'rpc headers are not supported by the server'
+        );
+      }
+      cmd.rpc.headers = headers;
+    }
     const result = await this._callPromise(cmd, (reply: any) => reply.rpc);
     return {
       data: result.data
@@ -1556,6 +1590,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     if (Object.keys(this._config.headers).length > 0) {
       req.headers = this._config.headers;
     }
+    // Advertise the capabilities this client supports; the server echoes the ones it accepts.
+    req.flag = rpcOptionsFlag;
 
     const subs = {};
     let hasSubs = false;
@@ -2216,6 +2252,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _connectResponse(result: any) {
     this._transportIsOpen = true;
     this._transportWasOpen = true;
+    this.rpcOptionsSupported = hasFlag(int64ToNumber(result.flag) ?? 0, rpcOptionsFlag);
     if (this._transport !== null && this._transport.emulation()) {
       // A connect reply over an emulation transport proves only the stream. Commands
       // go through the emulation endpoint, which may keep failing and close the
@@ -2430,8 +2467,18 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     return ctx;
   }
 
+  // A reply without a server time, or with the zero value of an unset field, keeps the last offset.
+  private observeServerTime(reply: any): void {
+    const time = int64ToNumber(reply.time);
+    if (time === undefined || time === 0) {
+      return;
+    }
+    this.serverTimeOffset = time - Date.now();
+  }
+
   private _handleReply(reply: any, next: any) {
     this._resetReconnectAttemptsIfPending();
+    this.observeServerTime(reply);
     const id = reply.id;
     if (!(id in this._callbacks)) {
       next();
@@ -2453,7 +2500,12 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         next();
         return;
       }
-      const error = {code: reply.error.code, message: reply.error.message || '', temporary: reply.error.temporary || false};
+      const error = {
+        code: reply.error.code,
+        message: reply.error.message || '',
+        temporary: reply.error.temporary || false,
+        ...serverErrorFields(reply.error)
+      };
       errback({ error, next });
     }
   }
