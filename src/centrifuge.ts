@@ -24,7 +24,7 @@ import {
 } from './utils';
 
 import {
-  rpcOptionsFlag, hasFlag, int64ToNumber, serverErrorFields, hasHeaders,
+  rpcOptionsFlag, hasFlag, serverErrorFields, hasHeaders, serverTimeOffsetFrom,
 } from './extensions';
 
 import {
@@ -163,9 +163,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _abortedTransportId: number;
   private _reconnectAttemptsResetPending: boolean;
   // Set from the connect reply of the current connection, false until one confirms it.
-  private rpcOptionsSupported: boolean = false;
+  private _rpcOptionsSupported: boolean = false;
   // Server time minus local time, learnt from the time of the last reply carrying one.
-  private serverTimeOffset: number | null = null;
+  private _serverTimeOffset: number | null = null;
 
   private _debugEnabled: boolean;
   private _config: Options;
@@ -525,7 +525,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   /** Capabilities the server confirmed for the current connection. */
   get capabilities(): ClientCapabilities {
     return {
-      rpcOptions: this.rpcOptionsSupported
+      rpcOptions: this._rpcOptionsSupported
     };
   }
 
@@ -534,7 +534,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
    * server sent. Local time when no reply with a server time has been seen yet.
    */
   serverTime(): number {
-    return Date.now() + (this.serverTimeOffset ?? 0);
+    return Date.now() + (this._serverTimeOffset ?? 0);
   }
 
   /** rpc to a server - i.e. a call which waits for a response with data. */
@@ -550,7 +550,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     await this._methodCall();
     if (hasHeaders(headers)) {
       // Checked once connected: the capability belongs to the connection the call goes out on.
-      if (!this.rpcOptionsSupported) {
+      if (!this._rpcOptionsSupported) {
         throw this._createErrorObject(
           errorCodes.unsupported,
           'rpc headers are not supported by the server'
@@ -1236,6 +1236,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         self._debug(transport.subName(), 'transport closed');
         self._transportClosed = true;
         self._transportIsOpen = false;
+        self._rpcOptionsSupported = false;
 
         let reason = 'connection closed';
         let needReconnect = true;
@@ -1897,6 +1898,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     // Tear everything down before emitting any event: handlers may call connect()
     // or disconnect() synchronously, and nothing below must undo what they start.
     this._transportIsOpen = false;
+    this._rpcOptionsSupported = false;
     this._reconnecting = false;
     if (previousState === State.Connecting) {
       this._clearReconnectTimeout();
@@ -2252,7 +2254,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _connectResponse(result: any) {
     this._transportIsOpen = true;
     this._transportWasOpen = true;
-    this.rpcOptionsSupported = hasFlag(int64ToNumber(result.flag) ?? 0, rpcOptionsFlag);
+    this._rpcOptionsSupported = hasFlag(toOffset(result.flag), rpcOptionsFlag);
     if (this._transport !== null && this._transport.emulation()) {
       // A connect reply over an emulation transport proves only the stream. Commands
       // go through the emulation endpoint, which may keep failing and close the
@@ -2467,18 +2469,17 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     return ctx;
   }
 
-  // A reply without a server time, or with the zero value of an unset field, keeps the last offset.
-  private observeServerTime(reply: any): void {
-    const time = int64ToNumber(reply.time);
-    if (time === undefined || time === 0) {
-      return;
+  // A reply without a server time keeps the last offset.
+  private _observeServerTime(reply: any): void {
+    const offset = serverTimeOffsetFrom(reply.time, Date.now());
+    if (offset !== null) {
+      this._serverTimeOffset = offset;
     }
-    this.serverTimeOffset = time - Date.now();
   }
 
   private _handleReply(reply: any, next: any) {
     this._resetReconnectAttemptsIfPending();
-    this.observeServerTime(reply);
+    this._observeServerTime(reply);
     const id = reply.id;
     if (!(id in this._callbacks)) {
       next();

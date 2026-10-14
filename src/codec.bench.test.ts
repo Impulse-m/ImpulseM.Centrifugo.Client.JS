@@ -13,10 +13,9 @@ const createFixedCommands = (): centrifugal.centrifuge.protocol.Command[] => [
   { id: 5, subscribe: { channel: 'channel4', token: BENCH_TOKEN } }
 ];
 
-const createFixedReplies = (): centrifugal.centrifuge.protocol.Reply[] => [
+const createFixedReplies = (): centrifugal.centrifuge.protocol.IReply[] => [
   {
     id: 1,
-    time: 0,
     connect: {
       client: 'test-client',
       version: 'v4.0.0',
@@ -24,10 +23,10 @@ const createFixedReplies = (): centrifugal.centrifuge.protocol.Reply[] => [
       ttl: 60
     },
   },
-  {id: 2, time: 0, subscribe: {}},
-  {id: 3, time: 0, subscribe: {}},
-  {id: 4, time: 0, subscribe: {}},
-  {id: 5, time: 0, subscribe: {}}
+  {id: 2, subscribe: {}},
+  {id: 3, subscribe: {}},
+  {id: 4, subscribe: {}},
+  {id: 5, subscribe: {}}
 ];
 
 const runNIterations = (n: number, fn: () => void): { totalMs: number, avgMicro: number } => {

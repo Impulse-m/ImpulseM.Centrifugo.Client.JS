@@ -1,4 +1,4 @@
-import { hasFlag, int64ToNumber, serverErrorFields, hasHeaders, rpcOptionsFlag } from './extensions';
+import { hasFlag, serverErrorFields, hasHeaders, rpcOptionsFlag, serverTimeOffsetFrom } from './extensions';
 
 describe('rpcOptionsFlag', () => {
   test('is bit 32 of the flag bitmask', () => {
@@ -28,23 +28,20 @@ describe('hasFlag', () => {
   });
 });
 
-describe('int64ToNumber', () => {
-  test('passes a number through', () => {
-    expect(int64ToNumber(1700000000000)).toBe(1700000000000);
+describe('serverTimeOffsetFrom', () => {
+  test('is server time minus local time', () => {
+    expect(serverTimeOffsetFrom(1700000100000, 1700000000000)).toBe(100000);
   });
 
-  test('converts a Long-like value', () => {
-    expect(int64ToNumber({ toNumber: () => 42 })).toBe(42);
+  test('reads a number and a decoded Long-shaped value alike', () => {
+    expect(serverTimeOffsetFrom({ low: 1, high: 0, unsigned: false }, 0)).toBe(1);
+    expect(serverTimeOffsetFrom(1700000100000, 1700000000000)).toBe(100000);
   });
 
-  test('returns undefined for absent values', () => {
-    expect(int64ToNumber(undefined)).toBeUndefined();
-    expect(int64ToNumber(null)).toBeUndefined();
-  });
-
-  test('returns undefined for an unknown shape', () => {
-    expect(int64ToNumber({})).toBeUndefined();
-    expect(int64ToNumber('42')).toBeUndefined();
+  test('is null when the reply carries no server time', () => {
+    expect(serverTimeOffsetFrom(undefined, 1700000000000)).toBeNull();
+    expect(serverTimeOffsetFrom(null, 1700000000000)).toBeNull();
+    expect(serverTimeOffsetFrom(0, 1700000000000)).toBeNull();
   });
 });
 

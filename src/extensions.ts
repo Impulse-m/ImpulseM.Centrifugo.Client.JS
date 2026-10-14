@@ -1,4 +1,5 @@
 import { ServerErrorFields } from './types';
+import { toOffset } from './utils';
 
 /**
  * Connect flag bit 32 of the protocol flag bitmask: the client understands RPC options
@@ -18,21 +19,17 @@ export function hasFlag(flags: number, flag: number): boolean {
 }
 
 /**
- * Converts an int64 field to a number. Protobuf decoding yields a Long for int64 values,
- * JSON decoding yields a number. Returns undefined for an absent value.
+ * Offset between server and local time in milliseconds, from the server time of a reply
+ * and the local time of its arrival. Null when the reply carries no server time: the proto
+ * zero value (0) means unset.
  * @internal
  */
-export function int64ToNumber(value: any): number | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
+export function serverTimeOffsetFrom(time: any, now: number): number | null {
+  const serverTime = toOffset(time);
+  if (serverTime === 0) {
+    return null;
   }
-  if (typeof value === 'number') {
-    return value;
-  }
-  if (typeof value.toNumber === 'function') {
-    return value.toNumber();
-  }
-  return undefined;
+  return serverTime - now;
 }
 
 /**
