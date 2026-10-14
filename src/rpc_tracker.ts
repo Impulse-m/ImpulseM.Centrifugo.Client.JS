@@ -64,6 +64,11 @@ export class RpcTracker {
     deadline: number
   ): Promise<RpcResult> {
     return new Promise<RpcResult>((resolve, reject) => {
+      // An abort before the call is tracked fired no listener: it is seen here.
+      if (signal?.aborted) {
+        reject(this.host.createError(errorCodes.cancelled, 'cancelled'));
+        return;
+      }
       if (this.queue.size >= this.maxPendingRpc) {
         reject(this.host.createError(errorCodes.limitExceeded, 'too many pending rpc calls'));
         return;

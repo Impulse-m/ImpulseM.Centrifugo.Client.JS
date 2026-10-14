@@ -320,6 +320,22 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(callCommands()).toHaveLength(0);
   });
 
+  test('an abort after the connection is ready but before the call is tracked rejects with cancelled and sends nothing', async (): Promise<void> => {
+    const c: Centrifuge = create();
+    await connect(c);
+    const controller: AbortController = new AbortController();
+    // The call is ready to go out when the abort comes: no listener of the signal runs for it any more.
+    const track: any = (c as any)._rpc.track.bind((c as any)._rpc);
+    (c as any)._rpc.track = (...args: any[]): Promise<RpcResult> => {
+      controller.abort();
+      return track(...args);
+    };
+
+    await expect(c.rpc('x', codecCase.encode({}), { signal: controller.signal }))
+      .rejects.toMatchObject({ code: errorCodes.cancelled });
+    expect(callCommands()).toHaveLength(0);
+  });
+
   test('an abort while the client is not connected rejects with cancelled at once, and nothing is sent', async (): Promise<void> => {
     const c: Centrifuge = create();
     const controller: AbortController = new AbortController();
