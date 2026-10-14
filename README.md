@@ -219,6 +219,16 @@ centrifuge.on('connected', function(ctx) {
 });
 ```
 
+#### auth event
+
+`auth` event is fired on every connect, and when the user or auth class of the connection changes after a refresh. The payload is `{ user, authClass, ttl }`: `ttl` is the number of seconds until the token expires, as the server sent it. An empty `user` and `authClass` mean an anonymous connection, or a server that does not send them.
+
+```javascript
+centrifuge.on('auth', function(ctx) {
+    console.log('connection identity', ctx.user, ctx.authClass);
+});
+```
+
 #### connecting event
 
 `connecting` event fired when Centrifuge object goes to connecting state. This may be called during initial connect, or after being `connected` due to temporary connection loss.
@@ -564,6 +574,17 @@ const client = new Centrifuge(
 ```
 
 > If initial token is not provided, but `getToken` is specified – then SDK assumes that developer wants to use token authentication. In this case SDK attempts to get a connection token before establishing an initial connection.
+
+#### Refreshing the connection token on demand
+
+`refresh(token?)` sends a connection token to the server now, the given one or the one `getToken` returns. Use it after the application obtained a new token, for example after a login or a logout. The promise resolves `{ user, authClass, ttl }` with the identity the server confirmed. The token is kept for the reconnects that follow, also when the server refuses it.
+
+```javascript
+const identity = await centrifuge.refresh('NEW-CONNECTION-TOKEN');
+console.log('now connected as', identity.user);
+```
+
+While the client is disconnected, the refresh is sent on the next connect. Calls made while a refresh is pending share its promise, and `rpc` calls wait for it, so they go out under the new identity. When the server refuses the token, the promise rejects with the server error, and the connection keeps its identity. Whether the server accepts a change of user is decided by the server configuration.
 
 ## Subscription API
 
