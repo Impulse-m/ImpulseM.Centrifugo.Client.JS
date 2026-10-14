@@ -1,4 +1,4 @@
-import { MsgIdGenerator, RpcQueue, TrackedRpc, msgIdSeqBits } from './rpc_queue';
+import { MsgIdGenerator, RpcQueue, TrackedRpc, msgIdMaxSeconds, msgIdSeqBits } from './rpc_queue';
 
 const seqLimit: number = 2 ** msgIdSeqBits;
 
@@ -64,6 +64,28 @@ describe('MsgIdGenerator', () => {
     const id: number = gen.next(year2242Ms);
     expect(Number.isSafeInteger(id)).toBe(true);
     expect(id).toBeLessThan(Number.MAX_SAFE_INTEGER);
+  });
+
+  test('a server time beyond the year 2242 is clamped, and the ids stay safe integers', () => {
+    const gen: MsgIdGenerator = new MsgIdGenerator();
+    const farFutureMs: number = Date.UTC(3000, 0, 1);
+    const first: number = gen.next(farFutureMs);
+    const second: number = gen.next(farFutureMs);
+    expect(Math.floor(first / seqLimit)).toBe(msgIdMaxSeconds);
+    expect(Number.isSafeInteger(first)).toBe(true);
+    expect(Number.isSafeInteger(second)).toBe(true);
+    expect(second).toBe(first + 1);
+    expect(second).toBeLessThanOrEqual(Number.MAX_SAFE_INTEGER);
+  });
+
+  test('a clamped second that runs out of sequence throws instead of losing precision', () => {
+    const gen: MsgIdGenerator = new MsgIdGenerator();
+    const farFutureMs: number = Date.UTC(3000, 0, 1);
+    gen.next(farFutureMs);
+    for (let i: number = 1; i < seqLimit; i++) {
+      gen.next(farFutureMs);
+    }
+    expect(() => gen.next(farFutureMs)).toThrow(RangeError);
   });
 });
 

@@ -5,6 +5,9 @@ export const msgIdSeqBits: number = 20;
 
 const msgIdSeqLimit: number = 2 ** msgIdSeqBits;
 
+/** Largest time part of a message id: the bits left of a safe integer after the sequence. */
+export const msgIdMaxSeconds: number = 2 ** 33 - 1;
+
 /**
  * A tracked rpc call: registered with a message id, from the call until it settles. It is
  * sent on the current connection (commandId is set), or it waits for the next connection
@@ -31,14 +34,15 @@ export interface TrackedRpc {
  * Generates message ids as unix seconds << 20 | seq. The ids are strictly increasing per
  * generator, and their 53 bits stay exact in a JavaScript number. The time part follows the
  * server time given, but never goes back: a clock that moves backwards keeps the last second.
+ * A time beyond msgIdMaxSeconds (the year 2242) is clamped to it.
  */
 export class MsgIdGenerator {
   private lastSeconds: number = -1;
   private lastSeq: number = 0;
 
-  /** Next message id for the server time in milliseconds. */
+  /** Next message id for the server time in milliseconds. Throws a RangeError once the id space is used up. */
   next(serverTimeMs: number): number {
-    let seconds: number = Math.floor(serverTimeMs / 1000);
+    let seconds: number = Math.min(Math.floor(serverTimeMs / 1000), msgIdMaxSeconds);
     if (seconds < this.lastSeconds) {
       seconds = this.lastSeconds;
     }
@@ -47,6 +51,9 @@ export class MsgIdGenerator {
       seq = this.lastSeq + 1;
       if (seq >= msgIdSeqLimit) {
         // More calls in one second than the sequence holds: move on to the next second.
+        if (seconds >= msgIdMaxSeconds) {
+          throw new RangeError('message id space exhausted');
+        }
         seconds += 1;
         seq = 0;
       }
