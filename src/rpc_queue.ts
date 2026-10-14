@@ -2,7 +2,7 @@ import { CallTimer } from './call_timer';
 import { RpcResult } from './types';
 
 /** Bits of the sequence part of a message id. */
-export const msgIdSeqBits: number = 20;
+const msgIdSeqBits: number = 20;
 
 const msgIdSeqLimit: number = 2 ** msgIdSeqBits;
 
@@ -87,8 +87,13 @@ export class MsgIdGenerator {
    * calls this, since the window of the server is not known otherwise.
    */
   resync(serverTimeMs: number): void {
+    const seconds: number = this.clampSeconds(serverTimeMs);
+    if (seconds === this.lastSeconds) {
+      // The second is in use: its sequence goes on, so no id of it is issued twice.
+      return;
+    }
     this.lane = drawLane();
-    this.lastSeconds = this.clampSeconds(serverTimeMs);
+    this.lastSeconds = seconds;
     this.lastSeq = this.lane - 1;
   }
 
@@ -97,43 +102,38 @@ export class MsgIdGenerator {
   }
 }
 
+// Sorts calls by message id: the order the calls are sent in on a connection.
+function byMsgId(calls: TrackedRpc[]): TrackedRpc[] {
+  return calls.sort((a: TrackedRpc, b: TrackedRpc): number => a.msgId - b.msgId);
+}
+
 /**
- * The tracked rpc calls of a client, in message id order, and the message ids of the replies
- * the client received, to acknowledge with its next request.
+ * The tracked rpc calls of a client, and the message ids of the replies the client received, to
+ * acknowledge with its next request. Calls are kept by identity: a call with a message id that
+ * another call has too is tracked on its own.
  */
 export class RpcQueue {
-  private calls: Map<number, TrackedRpc> = new Map();
+  private calls: Set<TrackedRpc> = new Set();
   private acks: number[] = [];
 
-  /** Number of calls not settled yet. */
-  get size(): number {
-    return this.calls.size;
-  }
-
-  /** Registers a call. Calls are added in increasing message id order. */
+  /** Registers a call. */
   add(call: TrackedRpc): void {
-    this.calls.set(call.msgId, call);
+    this.calls.add(call);
   }
 
   /** Removes a call, e.g. when it settled. */
-  remove(msgId: number): void {
-    this.calls.delete(msgId);
+  remove(call: TrackedRpc): void {
+    this.calls.delete(call);
   }
 
   /** The calls waiting for a connection, in message id order. */
   waiting(): TrackedRpc[] {
-    const result: TrackedRpc[] = [];
-    for (const call of this.calls.values()) {
-      if (call.commandId === 0) {
-        result.push(call);
-      }
-    }
-    return result;
+    return byMsgId(Array.from(this.calls).filter((call: TrackedRpc): boolean => call.commandId === 0));
   }
 
   /** Removes all calls and returns them, in message id order. */
   clear(): TrackedRpc[] {
-    const result: TrackedRpc[] = Array.from(this.calls.values());
+    const result: TrackedRpc[] = byMsgId(Array.from(this.calls));
     this.calls.clear();
     return result;
   }

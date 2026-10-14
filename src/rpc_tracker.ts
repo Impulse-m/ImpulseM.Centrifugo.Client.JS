@@ -379,9 +379,7 @@ export class RpcTracker {
       call.newIdResends++;
       // The refused id was never recorded by the server: the call takes an id of the corrected clock.
       this.msgIds.resync(this.host.serverTime());
-      this.queue.remove(call.msgId);
       call.msgId = this.msgIds.next(this.host.serverTime());
-      this.queue.add(call);
       this.send(call, false);
       return true;
     }
@@ -492,6 +490,6 @@ export class RpcTracker {
       call.resend = null;
     }
     call.detach();
-    this.queue.remove(call.msgId);
+    this.queue.remove(call);
   }
 }

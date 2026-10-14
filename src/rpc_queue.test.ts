@@ -1,6 +1,7 @@
-import { MsgIdGenerator, RpcQueue, TrackedRpc, msgIdMaxSeconds, msgIdSeqBits } from './rpc_queue';
+import { MsgIdGenerator, RpcQueue, TrackedRpc, msgIdMaxSeconds } from './rpc_queue';
 
-const seqLimit: number = 2 ** msgIdSeqBits;
+// The sequence part of a message id: 20 bits, as the server reads it.
+const seqLimit: number = 2 ** 20;
 
 function trackedCall(msgId: number, commandId: number): TrackedRpc {
   return {
@@ -90,6 +91,18 @@ describe('MsgIdGenerator', () => {
     expect(id % seqLimit).toBe(7);
   });
 
+  test('resync in the second in use keeps the sequence, so no id is issued twice', () => {
+    const gen: MsgIdGenerator = generatorWithLane(3);
+    const seconds: number = 1_700_000_000;
+    const issued: number[] = [gen.next(seconds * 1000), gen.next(seconds * 1000)];
+    const random: jest.SpyInstance = jest.spyOn(Math, 'random').mockReturnValue(9 / 2 ** 19);
+    gen.resync(seconds * 1000);
+    random.mockRestore();
+    const next: number = gen.next(seconds * 1000);
+    expect(next).toBe(issued[1] + 1);
+    expect(issued).not.toContain(next);
+  });
+
   test('two generators created in the same second give different first ids', () => {
     for (let i: number = 0; i < 20; i++) {
       const first: MsgIdGenerator = new MsgIdGenerator();
@@ -139,14 +152,15 @@ describe('RpcQueue', () => {
     expect(queue.waiting().map((call: TrackedRpc): number => call.msgId)).toEqual([2, 3]);
   });
 
-  test('size counts the calls not removed', () => {
+  test('a call is removed by its identity, so calls sharing a message id stay apart', () => {
     const queue: RpcQueue = new RpcQueue();
-    queue.add(trackedCall(1, 1));
-    queue.add(trackedCall(2, 2));
-    expect(queue.size).toBe(2);
-    queue.remove(1);
-    expect(queue.size).toBe(1);
-    expect(queue.clear().map((call: TrackedRpc): number => call.msgId)).toEqual([2]);
+    const first: TrackedRpc = trackedCall(5, 1);
+    const second: TrackedRpc = trackedCall(5, 0);
+    queue.add(first);
+    queue.add(second);
+    queue.remove(first);
+    expect(queue.waiting()).toEqual([second]);
+    expect(queue.clear()).toEqual([second]);
   });
 
   test('clear returns all calls in message id order and empties the queue', () => {
@@ -154,7 +168,14 @@ describe('RpcQueue', () => {
     queue.add(trackedCall(7, 1));
     queue.add(trackedCall(9, 0));
     expect(queue.clear().map((call: TrackedRpc): number => call.msgId)).toEqual([7, 9]);
-    expect(queue.size).toBe(0);
+    expect(queue.clear()).toEqual([]);
+  });
+
+  test('waiting calls stay in message id order when a call is added behind a higher id', () => {
+    const queue: RpcQueue = new RpcQueue();
+    queue.add(trackedCall(200, 0));
+    queue.add(trackedCall(150, 0));
+    expect(queue.waiting().map((call: TrackedRpc): number => call.msgId)).toEqual([150, 200]);
   });
 
   test('acks are taken once', () => {
