@@ -24,8 +24,8 @@ import {
 } from './utils';
 
 import {
-  rpcOptionsFlag, hasFlag, serverErrorFields, hasHeaders, serverTimeOffsetFrom, rpcConfigError,
-  refreshErrorKeepsConnection, raceCall, callTimer, lateCallTimer, lateCallGrace,
+  rpcOptionsFlag, hasFlag, serverErrorFields, serverTimeOffsetFrom, rpcConfigError,
+  refreshErrorKeepsConnection, callTimer, lateCallTimer, lateCallGrace,
 } from './extensions';
 
 import { RpcCallbacks, RpcTracker } from './rpc_tracker';
@@ -241,6 +241,10 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       throw this._createErrorObject(errorCodes.badConfiguration, configError);
     }
     this._rpc = new RpcTracker({
+      isConnected: (): boolean => this._isConnected(),
+      hasInstance: (): boolean => !!this._config.instance,
+      ready: (deadline: number): Promise<void> => this._callReady(deadline),
+      plainCall: (command: any): Promise<any> => this._callPromise(command, (reply: any): any => reply.rpc),
       nextCommandId: (): number => this._nextCommandId(),
       addCommand: (command: any): void => this._addCommand(command),
       setCallbacks: (id: number, callbacks: RpcCallbacks): void => {
@@ -600,52 +604,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   /** rpc to a server - i.e. a call which waits for a response with data. */
   async rpc(method: string, data: any, opts?: RpcOptions): Promise<RpcResult> {
-    const headers = opts?.headers;
-    const signal = opts?.signal;
-    if (signal?.aborted) {
-      // A connection that cannot carry a call with a signal rejects it with unsupported, as below.
-      if (this._isConnected() && (!this._rpcOptionsSupported || !this._config.instance)) {
-        throw this._createErrorObject(
-          errorCodes.unsupported,
-          this._rpcOptionsSupported ? 'rpc cancel needs the instance option' : 'rpc cancel is not supported by the server'
-        );
-      }
-      throw this._createErrorObject(errorCodes.cancelled, 'cancelled');
-    }
     // The deadline of the call counts from now, across its wait and its attempts.
-    const deadline: number = Date.now() + this._config.timeout;
-    await this._awaitCallReady(deadline, signal);
-    // Checked once connected: the capability belongs to the connection the call goes out on.
-    // Only a call with an instance is tracked: the server scopes the retransmit and the cancel by it.
-    if (this._rpcOptionsSupported && this._config.instance) {
-      return this._rpc.track(method, data, headers, signal, deadline);
-    }
-    if (!this._rpcOptionsSupported && hasHeaders(headers)) {
-      throw this._createErrorObject(
-        errorCodes.unsupported,
-        'rpc headers are not supported by the server'
-      );
-    }
-    if (signal !== undefined) {
-      throw this._createErrorObject(
-        errorCodes.unsupported,
-        this._rpcOptionsSupported ? 'rpc cancel needs the instance option' : 'rpc cancel is not supported by the server'
-      );
-    }
-    const cmd: any = {
-      rpc: {
-        method,
-        data
-      }
-    };
-    if (this._rpcOptionsSupported && hasHeaders(headers)) {
-      cmd.rpc.headers = headers;
-    }
-    const result = await this._callPromise(cmd, (reply: any) => reply.rpc);
-    return {
-      data: result.data,
-      cached: result.cached === true
-    };
+    return this._rpc.call(method, data, opts, Date.now() + this._config.timeout);
   }
 
   /** publish data to a channel. */
@@ -1748,18 +1708,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       }
     }
     return req;
-  }
-
-  // Waits for the connection and for a refresh in flight, before a call goes out. The deadline and the
-  // signal of the call end the wait, so a call never waits past its timeout.
-  private _awaitCallReady(deadline: number, signal: AbortSignal | undefined): Promise<void> {
-    return raceCall(
-      this._callReady(deadline),
-      deadline,
-      signal,
-      (): any => this._createErrorObject(errorCodes.timeout, 'timeout'),
-      (): any => this._createErrorObject(errorCodes.cancelled, 'cancelled'),
-    );
   }
 
   // After the connection: a refresh in flight is confirmed on it, and the call goes out under that identity.

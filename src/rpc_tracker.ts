@@ -1,8 +1,8 @@
 import { errorCodes } from './codes';
-import { CallTimer, callTimer, hasHeaders } from './extensions';
+import { CallTimer, callTimer, hasHeaders, raceCall } from './extensions';
 import { MsgIdGenerator, RpcQueue, TrackedRpc } from './rpc_queue';
 import type { CallRejectContext, CallResolveContext } from './centrifuge';
-import { RpcResult } from './types';
+import { RpcOptions, RpcResult } from './types';
 
 
 /** The callbacks of a command waiting for its reply, as the client keeps them by command id. */
@@ -24,6 +24,12 @@ export interface RpcHost {
   createError(code: number, message: string): any;
   serverTime(): number;
   rpcOptionsSupported(): boolean;
+  isConnected(): boolean;
+  hasInstance(): boolean;
+  /** Resolves once a call can go out: connected, and no refresh in flight. Rejects when the client is disconnected for good. */
+  ready(deadline: number): Promise<void>;
+  /** Sends a plain rpc request on the connection. Resolves with the result of its reply. */
+  plainCall(command: any): Promise<any>;
 }
 
 
@@ -48,6 +54,56 @@ export class RpcTracker {
     this.host = host;
     this.maxPendingRpc = maxPendingRpc;
     this.callTimeout = callTimeout;
+  }
+
+
+  /**
+   * Runs an rpc call. It waits for the connection and for a refresh in flight, then goes out: tracked
+   * when the connection supports RPC options and the client has an instance, else as a plain request.
+   * The deadline counts from the rpc() call, across the wait and the attempts.
+   */
+  async call(method: string, data: any, opts: RpcOptions | undefined, deadline: number): Promise<RpcResult> {
+    const headers: Record<string, string> | undefined = opts?.headers;
+    const signal: AbortSignal | undefined = opts?.signal;
+    if (signal?.aborted) {
+      // A connection that cannot carry a call with a signal rejects it with unsupported, as below.
+      if (this.host.isConnected() && (!this.host.rpcOptionsSupported() || !this.host.hasInstance())) {
+        throw this.signalUnsupported();
+      }
+      throw this.host.createError(errorCodes.cancelled, 'cancelled');
+    }
+    await raceCall(
+      this.host.ready(deadline),
+      deadline,
+      signal,
+      (): any => this.host.createError(errorCodes.timeout, 'timeout'),
+      (): any => this.host.createError(errorCodes.cancelled, 'cancelled'),
+    );
+    // Checked once connected: the capability belongs to the connection the call goes out on.
+    // Only a call with an instance is tracked: the server scopes the retransmit and the cancel by it.
+    if (this.host.rpcOptionsSupported() && this.host.hasInstance()) {
+      return this.track(method, data, headers, signal, deadline);
+    }
+    if (!this.host.rpcOptionsSupported() && hasHeaders(headers)) {
+      throw this.host.createError(errorCodes.unsupported, 'rpc headers are not supported by the server');
+    }
+    if (signal !== undefined) {
+      throw this.signalUnsupported();
+    }
+    const cmd: any = {
+      rpc: {
+        method,
+        data
+      }
+    };
+    if (this.host.rpcOptionsSupported() && hasHeaders(headers)) {
+      cmd.rpc.headers = headers;
+    }
+    const result: any = await this.host.plainCall(cmd);
+    return {
+      data: result.data,
+      cached: result.cached === true
+    };
   }
 
 
@@ -134,6 +190,15 @@ export class RpcTracker {
       this.settle(call);
       call.reject(this.host.createError(code, message));
     }
+  }
+
+
+  // The error of a call with a signal on a connection that cannot carry it.
+  private signalUnsupported(): any {
+    return this.host.createError(
+      errorCodes.unsupported,
+      this.host.rpcOptionsSupported() ? 'rpc cancel needs the instance option' : 'rpc cancel is not supported by the server'
+    );
   }
 
 
