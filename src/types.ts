@@ -177,6 +177,15 @@ export interface Options {
    * is used if it supports addEventListener (window in browsers). Listeners are removed once the
    * client becomes disconnected (a custom target must implement removeEventListener for this). */
   networkEventTarget: EventTarget | null;
+  /** Identifier of this installation or browser tab, sent with the connect command. The app
+   * generates it and keeps it, the client neither generates nor stores it. It must be a random
+   * secret of at least 128 bits, 22 to 64 characters of A-Z, a-z, 0-9, '_' and '-', never logged
+   * or shared: whoever knows it can retransmit and cancel the calls of its scope. Empty (default)
+   * means none. A value that does not match throws a configuration error. */
+  instance: string;
+  /** Maximum number of rpc calls tracked for retransmit at once, sent or waiting for a
+   * connection. An rpc() beyond it rejects with errorCodes.limitExceeded. Default: 32. */
+  maxPendingRpc: number;
 }
 
 /**
@@ -495,6 +504,9 @@ export interface PublishResult {
 export interface RpcResult {
   /** Arbitrary data returned by the server-side RPC handler. */
   data: any;
+  /** True when the server answered from the record of an earlier attempt of this call, e.g.
+   * after a retransmit: the handler did not run again. */
+  cached: boolean;
 }
 
 /** Options of an RPC call. */
@@ -502,6 +514,10 @@ export interface RpcOptions {
   /** Headers sent with this call only. Needs a server that supports RPC options:
    * when it does not, rpc() rejects with error code `errorCodes.unsupported`. */
   headers?: Record<string, string>;
+  /** Cancels the call when aborted: a cancel is sent to the server, and rpc() rejects with
+   * error code `errorCodes.cancelled`. Needs a server that supports RPC options, otherwise
+   * rpc() rejects with `errorCodes.unsupported` without sending the call. */
+  signal?: AbortSignal;
 }
 
 /** Capabilities the server confirmed for the current connection. */

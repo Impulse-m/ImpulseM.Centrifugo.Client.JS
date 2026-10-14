@@ -26,6 +26,7 @@ import { toOffset } from './utils';
 //   - Send anything the protocol allows:     server.sendPush({ disconnect: { code: 3000, reason: 'bye' } })
 //   - Drive a reconnect:                     server.closeConnection()
 //   - Assert on what the client sent:        server.received / server.lastSubscribe
+//   - Wait for a command, then act:          await server.waitFor(cmd => cmd.rpc !== undefined)
 
 /** Options for a subscribe reply. Extend with more fields as scenarios need them. */
 export interface SubscribeReplyOptions {
@@ -91,6 +92,8 @@ export class FakeCentrifugoServer {
   private current: WebSocket | null = null;
   private codec: FakeCodec;
   private protobuf: ProtobufCodec = new ProtobufCodec();
+  private closed: boolean = false;
+  private waiters: Array<{ predicate: (cmd: any) => boolean; resolve: (cmd: any) => void }> = [];
 
   /** All commands received from the client, in order. */
   readonly received: any[] = [];
@@ -145,8 +148,26 @@ export class FakeCentrifugoServer {
     return undefined;
   }
 
-  /** Stop the server. */
+  /**
+   * Resolves with the first command matching the predicate: one received already, or the next
+   * one received. Sees every command, so a test can wait for a call before it drops the transport.
+   */
+  waitFor(predicate: (cmd: any) => boolean): Promise<any> {
+    const found: any = this.received.find(predicate);
+    if (found !== undefined) {
+      return Promise.resolve(found);
+    }
+    return new Promise<any>(resolve => {
+      this.waiters.push({ predicate: predicate, resolve: resolve });
+    });
+  }
+
+  /** Stop the server. Calling it again does nothing. */
   close(): Promise<void> {
+    if (this.closed) {
+      return Promise.resolve();
+    }
+    this.closed = true;
     return new Promise<void>(resolve => this.wss.close(() => resolve()));
   }
 
@@ -158,6 +179,10 @@ export class FakeCentrifugoServer {
 
   private dispatch(cmd: any) {
     this.received.push(cmd);
+    for (const waiter of this.waiters.filter(w => w.predicate(cmd))) {
+      this.waiters.splice(this.waiters.indexOf(waiter), 1);
+      waiter.resolve(cmd);
+    }
 
     if (this.onCommand) {
       const reply = this.onCommand(cmd, this);

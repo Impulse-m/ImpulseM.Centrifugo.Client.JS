@@ -24,8 +24,10 @@ import {
 } from './utils';
 
 import {
-  rpcOptionsFlag, hasFlag, serverErrorFields, hasHeaders, serverTimeOffsetFrom,
+  rpcOptionsFlag, hasFlag, serverErrorFields, hasHeaders, serverTimeOffsetFrom, isValidInstance,
 } from './extensions';
+
+import { MsgIdGenerator, RpcQueue, TrackedRpc } from './rpc_queue';
 
 import {
   State, Options, SubscriptionState, ClientEvents, AuthContext,
@@ -86,6 +88,8 @@ const defaults: Options = {
   timeout: 5000,
   maxServerPingDelay: 10000,
   networkEventTarget: null,
+  instance: '',
+  maxPendingRpc: 32,
 }
 
 const websocketNotFound = 'WebSocket constructor not found, make sure it is available globally or passed as a dependency in Centrifuge options';
@@ -171,6 +175,12 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _authClass: string = '';
   // The refresh() call in flight: the calls made meanwhile share its promise.
   private _authRefresh: Promise<AuthContext> | null = null;
+  // The rpc calls tracked for retransmit, and the generator of their message ids.
+  private _rpcQueue: RpcQueue = new RpcQueue();
+  private _msgIds: MsgIdGenerator = new MsgIdGenerator();
+  // Message ids of calls aborted while they waited for a connection: sent as cancels with the
+  // next connection, in case the server received the call before the connection was lost.
+  private _rpcCancels: number[] = [];
 
   private _debugEnabled: boolean;
   private _config: Options;
@@ -227,6 +237,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     this._reconnectAttemptsResetPending = false;
 
     this._config = { ...defaults, ...options };
+    this._validateRpcConfig();
     this._configure();
 
     if (this._debugEnabled) {
@@ -565,32 +576,45 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   /** rpc to a server - i.e. a call which waits for a response with data. */
   async rpc(method: string, data: any, opts?: RpcOptions): Promise<RpcResult> {
-    const cmd: any = {
-      rpc: {
-        method,
-        data
-      }
-    };
-
     const headers = opts?.headers;
+    const signal = opts?.signal;
     if (this._authRefresh !== null) {
       await this._waitAuthRefresh();
     }
     await this._methodCall();
-    if (hasHeaders(headers)) {
-      // Checked once connected: the capability belongs to the connection the call goes out on.
-      if (!this._rpcOptionsSupported) {
+    // Checked once connected: the capability belongs to the connection the call goes out on.
+    if (!this._rpcOptionsSupported) {
+      if (hasHeaders(headers)) {
         throw this._createErrorObject(
           errorCodes.unsupported,
           'rpc headers are not supported by the server'
         );
       }
-      cmd.rpc.headers = headers;
+      if (signal !== undefined) {
+        throw this._createErrorObject(
+          errorCodes.unsupported,
+          'rpc cancel is not supported by the server'
+        );
+      }
+      const cmd: any = {
+        rpc: {
+          method,
+          data
+        }
+      };
+      const result = await this._callPromise(cmd, (reply: any) => reply.rpc);
+      return {
+        data: result.data,
+        cached: result.cached === true
+      };
     }
-    const result = await this._callPromise(cmd, (reply: any) => reply.rpc);
-    return {
-      data: result.data
-    };
+    if (signal?.aborted) {
+      throw this._createErrorObject(errorCodes.cancelled, 'cancelled');
+    }
+    if (this._rpcQueue.size >= this._config.maxPendingRpc) {
+      throw this._createErrorObject(errorCodes.limitExceeded, 'too many pending rpc calls');
+    }
+    return this._rpcTrack(method, data, headers, signal);
   }
 
   /** publish data to a channel. */
@@ -920,6 +944,10 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       if (this._callbacks.hasOwnProperty(id)) {
         const callbacks = this._callbacks[id];
         clearTimeout(callbacks.timeout);
+        if (callbacks.lost) {
+          callbacks.lost();
+          continue;
+        }
         const errback = callbacks.errback;
         if (!errback) {
           continue;
@@ -965,6 +993,10 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       const callbacks = this._callbacks[id];
       clearTimeout(this._callbacks[id].timeout);
       delete this._callbacks[id];
+      if (callbacks.lost) {
+        callbacks.lost();
+        continue;
+      }
       const errback = callbacks.errback;
       errback({ error: this._createErrorObject(errorCodes.transportWriteError, 'transport write error') });
     }
@@ -1622,6 +1654,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
     // Advertise the capabilities this client supports; the server echoes the ones it accepts.
     req.flag = rpcOptionsFlag;
+    if (this._config.instance !== '') {
+      req.instance = this._config.instance;
+    }
 
     const subs = {};
     let hasSubs = false;
@@ -1715,6 +1750,207 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         }
       );
     });
+  }
+
+  // Throws for a configuration no call can fix, before the client is used.
+  private _validateRpcConfig(): void {
+    const instance: string = this._config.instance;
+    if (instance !== '' && !isValidInstance(instance)) {
+      throw this._createErrorObject(
+        errorCodes.badConfiguration,
+        'instance must be 22 to 64 characters of A-Z, a-z, 0-9, "_" or "-"'
+      );
+    }
+    const maxPendingRpc: number = this._config.maxPendingRpc;
+    if (!Number.isInteger(maxPendingRpc) || maxPendingRpc < 1) {
+      throw this._createErrorObject(
+        errorCodes.badConfiguration,
+        'maxPendingRpc must be a positive integer'
+      );
+    }
+  }
+
+  // A call with a message id: kept across a lost connection and sent again on the next one,
+  // until it settles: a reply, an error, its deadline, or its signal aborted.
+  private _rpcTrack(
+    method: string,
+    data: any,
+    headers: Record<string, string> | undefined,
+    signal: AbortSignal | undefined
+  ): Promise<RpcResult> {
+    return new Promise<RpcResult>((resolve, reject) => {
+      const call: TrackedRpc = {
+        msgId: this._msgIds.next(this.serverTime()),
+        method: method,
+        data: data,
+        headers: headers,
+        deadline: Date.now() + this._config.timeout,
+        commandId: 0,
+        timer: null,
+        settled: false,
+        detach: () => {},
+        resolve: resolve,
+        reject: reject
+      };
+      if (signal !== undefined) {
+        const onAbort = () => this._rpcAbort(call);
+        signal.addEventListener('abort', onAbort, { once: true });
+        call.detach = () => signal.removeEventListener('abort', onAbort);
+      }
+      this._rpcQueue.add(call);
+      call.timer = setTimeout(() => this._rpcExpire(call), Math.max(0, call.deadline - Date.now()));
+      this._rpcSend(call, false);
+    });
+  }
+
+  // Sends the call on the current connection. The command id is new for every attempt, the
+  // message id is the call's.
+  private _rpcSend(call: TrackedRpc, retransmit: boolean): void {
+    const id: number = this._nextCommandId();
+    const rpc: any = {
+      method: call.method,
+      data: call.data,
+      msg_id: call.msgId
+    };
+    if (hasHeaders(call.headers)) {
+      rpc.headers = call.headers;
+    }
+    const acks: number[] = this._rpcQueue.takeAcks();
+    if (acks.length > 0) {
+      rpc.ack = acks;
+    }
+    if (retransmit) {
+      rpc.retransmit = true;
+    }
+    call.commandId = id;
+    this._callbacks[id] = {
+      callback: (ctx: CallResolveContext) => this._rpcReplied(call, ctx),
+      errback: (ctx: CallRejectContext) => this._rpcFailed(call, ctx),
+      lost: () => this._rpcLost(call),
+      timeout: null
+    };
+    this._addCommand({ id: id, rpc: rpc });
+  }
+
+  // A reply of the server: it settles the call, or only acknowledges it when the call settled
+  // before (aborted or expired).
+  private _rpcReplied(call: TrackedRpc, ctx: CallResolveContext): void {
+    this._rpcQueue.addAck(call.msgId);
+    if (!call.settled) {
+      this._rpcSettle(call);
+      const result = ctx.reply.rpc || {};
+      call.resolve({
+        data: result.data,
+        cached: result.cached === true
+      });
+    }
+    ctx.next?.();
+  }
+
+  // An error reply of the server, surfaced unchanged. It is not retried: the server's codes for
+  // a rejected message id are configurable, so there is no signal to retry on.
+  private _rpcFailed(call: TrackedRpc, ctx: CallRejectContext): void {
+    this._rpcQueue.addAck(call.msgId);
+    if (!call.settled) {
+      this._rpcSettle(call);
+      call.reject(ctx.error);
+    }
+    ctx.next?.();
+  }
+
+  // The connection was lost before the reply: the call waits for the next connection.
+  private _rpcLost(call: TrackedRpc): void {
+    call.commandId = 0;
+  }
+
+  private _rpcExpire(call: TrackedRpc): void {
+    call.timer = null;
+    if (call.settled) {
+      return;
+    }
+    this._rpcSettle(call);
+    call.reject(this._createErrorObject(errorCodes.timeout, 'timeout'));
+  }
+
+  // The signal of the call aborted: the call settles locally, and the server gets a cancel.
+  private _rpcAbort(call: TrackedRpc): void {
+    if (call.settled) {
+      return;
+    }
+    const sent: boolean = call.commandId > 0;
+    this._rpcSettle(call);
+    if (sent) {
+      this._rpcSendCancel(call.msgId);
+    } else {
+      this._rpcCancels.push(call.msgId);
+    }
+    call.reject(this._createErrorObject(errorCodes.cancelled, 'cancelled'));
+  }
+
+  // Settles the call: no timer, no abort listener, not tracked anymore.
+  private _rpcSettle(call: TrackedRpc): void {
+    call.settled = true;
+    if (call.timer !== null) {
+      clearTimeout(call.timer);
+      call.timer = null;
+    }
+    call.detach();
+    this._rpcQueue.remove(call.msgId);
+  }
+
+  private _rpcSendCancel(msgId: number): void {
+    const id: number = this._nextCommandId();
+    const rpc: any = {
+      cancel: msgId
+    };
+    const acks: number[] = this._rpcQueue.takeAcks();
+    if (acks.length > 0) {
+      rpc.ack = acks;
+    }
+    // The reply to a cancel carries nothing the client needs.
+    this._callbacks[id] = {
+      callback: (ctx: CallResolveContext) => ctx.next?.(),
+      errback: (ctx: CallRejectContext) => ctx.next?.(),
+      timeout: null
+    };
+    this._addCommand({ id: id, rpc: rpc });
+  }
+
+  // On a connection that confirmed the capability: sends the cancels and the waiting calls, in
+  // message id order, each with its original deadline. A connection without the capability
+  // cannot take the calls again.
+  private _sendWaitingRpc(): void {
+    const cancels: number[] = this._rpcCancels;
+    this._rpcCancels = [];
+    if (!this._rpcOptionsSupported) {
+      for (const call of this._rpcQueue.waiting()) {
+        this._rpcSettle(call);
+        call.reject(this._createErrorObject(
+          errorCodes.unsupported,
+          'rpc options are not supported by the server'
+        ));
+      }
+      return;
+    }
+    for (const msgId of cancels) {
+      this._rpcSendCancel(msgId);
+    }
+    for (const call of this._rpcQueue.waiting()) {
+      if (call.deadline <= Date.now()) {
+        this._rpcExpire(call);
+      } else {
+        this._rpcSend(call, true);
+      }
+    }
+  }
+
+  // Rejects all tracked calls, e.g. on disconnect() when they will not be sent again.
+  private _rejectRpcCalls(code: number, message: string): void {
+    this._rpcCancels = [];
+    for (const call of this._rpcQueue.clear()) {
+      this._rpcSettle(call);
+      call.reject(this._createErrorObject(code, message));
+    }
   }
 
   private _dataReceived(data, transportId: number = this._transportId) {
@@ -1960,6 +2196,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     this._commands = [];
     this._clearOutgoingRequests();
     if (!reconnect) {
+      this._rejectRpcCalls(errorCodes.connectionClosed, 'connection closed');
       this._rejectPromises({ code: errorCodes.clientDisconnected, message: 'disconnected' });
       // Network listeners are removed with the state change below, so no online
       // event can reset it.
@@ -2391,6 +2628,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       return;
     }
 
+    // Before the calls waiting for the connection go on: they are sent in message id order first.
+    this._sendWaitingRpc();
     this._resolvePromises();
 
     this._processServerSubs(result.subs || {}, transition);
