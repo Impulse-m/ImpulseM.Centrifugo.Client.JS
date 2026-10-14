@@ -2395,7 +2395,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
     let result: any;
     try {
-      await this._methodCall();
+      await this._waitConnected();
       result = await this._callPromise({ refresh: { token: newToken } }, (reply: any) => reply.refresh);
     } catch (err) {
       // Refused or not sent: the reconnects keep the token the server accepted before.
@@ -2408,6 +2408,18 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     this._debug('connection token refreshed');
     this._refreshResponse(result);
     return { user: this._user, authClass: this._authClass, ttl: result.ttl ?? 0 };
+  }
+
+  // Resolves once the client is connected. Unlike _methodCall there is no timeout: a refresh
+  // waiting for a reconnect is sent on that connect, however long it takes. Rejects when the
+  // client is disconnected for good.
+  private _waitConnected(): Promise<void> {
+    if (this._isConnected()) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      this._promises[this._nextPromiseId()] = { timeout: null, resolve: resolve, reject: reject };
+    });
   }
 
   // A call made during a refresh goes out under the identity the refresh confirms. A failed

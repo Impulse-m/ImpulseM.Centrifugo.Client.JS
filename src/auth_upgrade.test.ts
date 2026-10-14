@@ -185,6 +185,26 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase) => 
     expect(refreshCommands()).toHaveLength(1);
   });
 
+  test('a refresh waiting for a reconnect longer than the timeout is still sent on that connect', async () => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated' };
+    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? {
+      id: cmd.id,
+      refresh: { user: 'bob', auth_class: 'authenticated' },
+    } : undefined);
+    const c = create({ timeout: 100, minReconnectDelay: 400, maxReconnectDelay: 400 });
+    await connect(c);
+
+    const reconnecting = new Promise<void>(resolve => c.once('connecting', () => resolve()));
+    server.closeConnection();
+    await reconnecting;
+    const result = await c.refresh('new-token');
+
+    expect(result).toEqual({ user: 'bob', authClass: 'authenticated', ttl: 0 });
+    expect(connectCommands()).toHaveLength(2);
+    expect(connectCommands()[1].connect.token).toBe('new-token');
+    expect(refreshCommands()).toHaveLength(1);
+  });
+
   test('calls made while a refresh is pending share its promise', async () => {
     server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? { id: cmd.id, refresh: {} } : undefined);
     const c = create();
