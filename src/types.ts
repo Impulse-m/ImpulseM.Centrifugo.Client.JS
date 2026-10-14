@@ -185,7 +185,7 @@ export interface Options {
   instance?: string;
   /** Maximum number of rpc calls tracked for retransmit at once, sent or waiting for a
    * connection. An rpc() beyond it rejects with errorCodes.limitExceeded. Default: 32. */
-  maxPendingRpc: number;
+  maxPendingRpc?: number;
 }
 
 /**
