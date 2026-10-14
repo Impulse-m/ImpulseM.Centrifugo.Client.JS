@@ -1,0 +1,268 @@
+import { errorCodes } from './codes';
+import { hasHeaders } from './extensions';
+import { MsgIdGenerator, RpcQueue, TrackedRpc } from './rpc_queue';
+import { RpcResult } from './types';
+
+
+/** A reply of the server. Its next() continues the dispatch of the replies. */
+export interface RpcReplyContext {
+  reply: any;
+  next?: () => void;
+}
+
+
+/** A failed command: an error reply of the server, or a failure of the client. */
+export interface RpcFailureContext {
+  error: any;
+  next?: () => void;
+}
+
+
+/** The callbacks of a command waiting for its reply, as the client keeps them by command id. */
+export interface RpcCallbacks {
+  callback: (ctx: RpcReplyContext) => void;
+  errback: (ctx: RpcFailureContext) => void;
+  // Called instead of errback when the connection is lost before the reply.
+  lost?: () => void;
+  timeout: ReturnType<typeof setTimeout> | null;
+}
+
+
+/** What the tracker needs from its client. */
+export interface RpcHost {
+  nextCommandId(): number;
+  addCommand(command: any): void;
+  setCallbacks(id: number, callbacks: RpcCallbacks): void;
+  deleteCallbacks(id: number): void;
+  createError(code: number, message: string): any;
+  serverTime(): number;
+  rpcOptionsSupported(): boolean;
+}
+
+
+/**
+ * Tracks the rpc calls of a client. A call with a message id is kept until it settles: by a reply,
+ * an error, its deadline or its signal. A call whose connection is lost before its reply waits for
+ * the next connection, and is sent again there with the same message id. The ids of the replies
+ * received are acknowledged with the next request.
+ */
+export class RpcTracker {
+  private host: RpcHost;
+  private maxPendingRpc: number;
+  private callTimeout: number;
+  private queue: RpcQueue = new RpcQueue();
+  private msgIds: MsgIdGenerator = new MsgIdGenerator();
+  // Message ids of calls aborted while they waited for a connection: sent as cancels with the
+  // next connection, in case the server received the call before the connection was lost.
+  private cancels: number[] = [];
+  // Places taken by calls being admitted, see reserve.
+  private reserved: number = 0;
+
+  constructor(host: RpcHost, maxPendingRpc: number, callTimeout: number) {
+    this.host = host;
+    this.maxPendingRpc = maxPendingRpc;
+    this.callTimeout = callTimeout;
+  }
+
+  /**
+   * Takes a place for a call that may be tracked, so the calls tracked and the calls waiting to be
+   * tracked stay within maxPendingRpc. Throws errorCodes.limitExceeded when there is no place.
+   * Each reserve is paired with a release.
+   */
+  reserve(): void {
+    if (this.queue.size + this.reserved >= this.maxPendingRpc) {
+      throw this.host.createError(errorCodes.limitExceeded, 'too many pending rpc calls');
+    }
+    this.reserved++;
+  }
+
+  /** Gives back the place taken by reserve. */
+  release(): void {
+    this.reserved--;
+  }
+
+  /** Tracks a call: it is sent on the current connection, or on the next one if it is lost. */
+  track(
+    method: string,
+    data: any,
+    headers: Record<string, string> | undefined,
+    signal: AbortSignal | undefined
+  ): Promise<RpcResult> {
+    return new Promise<RpcResult>((resolve, reject) => {
+      const call: TrackedRpc = {
+        msgId: this.msgIds.next(this.host.serverTime()),
+        method: method,
+        data: data,
+        headers: headers,
+        deadline: Date.now() + this.callTimeout,
+        commandId: 0,
+        timer: null,
+        settled: false,
+        detach: (): void => {},
+        resolve: resolve,
+        reject: reject,
+      };
+      if (signal !== undefined) {
+        const onAbort = (): void => this.abort(call);
+        signal.addEventListener('abort', onAbort, { once: true });
+        call.detach = (): void => signal.removeEventListener('abort', onAbort);
+      }
+      this.queue.add(call);
+      call.timer = setTimeout((): void => this.expire(call), Math.max(0, call.deadline - Date.now()));
+      this.send(call, false);
+    });
+  }
+
+  /**
+   * Acts on a connection that confirmed the capability: sends the cancels and the calls waiting
+   * for a connection, in message id order, each with its original deadline. Without the capability
+   * the waiting calls are rejected, as the connection cannot take them.
+   */
+  sendWaiting(): void {
+    const cancels: number[] = this.cancels;
+    this.cancels = [];
+    if (!this.host.rpcOptionsSupported()) {
+      for (const call of this.queue.waiting()) {
+        this.settle(call);
+        call.reject(this.host.createError(
+          errorCodes.unsupported,
+          'rpc options are not supported by the server'
+        ));
+      }
+      return;
+    }
+    for (const msgId of cancels) {
+      this.cancel(msgId);
+    }
+    for (const call of this.queue.waiting()) {
+      if (call.deadline <= Date.now()) {
+        this.expire(call);
+      } else {
+        this.send(call, true);
+      }
+    }
+  }
+
+  /** Rejects all tracked calls, e.g. on a disconnect that will not be followed by a reconnect. */
+  rejectAll(code: number, message: string): void {
+    this.cancels = [];
+    for (const call of this.queue.clear()) {
+      this.settle(call);
+      call.reject(this.host.createError(code, message));
+    }
+  }
+
+  // Sends the call on the current connection. The command id is new for every attempt, the
+  // message id is the call's.
+  private send(call: TrackedRpc, retransmit: boolean): void {
+    const id: number = this.host.nextCommandId();
+    const rpc: any = {
+      method: call.method,
+      data: call.data,
+      msg_id: call.msgId,
+    };
+    if (hasHeaders(call.headers)) {
+      rpc.headers = call.headers;
+    }
+    if (retransmit) {
+      rpc.retransmit = true;
+    }
+    call.commandId = id;
+    this.host.setCallbacks(id, {
+      callback: (ctx: RpcReplyContext): void => this.replied(call, ctx),
+      errback: (ctx: RpcFailureContext): void => this.failed(call, ctx),
+      lost: (): void => this.lost(call),
+      timeout: null,
+    });
+    this.sendCommand(id, rpc);
+  }
+
+  // Sends a command with the message ids received so far, which are acknowledged by it.
+  private sendCommand(id: number, rpc: any): void {
+    const acks: number[] = this.queue.takeAcks();
+    if (acks.length > 0) {
+      rpc.ack = acks;
+    }
+    this.host.addCommand({ id: id, rpc: rpc });
+  }
+
+  // Sends a cancel of a call. The reply to a cancel carries nothing the client needs.
+  private cancel(msgId: number): void {
+    const id: number = this.host.nextCommandId();
+    this.host.setCallbacks(id, {
+      callback: (ctx: RpcReplyContext): void => ctx.next?.(),
+      errback: (ctx: RpcFailureContext): void => ctx.next?.(),
+      timeout: null,
+    });
+    this.sendCommand(id, { cancel: msgId });
+  }
+
+  // A reply of the server: it settles the call, or only acknowledges it when the call settled
+  // before (aborted or expired).
+  private replied(call: TrackedRpc, ctx: RpcReplyContext): void {
+    this.answered(call, ctx, (): void => {
+      const result: any = ctx.reply.rpc || {};
+      call.resolve({
+        data: result.data,
+        cached: result.cached === true,
+      });
+    });
+  }
+
+  // An error reply of the server, surfaced unchanged. It is not retried: the server's codes for a
+  // rejected message id are configurable, so there is no signal to retry on.
+  private failed(call: TrackedRpc, ctx: RpcFailureContext): void {
+    this.answered(call, ctx, (): void => call.reject(ctx.error));
+  }
+
+  // Shared by replies and errors: acknowledges the call, and settles it with the outcome unless it
+  // settled before.
+  private answered(call: TrackedRpc, ctx: { next?: () => void }, outcome: () => void): void {
+    this.queue.addAck(call.msgId);
+    if (!call.settled) {
+      this.settle(call);
+      outcome();
+    }
+    ctx.next?.();
+  }
+
+  // The connection was lost before the reply: the call waits for the next connection.
+  private lost(call: TrackedRpc): void {
+    call.commandId = 0;
+  }
+
+  private expire(call: TrackedRpc): void {
+    call.timer = null;
+    if (call.settled) {
+      return;
+    }
+    this.settle(call);
+    call.reject(this.host.createError(errorCodes.timeout, 'timeout'));
+  }
+
+  // The signal of the call aborted: the call settles locally, and the server gets a cancel.
+  private abort(call: TrackedRpc): void {
+    if (call.settled) {
+      return;
+    }
+    const sent: boolean = call.commandId > 0;
+    this.settle(call);
+    if (sent) {
+      this.cancel(call.msgId);
+    } else {
+      this.cancels.push(call.msgId);
+    }
+    call.reject(this.host.createError(errorCodes.cancelled, 'cancelled'));
+  }
+
+  // Settles the call: no timer, no abort listener, not tracked anymore.
+  private settle(call: TrackedRpc): void {
+    call.settled = true;
+    if (call.timer !== null) {
+      clearTimeout(call.timer);
+      call.timer = null;
+    }
+    call.detach();
+    this.queue.remove(call.msgId);
+  }
+}
