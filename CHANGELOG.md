@@ -13,6 +13,11 @@
 * Retry signal: a server error that carries the metadata key `x-centrifugo-retry` tells the client that the server did not run the call. The value `new_msg_id` (the message id was refused) sends the call again with a new id, at most twice. The value `later` sends it again with the same id after 250 ms, 500 ms and 1000 ms, at most three times. Other errors are surfaced unchanged.
 * Deviation from upstream: a timer-driven refresh refused with 109 (token expired) is reported and retried with backoff, with a fresh token from `getToken`. Upstream disconnects on it.
 * Deviation from upstream: a timer-driven refresh refused with 103 (permission denied) is reported and keeps the connection with its identity, without a retry. Upstream disconnects on it. The server ends the connection at the token expiry.
+* A timer-driven refresh whose token arrives after a `refresh()` call started or was accepted is dropped, so the connection keeps the token and identity of the last refresh that the server accepted.
+* A refresh that a connection loss ends keeps its token for the reconnect. Only a refusal by the server restores the token the server accepted before.
+* An error thrown by an `auth` handler after a refresh was accepted is reported as other handler errors; `refresh()` still resolves with the identity.
+* A call whose connection is lost before it is written waits for the next connection, and is not marked as a retransmit when sent.
+* A cancel of a call aborted on a legacy connection is kept for the next connection that carries cancels.
 
 5.0.2 and higher
 ================
