@@ -468,6 +468,35 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       .toEqual(['a', 'b', 'c', 'd']);
   });
 
+  test('a write error on the calls sent with a reconnect sends all of them again on the next connection', async (): Promise<void> => {
+    const c: Centrifuge = create({ timeout: 2000, minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    holdCalls();
+    const calls: Promise<RpcResult>[] = ['a', 'b', 'c'].map(
+      (method: string): Promise<RpcResult> => quiet(c.rpc(method, codecCase.encode({})))
+    );
+    await server.waitFor((cmd: any): boolean => isCall(cmd) && cmd.rpc.method === 'c');
+
+    // The retransmits of a reconnect leave in one batch: its first write fails and takes the connection
+    // down, so all three calls wait for the next connection.
+    server.onCommand = (cmd: any): any => {
+      if (!isCall(cmd)) {
+        return undefined;
+      }
+      return cmd.rpc.retransmit ? { id: cmd.id, rpc: { data: codecCase.encode({ method: cmd.rpc.method }) } } : holdReply;
+    };
+    c.once('connected', (): void => failNextWrite(c));
+    server.closeConnection();
+
+    const results: RpcResult[] = await Promise.all(calls);
+    expect(results.map((r: RpcResult): any => codecCase.decode(r.data)))
+      .toEqual([{ method: 'a' }, { method: 'b' }, { method: 'c' }]);
+    // The reconnect that followed carried the three calls, in message id order.
+    const resent: any[] = server.received.filter(isRetransmit);
+    expect(resent.map((cmd: any): string => cmd.rpc.method).slice(-3)).toEqual(['a', 'b', 'c']);
+    expect(c.state).toBe(State.Connected);
+  });
+
   test('the callback of a call that expired on a silent connection is dropped after one call timeout', async (): Promise<void> => {
     const c: Centrifuge = create({ timeout: 100 });
     await connect(c);
