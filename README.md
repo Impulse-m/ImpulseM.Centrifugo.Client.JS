@@ -295,6 +295,38 @@ centrifuge.rpc("my.method.name", {"input": "hello"}).then(function(res) {
 });
 ```
 
+#### RPC options, server capabilities and server fields
+
+`rpc` takes an optional third argument with per-call options. Headers are sent with that one call only:
+
+```javascript
+centrifuge.rpc("my.method.name", {"input": "hello"}, {headers: {"x-example": "value"}});
+```
+
+Headers need a server that supports RPC options. The client advertises this capability in the connect request, and the server confirms it in the connect reply. Check the confirmed capability on the client:
+
+```javascript
+if (centrifuge.capabilities.rpcOptions) {
+    // per-call headers can be sent
+}
+```
+
+The capability is per connection and is `false` until a connect reply confirms it. When it is `false`, an `rpc` call with headers rejects locally with error code `errorCodes.unsupported` (15), and the call is not sent. An `rpc` call without options is unchanged.
+
+Errors from the server can carry application fields. They are set on the error object only when the server sent them:
+
+* `appCode` - numeric application error code.
+* `appType` - application error type string.
+* `metadata` - string map of allow-listed server metadata.
+
+```javascript
+centrifuge.rpc("my.method.name", {}).catch(function(err) {
+    console.log(err.code, err.appCode, err.appType, err.metadata);
+});
+```
+
+`centrifuge.serverTime()` returns the current time in milliseconds on the server clock. It is estimated from the server time in the last reply that carried one, and falls back to local time when no reply has carried a server time yet.
+
 #### history method
 
 Allows to get history from a server. This is a top-level analogue of `Subscription.history` method. But accepts a channel as first argument.
