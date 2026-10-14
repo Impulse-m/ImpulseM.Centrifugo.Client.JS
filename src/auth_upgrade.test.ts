@@ -1,6 +1,6 @@
 import { Centrifuge } from './centrifuge';
 import { Centrifuge as ProtobufCentrifuge } from './protobuf';
-import { FakeCentrifugoServer, FakeCodec } from './fakeServer';
+import { FakeCentrifugoServer, FakeCodec, holdReply } from './fakeServer';
 import { AuthContext, Options, State, TransportName } from './types';
 import WebSocket from 'ws';
 
@@ -13,7 +13,10 @@ interface CodecCase {
   name: string;
   serverCodec: FakeCodec;
   createClient: (url: string, options: Partial<Options>) => Centrifuge;
+  encode: (value: any) => any;
 }
+
+const bytes = (value: any): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
 
 const codecCases: CodecCase[] = [
   {
@@ -28,6 +31,7 @@ const codecCases: CodecCase[] = [
       maxReconnectDelay: 50,
       ...options,
     }),
+    encode: (value: any): any => value,
   },
   {
     name: 'protobuf',
@@ -41,6 +45,7 @@ const codecCases: CodecCase[] = [
       maxReconnectDelay: 50,
       ...options,
     }),
+    encode: bytes,
   },
 ];
 
@@ -144,5 +149,195 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase) => 
     expect(contexts[1].user).toBe('bob');
     expect(contexts[1].authClass).toBe('bot');
     expect(authEvents.map(ctx => ctx.user)).toEqual(['alice', 'bob']);
+  });
+
+  function connectCommands(): any[] {
+    return server.received.filter(cmd => cmd.connect !== undefined);
+  }
+
+  function refreshCommands(): any[] {
+    return server.received.filter(cmd => cmd.refresh !== undefined);
+  }
+
+  test('refresh sends the given token now and resolves the identity the server confirms', async () => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated' };
+    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? {
+      id: cmd.id,
+      refresh: { user: 'bob', auth_class: 'bot', expires: true, ttl: 300 },
+    } : undefined);
+    const c = create();
+    await connect(c);
+
+    const result = await c.refresh('new-token');
+
+    expect(result).toEqual({ user: 'bob', authClass: 'bot', ttl: 300 });
+    expect(refreshCommands()).toHaveLength(1);
+    expect(refreshCommands()[0].refresh.token).toBe('new-token');
+    expect(authEvents.map(ctx => ctx.user)).toEqual(['alice', 'bob']);
+  });
+
+  test('the token of a refresh is used by the reconnect that follows', async () => {
+    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? { id: cmd.id, refresh: {} } : undefined);
+    const c = create();
+    await connect(c);
+    await c.refresh('new-token');
+
+    const reconnected = new Promise<void>(resolve => c.once('connected', () => resolve()));
+    server.closeConnection();
+    await reconnected;
+
+    expect(connectCommands()).toHaveLength(2);
+    expect(connectCommands()[1].connect.token).toBe('new-token');
+  });
+
+  test('refresh uses the token from getToken when no token is given', async () => {
+    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? { id: cmd.id, refresh: {} } : undefined);
+    const c = create({ getToken: async () => 'token-from-get-token' });
+    await connect(c);
+
+    await c.refresh();
+
+    expect(refreshCommands()[0].refresh.token).toBe('token-from-get-token');
+  });
+
+  test('refresh without a token and without getToken rejects with a configuration error and sends nothing', async () => {
+    const c = create();
+    await connect(c);
+
+    await expect(c.refresh()).rejects.toMatchObject({ code: 12 });
+    expect(refreshCommands()).toHaveLength(0);
+    expect(c.state).toBe(State.Connected);
+  });
+
+  test('refresh while disconnected is sent on the next connect', async () => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated' };
+    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? {
+      id: cmd.id,
+      refresh: { user: 'bob', auth_class: 'authenticated' },
+    } : undefined);
+    const c = create();
+    c.disconnect();
+
+    const refreshing = c.refresh('new-token');
+    await connect(c);
+    const result = await refreshing;
+
+    expect(result).toEqual({ user: 'bob', authClass: 'authenticated', ttl: 0 });
+    expect(connectCommands()[0].connect.token).toBe('new-token');
+    expect(refreshCommands()).toHaveLength(1);
+  });
+
+  test('calls made while a refresh is pending share its promise', async () => {
+    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? { id: cmd.id, refresh: {} } : undefined);
+    const c = create();
+    await connect(c);
+
+    const first = c.refresh('new-token');
+    const second = c.refresh('other-token');
+
+    expect(second).toBe(first);
+    await first;
+    expect(refreshCommands()).toHaveLength(1);
+    expect(refreshCommands()[0].refresh.token).toBe('new-token');
+  });
+
+  test('rpc waits for a refresh in flight, so it goes out under the new identity', async () => {
+    let refreshReceived: (id: number) => void = () => undefined;
+    const refreshSeen = new Promise<number>(resolve => {
+      refreshReceived = resolve;
+    });
+    const order: string[] = [];
+    server.onCommand = (cmd: any) => {
+      if (cmd.refresh !== undefined) {
+        order.push('refresh');
+        refreshReceived(cmd.id);
+        return holdReply;
+      }
+      if (cmd.rpc !== undefined) {
+        order.push('rpc');
+        return { id: cmd.id, rpc: {} };
+      }
+      return undefined;
+    };
+    const c = create();
+    await connect(c);
+
+    const refreshing = c.refresh('new-token');
+    const calling = c.rpc('echo', codecCase.encode({}));
+    const refreshId = await refreshSeen;
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(order).toEqual(['refresh']);
+
+    server.send({ id: refreshId, refresh: { user: 'bob', auth_class: 'authenticated' } });
+    await refreshing;
+    await calling;
+
+    expect(order).toEqual(['refresh', 'rpc']);
+  });
+
+  test('a refused refresh rejects and keeps the identity of the connection', async () => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated' };
+    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? {
+      id: cmd.id,
+      error: { code: 103, message: 'transition not allowed' },
+    } : undefined);
+    const c = create();
+    await connect(c);
+
+    await expect(c.refresh('new-token')).rejects.toMatchObject({ code: 103, message: 'transition not allowed' });
+    expect(c.state).toBe(State.Connected);
+    expect(authEvents.map(ctx => ctx.user)).toEqual(['alice']);
+  });
+
+  test('a refresh reply of a legacy server gives empty user and auth class', async () => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated' };
+    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? { id: cmd.id, refresh: {} } : undefined);
+    const c = create();
+    await connect(c);
+
+    const result = await c.refresh('new-token');
+
+    expect(result).toEqual({ user: '', authClass: '', ttl: 0 });
+    expect(authEvents[1]).toEqual({ user: '', authClass: '', ttl: 0 });
+  });
+
+  test('auth event on refresh is emitted only when the identity changed', async () => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated' };
+    let replyUser = 'alice';
+    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? {
+      id: cmd.id,
+      refresh: { user: replyUser, auth_class: 'authenticated' },
+    } : undefined);
+    const c = create();
+    await connect(c);
+
+    await c.refresh('same-identity');
+    expect(authEvents).toHaveLength(1);
+
+    replyUser = 'bob';
+    await c.refresh('new-identity');
+    expect(authEvents.map(ctx => ctx.user)).toEqual(['alice', 'bob']);
+  });
+
+  test('refresh reschedules the refresh timer from the ttl of the reply', async () => {
+    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? {
+      id: cmd.id,
+      refresh: { expires: true, ttl: 1 },
+    } : undefined);
+    const c = create({ getToken: async () => 'timer-token' });
+    await connect(c);
+
+    const timerRefresh = new Promise<void>(resolve => {
+      const check = setInterval(() => {
+        if (refreshCommands().length >= 2) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 20);
+    });
+    await c.refresh('new-token');
+    await timerRefresh;
+
+    expect(refreshCommands()[1].refresh.token).toBe('timer-token');
   });
 });

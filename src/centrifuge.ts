@@ -28,7 +28,7 @@ import {
 } from './extensions';
 
 import {
-  State, Options, SubscriptionState, ClientEvents,
+  State, Options, SubscriptionState, ClientEvents, AuthContext,
   TypedEventEmitter, RpcResult, RpcOptions, ClientCapabilities, SubscriptionOptions,
   MapSubscriptionOptions, MapSubscriptionEvents, BaseSubscriptionEvents,
   SharedPollSubscriptionOptions, SharedPollSubscriptionEvents, SharedPollTrackItem,
@@ -169,6 +169,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   // User and auth class the server confirmed for the connection, from its connect or refresh reply.
   private _user: string = '';
   private _authClass: string = '';
+  // The refresh() call in flight: the calls made meanwhile share its promise.
+  private _authRefresh: Promise<AuthContext> | null = null;
 
   private _debugEnabled: boolean;
   private _config: Options;
@@ -492,6 +494,27 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
   }
 
+  /**
+   * refresh sends the connection token to the server now, with the given token or the one
+   * getToken returns, and resolves the identity the server confirms. The new token is used by
+   * the following connects too. An 'auth' event is emitted when the user or auth class changed.
+   * While the client is disconnected, the refresh is sent on the next connect. Calls made while
+   * a refresh is pending share its promise, and rpc() waits for it. A rejected refresh, e.g. a
+   * refused identity change, keeps the identity of the connection.
+   */
+  refresh(token?: string): Promise<AuthContext> {
+    if (this._authRefresh !== null) {
+      return this._authRefresh;
+    }
+    const refresh = this._refreshNow(token);
+    this._authRefresh = refresh;
+    const settled = () => {
+      this._authRefresh = null;
+    };
+    refresh.then(settled, settled);
+    return refresh;
+  }
+
   /** setData allows setting connection data. This only affects the next connection attempt,
    * not the current one. Note that if getData callback is configured, it will override
    * this value during reconnects. */
@@ -550,6 +573,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     };
 
     const headers = opts?.headers;
+    await this._waitAuthRefresh();
     await this._methodCall();
     if (hasHeaders(headers)) {
       // Checked once connected: the capability belongs to the connection the call goes out on.
@@ -2108,7 +2132,47 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     return backoff(0, 5000, 10000);
   }
 
+  private async _refreshNow(token?: string): Promise<AuthContext> {
+    let newToken: string | undefined = token;
+    if (newToken === undefined) {
+      if (this._config.getToken === null) {
+        throw this._createErrorObject(errorCodes.badConfiguration, 'refresh needs a token: pass one to refresh() or set getToken');
+      }
+      newToken = await this._getToken();
+    }
+    if (!newToken) {
+      throw this._createErrorObject(errorCodes.clientRefreshToken, 'refresh token is empty');
+    }
+    this._token = newToken;
+    this._debug('connection token refreshed');
+
+    await this._methodCall();
+    const result: any = await this._callPromise({ refresh: { token: newToken } }, (reply: any) => reply.refresh);
+    this._refreshResponse(result);
+    return { user: this._user, authClass: this._authClass, ttl: result.ttl ?? 0 };
+  }
+
+  // A call made during a refresh goes out under the identity the refresh confirms. A failed
+  // refresh is reported to its caller, the call goes out under the identity the connection kept.
+  private async _waitAuthRefresh(): Promise<void> {
+    if (this._authRefresh === null) {
+      return;
+    }
+    try {
+      await this._authRefresh;
+    } catch {
+      // Reported by refresh() to its caller.
+    }
+  }
+
   private _refreshResponse(result: any) {
+    // The identity of a refresh reply replaces the one of the connection: the server only
+    // refuses a change it does not allow, and then the reply is an error.
+    const user: string = result.user ?? '';
+    const authClass: string = result.auth_class ?? '';
+    const identityChanged = user !== this._user || authClass !== this._authClass;
+    this._user = user;
+    this._authClass = authClass;
     if (this._refreshTimeout) {
       clearTimeout(this._refreshTimeout);
       this._refreshTimeout = null;
@@ -2122,6 +2186,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         this._client = result.client;
       }
       this._refreshTimeout = setTimeout(() => this._refresh(), ttlMilliseconds(result.ttl));
+    }
+    if (identityChanged) {
+      this.emit('auth', { user, authClass, ttl: result.ttl ?? 0 });
     }
   }
 
