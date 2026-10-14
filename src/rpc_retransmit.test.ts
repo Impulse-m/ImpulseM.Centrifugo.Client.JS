@@ -1,63 +1,13 @@
 import { Centrifuge } from './centrifuge';
-import { Centrifuge as ProtobufCentrifuge } from './protobuf';
-import { FakeCentrifugoServer, FakeCodec, holdReply } from './fakeServer';
+import { FakeCentrifugoServer, holdReply } from './fakeServer';
 import { errorCodes } from './codes';
-import { Options, RpcResult, State, TransportName } from './types';
-import WebSocket from 'ws';
+import { Options, RpcResult, State } from './types';
 import { format } from 'util';
+import { CodecCase, codecCases, rpcOptionsWireFlag } from './test_codecs';
 
 // Tracked RPC calls: message ids, the retransmit of calls that lost their transport, the queue
 // bound, acknowledgements, deadlines, cancels, legacy connections and the instance option. Every
-// case runs over both codecs: the fake server speaks JSON or protobuf, and the client is the
-// matching Centrifuge class.
-
-// The connect flag of bit 32, as the wire carries it.
-const rpcOptionsWireFlag: number = 4294967296;
-
-// RPC data is raw bytes on the protobuf wire, JSON on the JSON wire.
-interface CodecCase {
-  name: string;
-  serverCodec: FakeCodec;
-  createClient: (url: string, options?: Partial<Options>) => Centrifuge;
-  encode: (value: any) => any;
-  decode: (data: any) => any;
-}
-
-const bytes = (value: any): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
-const fromBytes = (data: Uint8Array): any => JSON.parse(new TextDecoder().decode(data));
-
-const codecCases: CodecCase[] = [
-  {
-    name: 'JSON',
-    serverCodec: 'json',
-    createClient: (url: string, options?: Partial<Options>): Centrifuge => new Centrifuge([{
-      transport: 'websocket' as TransportName,
-      endpoint: url,
-    }], {
-      websocket: WebSocket,
-      minReconnectDelay: 10,
-      maxReconnectDelay: 50,
-      ...options,
-    }),
-    encode: (value: any): any => value,
-    decode: (data: any): any => data,
-  },
-  {
-    name: 'protobuf',
-    serverCodec: 'protobuf',
-    createClient: (url: string, options?: Partial<Options>): Centrifuge => new ProtobufCentrifuge([{
-      transport: 'websocket' as TransportName,
-      endpoint: url,
-    }], {
-      websocket: WebSocket,
-      minReconnectDelay: 10,
-      maxReconnectDelay: 50,
-      ...options,
-    }),
-    encode: bytes,
-    decode: fromBytes,
-  },
-];
+// case runs over both codecs (see test_codecs.ts).
 
 // A call of the application: an rpc command that is not a cancel.
 function isCall(cmd: any): boolean {

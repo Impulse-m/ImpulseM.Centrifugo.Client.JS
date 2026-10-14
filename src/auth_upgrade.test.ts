@@ -1,53 +1,11 @@
 import { Centrifuge } from './centrifuge';
-import { Centrifuge as ProtobufCentrifuge } from './protobuf';
-import { FakeCentrifugoServer, FakeCodec, holdReply } from './fakeServer';
-import { AuthContext, Options, State, TransportName } from './types';
-import WebSocket from 'ws';
+import { FakeCentrifugoServer, holdReply } from './fakeServer';
+import { errorCodes } from './codes';
+import { AuthContext, Options, State } from './types';
+import { CodecCase, codecCases } from './test_codecs';
 
 // The identity of a connection: the user and auth class of the connect and refresh replies,
-// the 'auth' event and the refresh() call. Every case runs over both codecs: the fake server
-// speaks JSON or protobuf, and the client is the matching Centrifuge class.
-
-// RPC data is raw bytes on the protobuf wire, JSON on the JSON wire.
-interface CodecCase {
-  name: string;
-  serverCodec: FakeCodec;
-  createClient: (url: string, options: Partial<Options>) => Centrifuge;
-  encode: (value: any) => any;
-}
-
-const bytes = (value: any): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
-
-const codecCases: CodecCase[] = [
-  {
-    name: 'JSON',
-    serverCodec: 'json',
-    createClient: (url: string, options: Partial<Options>): Centrifuge => new Centrifuge([{
-      transport: 'websocket' as TransportName,
-      endpoint: url,
-    }], {
-      websocket: WebSocket,
-      minReconnectDelay: 10,
-      maxReconnectDelay: 50,
-      ...options,
-    }),
-    encode: (value: any): any => value,
-  },
-  {
-    name: 'protobuf',
-    serverCodec: 'protobuf',
-    createClient: (url: string, options: Partial<Options>): Centrifuge => new ProtobufCentrifuge([{
-      transport: 'websocket' as TransportName,
-      endpoint: url,
-    }], {
-      websocket: WebSocket,
-      minReconnectDelay: 10,
-      maxReconnectDelay: 50,
-      ...options,
-    }),
-    encode: bytes,
-  },
-];
+// the 'auth' event and the refresh() call. Every case runs over both codecs (see test_codecs.ts).
 
 describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase) => {
   let server: FakeCentrifugoServer;
@@ -204,7 +162,7 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase) => 
     const c = create();
     await connect(c);
 
-    await expect(c.refresh()).rejects.toMatchObject({ code: 12 });
+    await expect(c.refresh()).rejects.toMatchObject({ code: errorCodes.badConfiguration });
     expect(refreshCommands()).toHaveLength(0);
     expect(c.state).toBe(State.Connected);
   });
@@ -265,7 +223,8 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase) => 
     const refreshing = c.refresh('new-token');
     const calling = c.rpc('echo', codecCase.encode({}));
     const refreshId = await refreshSeen;
-    await new Promise(resolve => setTimeout(resolve, 30));
+    // The rpc goes out only after the refresh reply: no rpc command has reached the server yet.
+    expect(server.received.some(cmd => cmd.rpc !== undefined)).toBe(false);
     expect(order).toEqual(['refresh']);
 
     server.send({ id: refreshId, refresh: { user: 'bob', auth_class: 'authenticated' } });
@@ -327,14 +286,7 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase) => 
     const c = create({ getToken: async () => 'timer-token' });
     await connect(c);
 
-    const timerRefresh = new Promise<void>(resolve => {
-      const check = setInterval(() => {
-        if (refreshCommands().length >= 2) {
-          clearInterval(check);
-          resolve();
-        }
-      }, 20);
-    });
+    const timerRefresh = server.waitFor((cmd: any) => cmd.refresh !== undefined && refreshCommands().length >= 2);
     await c.refresh('new-token');
     await timerRefresh;
 

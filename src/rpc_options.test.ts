@@ -1,59 +1,11 @@
 import { Centrifuge } from './centrifuge';
-import { Centrifuge as ProtobufCentrifuge } from './protobuf';
-import { FakeCentrifugoServer, FakeCodec } from './fakeServer';
+import { FakeCentrifugoServer } from './fakeServer';
 import { errorCodes } from './codes';
-import { State, TransportName } from './types';
-import WebSocket from 'ws';
+import { State } from './types';
+import { CodecCase, codecCases, rpcOptionsWireFlag } from './test_codecs';
 
 // RPC options (per-call headers), the rpc capability, server error fields and server
-// time. Every case runs over both codecs: the fake server speaks JSON or protobuf, and the
-// client is the matching Centrifuge class.
-
-// The connect flag of bit 32, as the wire carries it.
-const rpcOptionsWireFlag: number = 4294967296;
-
-// RPC data is raw bytes on the protobuf wire, JSON on the JSON wire.
-interface CodecCase {
-  name: string;
-  serverCodec: FakeCodec;
-  createClient: (url: string) => Centrifuge;
-  encode: (value: any) => any;
-  decode: (data: any) => any;
-}
-
-const bytes = (value: any): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
-const fromBytes = (data: Uint8Array): any => JSON.parse(new TextDecoder().decode(data));
-
-const codecCases: CodecCase[] = [
-  {
-    name: 'JSON',
-    serverCodec: 'json',
-    createClient: (url: string): Centrifuge => new Centrifuge([{
-      transport: 'websocket' as TransportName,
-      endpoint: url,
-    }], {
-      websocket: WebSocket,
-      minReconnectDelay: 10,
-      maxReconnectDelay: 50,
-    }),
-    encode: (value: any): any => value,
-    decode: (data: any): any => data,
-  },
-  {
-    name: 'protobuf',
-    serverCodec: 'protobuf',
-    createClient: (url: string): Centrifuge => new ProtobufCentrifuge([{
-      transport: 'websocket' as TransportName,
-      endpoint: url,
-    }], {
-      websocket: WebSocket,
-      minReconnectDelay: 10,
-      maxReconnectDelay: 50,
-    }),
-    encode: bytes,
-    decode: fromBytes,
-  },
-];
+// time. Every case runs over both codecs (see test_codecs.ts).
 
 describe.each(codecCases)('RPC options over $name', (codecCase: CodecCase) => {
   let server: FakeCentrifugoServer;
