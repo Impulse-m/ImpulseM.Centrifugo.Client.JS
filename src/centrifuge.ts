@@ -257,6 +257,16 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       isConnected: (): boolean => this._isConnected(),
       waitConnected: (): Promise<void> => this._methodCall(null),
       createError: (code: number, message: string): any => this._createErrorObject(code, message),
+      sendCommand: (command: any): Promise<CallResolveContext> => this._call(command, false),
+      hasGetToken: (): boolean => this._config.getToken !== null,
+      getToken: (): Promise<string> => this._getToken(),
+      token: (): string => this._token,
+      setToken: (token: string): void => {
+        this._token = token;
+      },
+      debug: (message: string): void => this._debug(message),
+      applyReply: (result: any): void => this._refreshResponse(result),
+      identity: (): { user: string; authClass: string } => ({ user: this._user, authClass: this._authClass }),
     });
     this._configure();
 
@@ -537,7 +547,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   refresh(token?: string): Promise<AuthContext> {
     // Another token goes after the refresh in flight: each token is sent in turn, and its
     // caller gets the identity of its own token.
-    return this._refreshSlot.call(token, (newToken: string | undefined): Promise<AuthContext> => this._refreshNow(newToken));
+    return this._refreshSlot.call(token, (newToken: string | undefined): Promise<AuthContext> => this._refreshSlot.run(newToken));
   }
 
   /** setData allows setting connection data. This only affects the next connection attempt,
@@ -2153,7 +2163,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         return;
       }
 
-      self._sendRefreshCommand(token).then(resolveCtx => {
+      self._refreshSlot.send(token).then(resolveCtx => {
         // Kept once the server accepted it, as refresh() keeps it: a refused token is not used by the reconnects.
         self._token = token;
         self._debug('connection token refreshed');
@@ -2225,63 +2235,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   private _getRefreshRetryDelay() {
     return backoff(0, 5000, 10000);
-  }
-
-  private async _refreshNow(token?: string): Promise<AuthContext> {
-    let newToken: string | undefined = token;
-    if (newToken === undefined) {
-      if (this._config.getToken === null) {
-        throw this._createErrorObject(errorCodes.badConfiguration, 'refresh needs a token: pass one to refresh() or set getToken');
-      }
-      newToken = await this._getToken();
-    }
-    if (!newToken) {
-      throw this._createErrorObject(errorCodes.clientRefreshToken, 'refresh token is empty');
-    }
-    const previousToken: string = this._token;
-    if (!this._isConnected()) {
-      // The connect that comes next carries the token, and the refresh confirms it on that connection.
-      this._token = newToken;
-    }
-    let ctx: CallResolveContext;
-    try {
-      ctx = await this._sendRefreshCommand(newToken);
-    } catch (rejectCtx: any) {
-      if (rejectCtx.next !== undefined) {
-        rejectCtx.next();
-      }
-      // Refused or not sent: the reconnects keep the token the server accepted before.
-      if (this._token === newToken) {
-        this._token = previousToken;
-      }
-      throw rejectCtx.error;
-    }
-    const result: any = ctx.reply.refresh;
-    if (ctx.next !== undefined) {
-      ctx.next();
-    }
-    this._token = newToken;
-    this._debug('connection token refreshed');
-    this._refreshResponse(result);
-    return { user: this._user, authClass: this._authClass, ttl: result.ttl ?? 0 };
-  }
-
-  // Sends a refresh command, one at a time with the other refresh commands (the explicit and the
-  // timer-driven ones), once connected. Resolves with the reply context. Rejects with the
-  // rejection context of the command, or with the error alone when the client is disconnected for
-  // good before the command could go out.
-  private async _sendRefreshCommand(token: string): Promise<CallResolveContext> {
-    let release: () => void;
-    try {
-      release = await this._refreshSlot.claim();
-    } catch (error) {
-      throw { error: error };
-    }
-    try {
-      return await this._call({ refresh: { token: token } }, false);
-    } finally {
-      release();
-    }
   }
 
   private _refreshResponse(result: any) {

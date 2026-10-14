@@ -1,4 +1,5 @@
 import { errorCodes } from './codes';
+import type { CallResolveContext } from './centrifuge';
 import { AuthContext } from './types';
 
 /** Most refresh() calls in progress at once, the one in flight included. Beyond it refresh() rejects with errorCodes.limitExceeded. */
@@ -10,6 +11,16 @@ export interface RefreshSlotHost {
   /** Resolves once the client is connected. Rejects when it is disconnected for good. */
   waitConnected(): Promise<void>;
   createError(code: number, message: string): any;
+  /** Sends a command on the connection. Resolves with the reply context, rejects with the rejection context. */
+  sendCommand(command: any): Promise<CallResolveContext>;
+  hasGetToken(): boolean;
+  getToken(): Promise<string>;
+  token(): string;
+  setToken(token: string): void;
+  debug(message: string): void;
+  /** Applies the reply of a refresh command to the identity of the connection. */
+  applyReply(result: any): void;
+  identity(): { user: string; authClass: string };
 }
 
 
@@ -62,6 +73,73 @@ export class RefreshSlot {
     };
     refresh.then(settled, settled);
     return refresh;
+  }
+
+
+  /**
+   * Runs a refresh() call: with the token given, or with the token of getToken. The token of the
+   * connection is taken while the command is in flight, and the previous one is kept when the server
+   * refuses it. Resolves with the identity the server confirms.
+   */
+  async run(token: string | undefined): Promise<AuthContext> {
+    let newToken: string | undefined = token;
+    if (newToken === undefined) {
+      if (!this.host.hasGetToken()) {
+        throw this.host.createError(errorCodes.badConfiguration, 'refresh needs a token: pass one to refresh() or set getToken');
+      }
+      newToken = await this.host.getToken();
+    }
+    if (!newToken) {
+      throw this.host.createError(errorCodes.clientRefreshToken, 'refresh token is empty');
+    }
+    const previousToken: string = this.host.token();
+    if (!this.host.isConnected()) {
+      // The connect that comes next carries the token, and the refresh confirms it on that connection.
+      this.host.setToken(newToken);
+    }
+    let ctx: CallResolveContext;
+    try {
+      ctx = await this.send(newToken);
+    } catch (rejectCtx: any) {
+      if (rejectCtx.next !== undefined) {
+        rejectCtx.next();
+      }
+      // Refused or not sent: the reconnects keep the token the server accepted before.
+      if (this.host.token() === newToken) {
+        this.host.setToken(previousToken);
+      }
+      throw rejectCtx.error;
+    }
+    const result: any = ctx.reply.refresh;
+    if (ctx.next !== undefined) {
+      ctx.next();
+    }
+    this.host.setToken(newToken);
+    this.host.debug('connection token refreshed');
+    this.host.applyReply(result);
+    const identity: { user: string; authClass: string } = this.host.identity();
+    return { user: identity.user, authClass: identity.authClass, ttl: result.ttl ?? 0 };
+  }
+
+
+  /**
+   * Sends a refresh command, one at a time with the other refresh commands (the explicit and the
+   * timer-driven ones), once connected. Resolves with the reply context. Rejects with the
+   * rejection context of the command, or with the error alone when the client is disconnected for
+   * good before the command could go out.
+   */
+  async send(token: string): Promise<CallResolveContext> {
+    let release: () => void;
+    try {
+      release = await this.claim();
+    } catch (error) {
+      throw { error: error };
+    }
+    try {
+      return await this.host.sendCommand({ refresh: { token: token } });
+    } finally {
+      release();
+    }
   }
 
 
