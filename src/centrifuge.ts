@@ -28,7 +28,7 @@ import {
   refreshRetries, refreshKeepsConnection,
 } from './extensions';
 
-import { callTimer, lateCallTimer, lateCallGrace } from './call_timer';
+import { CallTimer, callTimer } from './call_timer';
 import { RpcCallbacks, RpcHost, RpcTracker } from './rpc_tracker';
 import { RefreshSlot, RefreshSlotHost } from './refresh_slot';
 import { ConnectionIdentity } from './identity';
@@ -135,7 +135,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _transportClosed: boolean;
   private _reconnecting: boolean;
   private _reconnectTimeout?: null | ReturnType<typeof setTimeout> = null;
-  private _connectTimeout: null | ReturnType<typeof setTimeout> = null;
+  private _connectTimeout: null | CallTimer = null;
   private _reconnectAttempts: number;
   private _client: null;
   private _session: string;
@@ -157,7 +157,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _data: any;
   private _dispatchPromise: Promise<void>;
   private _serverPing: number;
-  private _serverPingTimeout?: null | ReturnType<typeof setTimeout> = null;
+  private _serverPingTimeout?: null | CallTimer = null;
   private _sendPong: boolean;
   private _promises: Record<number, any>;
   private _promiseId: number;
@@ -1195,17 +1195,11 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     };
 
     this._clearConnectTimeout();
-    const connectDue = Date.now() + this._config.timeout;
-    this._connectTimeout = setTimeout(function () {
-      // The transport may have opened already, its open callback not run yet, e.g.
-      // when a suspended process resumes: let it run first, as for a call (see
-      // callTimer). The open callback clears this timeout.
-      const late = Date.now() - connectDue >= lateCallTimer;
-      self._connectTimeout = setTimeout(function () {
-        self._connectTimeout = null;
-        failTransport('connect timeout');
-      }, late ? lateCallGrace : 0);
-    }, this._config.timeout);
+    // The open callback clears this timeout. A timer run late gives the open callback its turn first (see callTimer).
+    this._connectTimeout = callTimer(Date.now() + this._config.timeout, function () {
+      self._connectTimeout = null;
+      failTransport('connect timeout');
+    });
 
     const callbacks = {
       onOpen: function () {
@@ -2465,14 +2459,14 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   private _clearConnectTimeout() {
     if (this._connectTimeout !== null) {
-      clearTimeout(this._connectTimeout);
+      this._connectTimeout.clear();
       this._connectTimeout = null;
     }
   }
 
   private _clearServerPingTimeout() {
-    if (this._serverPingTimeout !== null) {
-      clearTimeout(this._serverPingTimeout);
+    if (this._serverPingTimeout) {
+      this._serverPingTimeout.clear();
       this._serverPingTimeout = null;
     }
   }
@@ -2486,22 +2480,14 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
     this._clearServerPingTimeout();
     const delay = this._serverPing + this._config.maxServerPingDelay;
-    const due = Date.now() + delay;
-    this._serverPingTimeout = setTimeout(() => {
+    // A ping received but not processed yet is processed first when the timer runs late (see callTimer).
+    // Any data received re-arms this timer.
+    this._serverPingTimeout = callTimer(Date.now() + delay, () => {
       if (!this._isConnected()) {
         return;
       }
-      // A ping may have been received already but not processed yet, e.g. when a
-      // suspended process resumes: let that data be processed first, as for a call
-      // (see callTimer). Any data received re-arms this timer.
-      const late = Date.now() - due >= lateCallTimer;
-      this._serverPingTimeout = setTimeout(() => {
-        if (!this._isConnected()) {
-          return;
-        }
-        this._disconnect(connectingCodes.noPing, 'no ping', true);
-      }, late ? lateCallGrace : 0);
-    }, delay);
+      this._disconnect(connectingCodes.noPing, 'no ping', true);
+    });
   }
 
   private _getSubscribeContext(channel: string, result: any): SubscribedContext {
