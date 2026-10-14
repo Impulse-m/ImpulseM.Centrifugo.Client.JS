@@ -288,6 +288,21 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       .toBe(false);
   });
 
+  test('the callback of a call that expired on a silent connection is dropped after one call timeout', async (): Promise<void> => {
+    const c: Centrifuge = create({ timeout: 100 });
+    await connect(c);
+    holdCalls();
+    const callbackCount = (): number => Object.keys((c as any)._callbacks).length;
+
+    await expect(c.rpc('silent', codecCase.encode({}))).rejects.toMatchObject({ code: errorCodes.timeout });
+    // The late reply is still acknowledged within one call timeout after the expiry.
+    expect(callbackCount()).toBe(1);
+    await new Promise<void>((resolve: () => void): void => {
+      setTimeout(resolve, 300);
+    });
+    expect(callbackCount()).toBe(0);
+  });
+
   test('message ids are strictly increasing and fit 53 bits', async (): Promise<void> => {
     const c: Centrifuge = create();
     await connect(c);

@@ -194,7 +194,14 @@ export class RpcTracker {
       errback: (ctx: RpcFailureContext): void => ctx.next?.(),
       timeout: null,
     });
+    this.forgetCommand(id);
     this.sendCommand(id, { cancel: msgId });
+  }
+
+  // The callbacks of a command whose call settled locally stay for one call timeout, to acknowledge
+  // a late reply. Then they are dropped, so a server that never replies does not grow them.
+  private forgetCommand(id: number): void {
+    setTimeout((): void => this.host.deleteCallbacks(id), this.callTimeout);
   }
 
   // A reply of the server: it settles the call, or only acknowledges it when the call settled
@@ -236,7 +243,7 @@ export class RpcTracker {
     if (call.settled) {
       return;
     }
-    this.settle(call);
+    this.settleSent(call);
     call.reject(this.host.createError(errorCodes.timeout, 'timeout'));
   }
 
@@ -246,13 +253,22 @@ export class RpcTracker {
       return;
     }
     const sent: boolean = call.commandId > 0;
-    this.settle(call);
+    this.settleSent(call);
     if (sent) {
       this.cancel(call.msgId);
     } else {
       this.cancels.push(call.msgId);
     }
     call.reject(this.host.createError(errorCodes.cancelled, 'cancelled'));
+  }
+
+  // Settles a call that may wait for its reply on the current connection (see forgetCommand).
+  private settleSent(call: TrackedRpc): void {
+    const id: number = call.commandId;
+    this.settle(call);
+    if (id > 0) {
+      this.forgetCommand(id);
+    }
   }
 
   // Settles the call: no timer, no abort listener, not tracked anymore.
