@@ -205,18 +205,44 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase) => 
     expect(refreshCommands()).toHaveLength(1);
   });
 
-  test('calls made while a refresh is pending share its promise', async () => {
-    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? { id: cmd.id, refresh: {} } : undefined);
+  test('calls made while a refresh of the same token is pending share its promise', async () => {
+    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? holdReply : undefined);
     const c = create();
     await connect(c);
 
     const first = c.refresh('new-token');
-    const second = c.refresh('other-token');
 
-    expect(second).toBe(first);
+    expect(c.refresh('new-token')).toBe(first);
+    expect(c.refresh()).toBe(first);
+    const sent = await server.waitFor(cmd => cmd.refresh !== undefined);
+    server.send({ id: sent.id, refresh: {} });
     await first;
     expect(refreshCommands()).toHaveLength(1);
-    expect(refreshCommands()[0].refresh.token).toBe('new-token');
+  });
+
+  test('a refresh with another token waits for the one in flight and gets the identity of its own token', async () => {
+    server.onCommand = (cmd: any) => {
+      if (cmd.refresh === undefined) {
+        return undefined;
+      }
+      return cmd.refresh.token === 'anon-token'
+        ? holdReply
+        : { id: cmd.id, refresh: { user: 'alice', auth_class: 'authenticated' } };
+    };
+    const c = create();
+    await connect(c);
+
+    const anon = c.refresh('anon-token');
+    const user = c.refresh('user-token');
+
+    expect(user).not.toBe(anon);
+    const anonCommand = await server.waitFor(cmd => cmd.refresh !== undefined && cmd.refresh.token === 'anon-token');
+    expect(refreshCommands()).toHaveLength(1);
+
+    server.send({ id: anonCommand.id, refresh: { user: 'anon', auth_class: 'anonymous' } });
+    await expect(anon).resolves.toEqual({ user: 'anon', authClass: 'anonymous', ttl: 0 });
+    await expect(user).resolves.toEqual({ user: 'alice', authClass: 'authenticated', ttl: 0 });
+    expect(refreshCommands().map(cmd => cmd.refresh.token)).toEqual(['anon-token', 'user-token']);
   });
 
   test('rpc waits for a refresh in flight, so it goes out under the new identity', async () => {

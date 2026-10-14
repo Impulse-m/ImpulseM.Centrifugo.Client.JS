@@ -173,8 +173,10 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   // User and auth class the server confirmed for the connection, from its connect or refresh reply.
   private _user: string = '';
   private _authClass: string = '';
-  // The refresh() call in flight: the calls made meanwhile share its promise.
+  // The refresh() call in flight, and its token: a call with the same token (or none) made meanwhile
+  // shares its promise.
   private _authRefresh: Promise<AuthContext> | null = null;
+  private _authRefreshToken?: string;
   // The rpc calls tracked for retransmit, and the generator of their message ids.
   private _rpcQueue: RpcQueue = new RpcQueue();
   private _msgIds: MsgIdGenerator = new MsgIdGenerator();
@@ -517,13 +519,22 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
    * refused identity change, keeps the identity of the connection.
    */
   refresh(token?: string): Promise<AuthContext> {
-    if (this._authRefresh !== null) {
-      return this._authRefresh;
+    const pending: Promise<AuthContext> | null = this._authRefresh;
+    if (pending !== null && (token === undefined || token === this._authRefreshToken)) {
+      return pending;
     }
-    const refresh = this._refreshNow(token);
+    // Another token goes after the refresh in flight: each token is sent in turn, and its
+    // caller gets the identity of its own token.
+    const refresh: Promise<AuthContext> = pending === null
+      ? this._refreshNow(token)
+      : pending.then(() => this._refreshNow(token), () => this._refreshNow(token));
     this._authRefresh = refresh;
-    const settled = () => {
-      this._authRefresh = null;
+    this._authRefreshToken = token;
+    const settled = (): void => {
+      if (this._authRefresh === refresh) {
+        this._authRefresh = null;
+        this._authRefreshToken = undefined;
+      }
     };
     refresh.then(settled, settled);
     return refresh;
