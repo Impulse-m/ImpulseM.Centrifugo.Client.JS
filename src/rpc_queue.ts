@@ -75,11 +75,6 @@ export class RpcQueue {
     this.calls.set(call.msgId, call);
   }
 
-  /** The call with the message id, or undefined when it is not tracked (anymore). */
-  get(msgId: number): TrackedRpc | undefined {
-    return this.calls.get(msgId);
-  }
-
   /** Removes a call, e.g. when it settled. */
   remove(msgId: number): void {
     this.calls.delete(msgId);

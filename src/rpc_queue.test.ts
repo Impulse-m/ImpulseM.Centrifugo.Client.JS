@@ -84,8 +84,7 @@ describe('RpcQueue', () => {
     expect(queue.size).toBe(2);
     queue.remove(1);
     expect(queue.size).toBe(1);
-    expect(queue.get(2)?.msgId).toBe(2);
-    expect(queue.get(1)).toBeUndefined();
+    expect(queue.clear().map((call: TrackedRpc): number => call.msgId)).toEqual([2]);
   });
 
   test('clear returns all calls in message id order and empties the queue', () => {
