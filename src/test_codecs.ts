@@ -4,6 +4,8 @@ import { FakeCodec } from './fakeServer';
 import { Options, TransportName } from './types';
 import WebSocket from 'ws';
 
+// The codec cases and the connect and cleanup helpers the suites over both codecs share.
+
 // The codec cases the tests over both codecs share. The fake server speaks JSON or protobuf, and
 // the client is the matching Centrifuge class. RPC data is raw bytes on the protobuf wire, JSON
 // on the JSON wire.
@@ -25,6 +27,23 @@ export const bytes = (value: any): Uint8Array => new TextEncoder().encode(JSON.s
 
 /** Decodes the bytes of an RPC payload from the protobuf wire. */
 export const fromBytes = (data: Uint8Array): any => JSON.parse(new TextDecoder().decode(data));
+
+/** Connects the client and resolves once its connected event is emitted. */
+export async function connectClient(c: Centrifuge): Promise<void> {
+  const connected: Promise<void> = new Promise<void>((resolve: () => void): void => {
+    c.once('connected', (): void => resolve());
+  });
+  c.connect();
+  await connected;
+}
+
+/** Disconnects the clients and empties the list. */
+export function disconnectAll(clients: Centrifuge[]): void {
+  for (const c of clients) {
+    c.disconnect();
+  }
+  clients.length = 0;
+}
 
 export const codecCases: CodecCase[] = [
   {

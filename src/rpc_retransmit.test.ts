@@ -3,7 +3,7 @@ import { FakeCentrifugoServer, holdReply } from './fakeServer';
 import { errorCodes } from './codes';
 import { Options, RpcResult, State } from './types';
 import { format } from 'util';
-import { CodecCase, codecCases, rpcOptionsWireFlag } from './test_codecs';
+import { CodecCase, codecCases, connectClient, disconnectAll, rpcOptionsWireFlag } from './test_codecs';
 
 // Tracked RPC calls: message ids, the retransmit of calls that lost their transport, the queue
 // bound, acknowledgements, deadlines, cancels, legacy connections and the instance option. Every
@@ -67,10 +67,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
   });
 
   afterEach(async (): Promise<void> => {
-    for (const c of clients) {
-      c.disconnect();
-    }
-    clients.length = 0;
+    disconnectAll(clients);
     await server.close();
   });
 
@@ -83,11 +80,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
   }
 
   async function connect(c: Centrifuge): Promise<void> {
-    const connected: Promise<void> = new Promise<void>((resolve: () => void): void => {
-      c.once('connected', (): void => resolve());
-    });
-    c.connect();
-    await connected;
+    await connectClient(c);
     expect(c.state).toBe(State.Connected);
   }
 
