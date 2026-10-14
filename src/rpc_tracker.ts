@@ -52,9 +52,11 @@ export class RpcTracker {
   private callTimeout: number;
   private queue: RpcQueue = new RpcQueue();
   private msgIds: MsgIdGenerator = new MsgIdGenerator();
-  // Message ids of calls aborted while they waited for a connection: sent as cancels with the
-  // next connection, in case the server received the call before the connection was lost.
+  // Message ids of cancels not delivered: calls aborted while their connection was lost, or whose
+  // cancel was lost with it. Sent with the next connection, in case the server received the call.
   private cancels: number[] = [];
+
+
   constructor(host: RpcHost, maxPendingRpc: number, callTimeout: number) {
     this.host = host;
     this.maxPendingRpc = maxPendingRpc;
