@@ -15,6 +15,10 @@ export enum errorCodes {
   sharedPollGetSignature = 14,
   // The server does not support the requested feature, the call was not sent.
   unsupported = 15,
+  // More rpc calls are pending than maxPendingRpc allows, the call was not sent.
+  limitExceeded = 16,
+  // The call was cancelled by its signal.
+  cancelled = 17,
 }
 
 export enum connectingCodes {

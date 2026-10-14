@@ -52,6 +52,21 @@ export function serverErrorFields(error: any): ServerErrorFields {
 }
 
 /**
+ * Pattern of a client instance identifier: a random secret of at least 128 bits, in base64url
+ * characters (22 characters carry 132 bits). The server drops any other value.
+ * @internal
+ */
+export const instancePattern: RegExp = /^[A-Za-z0-9_-]{22,64}$/;
+
+/**
+ * Whether a client instance identifier has the form the server accepts.
+ * @internal
+ */
+export function isValidInstance(instance: string): boolean {
+  return instancePattern.test(instance);
+}
+
+/**
  * Whether an RPC options object asks for headers. An empty headers object sends nothing,
  * so it counts as no headers.
  * @internal
