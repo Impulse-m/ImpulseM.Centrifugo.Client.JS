@@ -341,9 +341,9 @@ centrifuge.rpc("my.method.name", {}).catch(function(err) {
 
 ##### Retransmit of calls across a lost connection
 
-On a connection that supports RPC options, every `rpc` call carries a message id. When the transport is lost while a call waits for its reply, the call is kept instead of failing. After the next connect reply confirms the capability, the call is sent again with the same message id, in message id order, and the reply of the server completes the original call. Each call keeps its original deadline across attempts: the `timeout` option, default `5000` ms, counts from the moment of the call. A call whose deadline passes while the connection is down rejects with error code `errorCodes.timeout`.
+On a connection that supports RPC options and has an `instance` (see below), every `rpc` call carries a message id. When the transport is lost while a call waits for its reply, the call is kept instead of failing. After the next connect reply confirms the capability, the call is sent again with the same message id, in message id order, and the reply of the server completes the original call. Each call keeps its original deadline across attempts: the `timeout` option, default `5000` ms, counts from the moment of the call. A call whose deadline passes while the connection is down rejects with error code `errorCodes.timeout`.
 
-Calls kept this way are bounded by the `maxPendingRpc` option, default `32`. The bound counts the calls made while the client is disconnected too, from the moment of the call. An `rpc` call beyond the bound rejects with error code `errorCodes.limitExceeded` (16) and is not sent.
+Calls kept this way are bounded by the `maxPendingRpc` option, default `32`: the tracked calls, sent or waiting for a reconnect, count towards it. A call made while the client is disconnected waits for the connection, within its timeout, and counts once it is tracked. An `rpc` call beyond the bound rejects with error code `errorCodes.limitExceeded` (16) and is not sent. The default is a breaking change for code that runs more than 32 calls at once on a connection with RPC options: such code gets `limitExceeded` beyond 32, where it had no bound before. Raise `maxPendingRpc` for that code. The bound does not apply to a legacy connection.
 
 A write error of a tracked call on an open transport is handled as a lost transport: the client reconnects, and the call is sent again on that connection with the same message id.
 
@@ -351,7 +351,9 @@ A server error reply rejects the call with the error as the server sent it, incl
 
 A call that settles locally, by its deadline or its signal, keeps its callback for one call timeout, so a late reply is still acknowledged. Then the callback is dropped, and a server that never replies does not grow the client.
 
-On a connection without RPC options (legacy mode), calls are sent as plain requests without a message id, are not kept on a lost connection, and reject with `errorCodes.connectionClosed` when the transport is lost, as before.
+On a connection without RPC options (legacy mode), calls are sent as plain requests without a message id, are not kept on a lost connection, and reject with `errorCodes.connectionClosed` when the transport is lost, as before. A call tracked on a connection with RPC options, and lost to a server without them, also rejects with `errorCodes.connectionClosed`: it may have run on the lost connection, so it is not reported as not sent (`errorCodes.unsupported`).
+
+Without an `instance`, a call is a plain request too: it is not kept on a lost connection and is not sent again, so a call lost on the connection may already have run. Headers are sent with it on a connection with RPC options.
 
 ##### Cancel an rpc call
 
@@ -365,7 +367,7 @@ centrifuge.rpc("my.method.name", {}, {signal: controller.signal}).catch(function
 controller.abort();
 ```
 
-Aborting sends a cancel for the call to the server, and the call rejects locally with error code `errorCodes.cancelled` (17). A signal that is already aborted sends nothing. A call that waits for a connection is not sent after it is aborted; the cancel goes out with the next connection, in case the server received the call before the connection was lost. Without RPC options, `rpc` with a signal rejects with `errorCodes.unsupported` and the call is not sent.
+Aborting sends a cancel for the call to the server, and the call rejects locally with error code `errorCodes.cancelled` (17). A signal that is already aborted sends nothing. A call that waits for a connection or for a refresh rejects with `errorCodes.cancelled` at once when it is aborted, and is not sent. A call that was sent, and lost before its cancel went out, is cancelled with the next connection, in case the server received the call before the connection was lost. Without RPC options, or without an `instance`, `rpc` with a signal rejects with `errorCodes.unsupported` and the call is not sent: the server has no scope to cancel the call in.
 
 ##### Instance of the client
 
@@ -388,7 +390,7 @@ function tabInstance() {
 const centrifuge = new Centrifuge(endpoint, {instance: tabInstance()});
 ```
 
-Without an `instance`, and without a session in the connection token, the server has no scope for duplicate detection of these calls.
+Without an `instance` the server has no scope for duplicate detection of these calls, so the client sends them as plain requests: they are not retransmitted, and a signal on them rejects with `errorCodes.unsupported`.
 
 #### history method
 
@@ -520,7 +522,7 @@ Identifier of the installation or the browser tab, sent with the connect command
 
 #### maxPendingRpc
 
-Maximum number of rpc calls kept for retransmit at once, sent or waiting for a connection. Beyond it `rpc` rejects with `errorCodes.limitExceeded`. Default is `32`.
+Maximum number of tracked rpc calls at once: the calls on a connection with RPC options and an instance that are not settled, sent or waiting for a reconnect. Beyond it `rpc` rejects with `errorCodes.limitExceeded`. Default is `32`. A call made while disconnected is counted once it is sent. This default is a breaking change for code with more than 32 concurrent calls on such a connection; raise the option for that code. See [Retransmit of calls across a lost connection](#retransmit-of-calls-across-a-lost-connection).
 
 #### debug
 
@@ -645,7 +647,7 @@ const identity = await centrifuge.refresh('NEW-CONNECTION-TOKEN');
 console.log('now connected as', identity.user);
 ```
 
-While the client is disconnected, the refresh is sent on the next connect, however long the reconnect takes: the call timeout does not apply to it. Calls with the same token, or without one, made while a refresh is pending share its promise. A refresh with another token is sent after the one in flight, and each caller gets the identity of its own token. The explicit refresh and the timer-driven refresh never have two refresh commands in flight. `rpc` calls wait for a refresh in flight, so they go out under the identity it confirms. When the server refuses the token, the promise rejects with the server error, the connection keeps its identity, and the reconnects keep the previous token. Whether the server accepts a change of user is decided by the server configuration.
+While the client is disconnected, the refresh is sent on the next connect, however long the reconnect takes: the call timeout does not apply to the refresh itself. At most 32 refresh calls can be in progress at once; beyond that `refresh` rejects with `errorCodes.limitExceeded`. Calls with the same token, or without one, made while a refresh is pending share its promise. A refresh with another token is sent after the one in flight, and each caller gets the identity of its own token. The explicit refresh and the timer-driven refresh never have two refresh commands in flight, and the reconnects use the token of the last refresh the server accepted. `rpc` calls wait for a refresh in flight, so they go out under the identity it confirms; such a wait ends at the call's own timeout, and rejects with `errorCodes.cancelled` when the call's signal aborts. When the server refuses the token, the promise rejects with the server error, the connection keeps its identity, and the reconnects keep the previous token. A timer-driven refresh refused with 103 or 109 keeps the connection and emits an `error` event with type `refresh`; the server ends the connection with its expiry code when the token expires. Whether the server accepts a change of user is decided by the server configuration.
 
 Deploy the server before the clients that use the identity fields: a server that does not send `user` and `auth_class` in its refresh replies makes each refresh read as an anonymous connection.
 
