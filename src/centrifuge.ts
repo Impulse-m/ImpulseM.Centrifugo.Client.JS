@@ -800,7 +800,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
 
     // The instance is a secret: the debug log shows only whether one is set.
-    const instance: string = this._config.instance;
+    const instance: string = this._config.instance ?? '';
     const loggedConfig: Options = { ...this._config, instance: instance === '' ? '' : '<set>' };
     this._debug('config', loggedConfig);
 
@@ -1760,7 +1760,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   // Throws for a configuration no call can fix, before the client is used.
   private _validateRpcConfig(): void {
-    const instance: string = this._config.instance;
+    const instance: string = this._config.instance ?? '';
     if (instance !== '' && !isValidInstance(instance)) {
       throw this._createErrorObject(
         errorCodes.badConfiguration,

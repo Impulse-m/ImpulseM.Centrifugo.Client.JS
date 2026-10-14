@@ -182,7 +182,7 @@ export interface Options {
    * secret of at least 128 bits, 22 to 64 characters of A-Z, a-z, 0-9, '_' and '-', never logged
    * or shared: whoever knows it can retransmit and cancel the calls of its scope. Empty (default)
    * means none. A value that does not match throws a configuration error. */
-  instance: string;
+  instance?: string;
   /** Maximum number of rpc calls tracked for retransmit at once, sent or waiting for a
    * connection. An rpc() beyond it rejects with errorCodes.limitExceeded. Default: 32. */
   maxPendingRpc: number;
@@ -500,7 +500,7 @@ export interface SubscriptionDataContext {
 export interface PublishResult {
 }
 
-/** Result of an RPC call. */
+/** Result of an RPC call. An output type: the client always sets its fields. */
 export interface RpcResult {
   /** Arbitrary data returned by the server-side RPC handler. */
   data: any;
