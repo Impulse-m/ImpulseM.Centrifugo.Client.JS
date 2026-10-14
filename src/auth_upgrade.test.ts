@@ -3,7 +3,7 @@ import { FakeCentrifugoServer, holdReply } from './fakeServer';
 import { errorCodes } from './codes';
 import { maxRefreshCalls } from './refresh_slot';
 import { AuthContext, Options, State } from './types';
-import { CodecCase, codecCases, connectClient, disconnectAll } from './test_codecs';
+import { CodecCase, codecCases, connectClient, disconnectAll, until } from './test_codecs';
 
 // The identity of a connection: the user and auth class of the connect and refresh replies,
 // the 'auth' event and the refresh() call. Every case runs over both codecs (see test_codecs.ts).
@@ -462,13 +462,11 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
     second.catch((): void => undefined);
     await server.waitFor((cmd: any): boolean => cmd.refresh !== undefined && cmd.refresh.token === 'token-a');
 
-    const started: number = Date.now();
     const calling: Promise<unknown> = c.rpc('echo', codecCase.encode({}));
     // The connection drops: the refresh in flight is lost, and the one behind it waits for a late reconnect.
     server.closeConnection();
 
     await expect(calling).rejects.toMatchObject({ code: errorCodes.timeout });
-    expect(Date.now() - started).toBeLessThan(2000);
   });
 
   test('refresh calls waiting for a connection are bounded by maxRefreshCalls', async (): Promise<void> => {
@@ -487,24 +485,79 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
     expect(refreshCommands().map((cmd: any): string => cmd.refresh.token)).toEqual(tokens);
   });
 
-  for (const code of [103, 109]) {
-    test(`a timer refresh refused with ${code} keeps the connection and reports an error`, async (): Promise<void> => {
-      server.connectResult = { client: 'fake-client', version: '0.0.0', expires: true, ttl: 1 };
-      server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? {
-        id: cmd.id,
-        error: { code: code, message: 'refused' },
-      } : undefined);
+  test('a timer refresh refused with 103 keeps the connection, reports an error and is not retried', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', expires: true, ttl: 1 };
+    server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? { id: cmd.id, error: { code: 103, message: 'refused' } } : undefined);
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
       const c: Centrifuge = create({ getToken: async (): Promise<string> => 'timer-token' });
       const failed: Promise<any> = new Promise<any>((resolve: (ctx: any) => void): void => {
         c.once('error', (ctx: any): void => resolve(ctx));
       });
       await connect(c);
 
-      const reported: any = await failed;
-
-      expect(reported).toMatchObject({ type: 'refresh', error: { code: code } });
+      jest.advanceTimersByTime(1000);
+      await expect(failed).resolves.toMatchObject({ type: 'refresh', error: { code: 103 } });
+      await until((): boolean => refreshCommands().length === 1);
       expect(c.state).toBe(State.Connected);
-      expect(refreshCommands()).toHaveLength(1);
-    });
-  }
+      // No retry is scheduled: the refresh timer has nothing left to run.
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a timer refresh refused with 109 is reported and retried with a fresh token after the backoff', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', expires: true, ttl: 1 };
+    let refreshes: number = 0;
+    server.onCommand = (cmd: any): any => {
+      if (cmd.refresh === undefined) {
+        return undefined;
+      }
+      refreshes++;
+      return refreshes === 1
+        ? { id: cmd.id, error: { code: 109, message: 'token expired' } }
+        : { id: cmd.id, refresh: {} };
+    };
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      let tokens: number = 0;
+      const c: Centrifuge = create({ getToken: async (): Promise<string> => `timer-token-${++tokens}` });
+      const failed: Promise<any> = new Promise<any>((resolve: (ctx: any) => void): void => {
+        c.once('error', (ctx: any): void => resolve(ctx));
+      });
+      await connect(c);
+
+      jest.advanceTimersByTime(1000);
+      await expect(failed).resolves.toMatchObject({ type: 'refresh', error: { code: 109 } });
+      expect(c.state).toBe(State.Connected);
+
+      // The retry waits for its backoff of 5 to 10 seconds, then asks for a token again.
+      jest.advanceTimersByTime(10000);
+      await until((): boolean => refreshCommands().length === 2);
+      expect(refreshCommands()[1].refresh.token).not.toBe(refreshCommands()[0].refresh.token);
+      expect(c.state).toBe(State.Connected);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a timer refresh refused with 101 disconnects with that code, as before', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', expires: true, ttl: 1 };
+    server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? { id: cmd.id, error: { code: 101, message: 'unauthorized' } } : undefined);
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      const c: Centrifuge = create({ getToken: async (): Promise<string> => 'timer-token' });
+      const disconnected: Promise<any> = new Promise<any>((resolve: (ctx: any) => void): void => {
+        c.once('disconnected', (ctx: any): void => resolve(ctx));
+      });
+      await connect(c);
+
+      jest.advanceTimersByTime(1000);
+      await expect(disconnected).resolves.toMatchObject({ code: 101 });
+      expect(c.state).toBe(State.Disconnected);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

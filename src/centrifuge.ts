@@ -25,11 +25,13 @@ import {
 
 import {
   rpcOptionsFlag, hasFlag, serverErrorFields, serverTimeOffsetFrom, rpcConfigError,
-  refreshErrorKeepsConnection, callTimer, lateCallTimer, lateCallGrace,
+  refreshRetries, refreshKeepsConnection,
 } from './extensions';
 
-import { RpcCallbacks, RpcTracker } from './rpc_tracker';
-import { RefreshSlot } from './refresh_slot';
+import { callTimer, lateCallTimer, lateCallGrace } from './call_timer';
+import { RpcCallbacks, RpcHost, RpcTracker } from './rpc_tracker';
+import { RefreshSlot, RefreshSlotHost } from './refresh_slot';
+import { ConnectionIdentity } from './identity';
 
 import {
   State, Options, SubscriptionState, ClientEvents, AuthContext,
@@ -168,9 +170,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _rpcOptionsSupported: boolean = false;
   // Server time minus local time, learnt from the time of the last reply carrying one.
   private _serverTimeOffset: number | null = null;
-  // User and auth class the server confirmed for the connection, from its connect or refresh reply.
-  private _user: string = '';
-  private _authClass: string = '';
+  // User and auth class the server confirmed for the connection, see ConnectionIdentity.
+  private _identity: ConnectionIdentity = new ConnectionIdentity();
   // The refresh commands and refresh() calls, one at a time, see RefreshSlot.
   private _refreshSlot: RefreshSlot;
   // The rpc calls tracked for retransmit, see RpcTracker.
@@ -240,38 +241,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     if (configError !== null) {
       throw this._createErrorObject(errorCodes.badConfiguration, configError);
     }
-    this._rpc = new RpcTracker({
-      isConnected: (): boolean => this._isConnected(),
-      hasInstance: (): boolean => !!this._config.instance,
-      ready: (deadline: number): Promise<void> => this._callReady(deadline),
-      plainCall: (command: any): Promise<any> => this._callPromise(command, (reply: any): any => reply.rpc),
-      nextCommandId: (): number => this._nextCommandId(),
-      addCommand: (command: any): void => this._addCommand(command),
-      setCallbacks: (id: number, callbacks: RpcCallbacks): void => {
-        this._callbacks[id] = callbacks;
-      },
-      deleteCallbacks: (id: number): void => {
-        delete this._callbacks[id];
-      },
-      createError: (code: number, message: string): any => this._createErrorObject(code, message),
-      serverTime: (): number => this.serverTime(),
-      rpcOptionsSupported: (): boolean => this._rpcOptionsSupported,
-    }, maxPendingRpc, this._config.timeout);
-    this._refreshSlot = new RefreshSlot({
-      isConnected: (): boolean => this._isConnected(),
-      waitConnected: (): Promise<void> => this._methodCall(null),
-      createError: (code: number, message: string): any => this._createErrorObject(code, message),
-      sendCommand: (command: any): Promise<CallResolveContext> => this._call(command, false),
-      hasGetToken: (): boolean => this._config.getToken !== null,
-      getToken: (): Promise<string> => this._getToken(),
-      token: (): string => this._token,
-      setToken: (token: string): void => {
-        this._token = token;
-      },
-      debug: (message: string): void => this._debug(message),
-      applyReply: (result: any): void => this._refreshResponse(result),
-      identity: (): { user: string; authClass: string } => ({ user: this._user, authClass: this._authClass }),
-    });
+    const hosts: { rpc: RpcHost; refresh: RefreshSlotHost } = this._createRpcHosts();
+    this._rpc = new RpcTracker(hosts.rpc, maxPendingRpc, this._config.timeout);
+    this._refreshSlot = new RefreshSlot(hosts.refresh);
     this._configure();
 
     if (this._debugEnabled) {
@@ -2112,11 +2084,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       }
 
       self._refreshSlot.send(token).then(resolveCtx => {
-        // Kept once the server accepted it, as refresh() keeps it: a refused token is not used by the reconnects.
-        self._token = token;
-        self._debug('connection token refreshed');
         try {
-          self._refreshResponse(resolveCtx.reply.refresh);
+          self._refreshSlot.accepted(token, resolveCtx.reply.refresh);
         } catch (err) {
           self._dispatchFailed(err);
         } finally {
@@ -2163,15 +2132,15 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   }
 
   private _refreshError(err: any) {
-    if (err.code < 100 || err.temporary === true) {
+    if (refreshRetries(err.code, err.temporary === true)) {
       this._emitError({
         type: 'refresh',
         error: err
       }, () => {
         this._refreshTimeout = setTimeout(() => this._refresh(), this._getRefreshRetryDelay());
       });
-    } else if (refreshErrorKeepsConnection(err.code)) {
-      // Reported as refresh() reports it: the connection keeps its identity.
+    } else if (refreshKeepsConnection(err.code)) {
+      // Reported as refresh() reports it: the connection keeps its identity, and no retry is made.
       this.emit('error', {
         type: 'refresh',
         error: err
@@ -2188,11 +2157,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _refreshResponse(result: any) {
     // The identity of a refresh reply replaces the one of the connection: the server only
     // refuses a change it does not allow, and then the reply is an error.
-    const user: string = result.user ?? '';
-    const authClass: string = result.auth_class ?? '';
-    const identityChanged = user !== this._user || authClass !== this._authClass;
-    this._user = user;
-    this._authClass = authClass;
+    const identityChanged: boolean = this._identity.applyRefresh(result);
     if (this._refreshTimeout) {
       clearTimeout(this._refreshTimeout);
       this._refreshTimeout = null;
@@ -2208,7 +2173,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       this._refreshTimeout = setTimeout(() => this._refresh(), ttlMilliseconds(result.ttl));
     }
     if (identityChanged) {
-      this.emit('auth', { user, authClass, ttl: result.ttl ?? 0 });
+      this.emit('auth', this._identity.context(result.ttl ?? 0));
     }
   }
 
@@ -2380,8 +2345,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
     this._session = result.session;
     this._node = result.node;
-    this._user = result.user ?? '';
-    this._authClass = result.auth_class ?? '';
+    this._identity.applyConnect(result);
 
     this.startBatching();
     this._sendSubscribeCommands();
@@ -2390,8 +2354,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     const ctx: any = {
       client: result.client,
       transport: this._transport.subName(),
-      user: this._user,
-      authClass: this._authClass
+      user: this._identity.user,
+      authClass: this._identity.authClass
     };
     if (result.data) {
       ctx.data = result.data;
@@ -2403,7 +2367,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       return;
     }
 
-    this.emit('auth', { user: this._user, authClass: this._authClass, ttl: result.ttl ?? 0 });
+    this.emit('auth', this._identity.context(result.ttl ?? 0));
     // Same for an 'auth' handler.
     if (this._transitionSuperseded(transition)) {
       return;
@@ -2895,6 +2859,44 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       this._promises[id].reject(err);
       delete this._promises[id];
     }
+  }
+
+  // The hosts of the rpc tracker and of the refresh slot: the client's own state, as they use it.
+  private _createRpcHosts(): { rpc: RpcHost; refresh: RefreshSlotHost } {
+    return {
+      rpc: {
+        isConnected: (): boolean => this._isConnected(),
+        hasInstance: (): boolean => !!this._config.instance,
+        ready: (deadline: number): Promise<void> => this._callReady(deadline),
+        plainCall: (command: any): Promise<any> => this._callPromise(command, (reply: any): any => reply.rpc),
+        nextCommandId: (): number => this._nextCommandId(),
+        addCommand: (command: any): void => this._addCommand(command),
+        setCallbacks: (id: number, callbacks: RpcCallbacks): void => {
+          this._callbacks[id] = callbacks;
+        },
+        deleteCallbacks: (id: number): void => {
+          delete this._callbacks[id];
+        },
+        createError: (code: number, message: string): any => this._createErrorObject(code, message),
+        serverTime: (): number => this.serverTime(),
+        rpcOptionsSupported: (): boolean => this._rpcOptionsSupported,
+      },
+      refresh: {
+        isConnected: (): boolean => this._isConnected(),
+        waitConnected: (): Promise<void> => this._methodCall(null),
+        createError: (code: number, message: string): any => this._createErrorObject(code, message),
+        sendCommand: (command: any): Promise<CallResolveContext> => this._call(command, false),
+        hasGetToken: (): boolean => this._config.getToken !== null,
+        getToken: (): Promise<string> => this._getToken(),
+        token: (): string => this._token,
+        setToken: (token: string): void => {
+          this._token = token;
+        },
+        debug: (message: string): void => this._debug(message),
+        applyReply: (result: any): void => this._refreshResponse(result),
+        identity: (): ConnectionIdentity => this._identity,
+      },
+    };
   }
 }
 

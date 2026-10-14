@@ -1,5 +1,6 @@
 import { errorCodes } from './codes';
 import type { CallResolveContext } from './centrifuge';
+import type { ConnectionIdentity } from './identity';
 import { AuthContext } from './types';
 
 /** Most refresh() calls in progress at once, the one in flight included. Beyond it refresh() rejects with errorCodes.limitExceeded. */
@@ -20,7 +21,7 @@ export interface RefreshSlotHost {
   debug(message: string): void;
   /** Applies the reply of a refresh command to the identity of the connection. */
   applyReply(result: any): void;
-  identity(): { user: string; authClass: string };
+  identity(): ConnectionIdentity;
 }
 
 
@@ -114,11 +115,19 @@ export class RefreshSlot {
     if (ctx.next !== undefined) {
       ctx.next();
     }
-    this.host.setToken(newToken);
+    this.accepted(newToken, result);
+    return this.host.identity().context(result.ttl ?? 0);
+  }
+
+
+  /**
+   * Takes a token the server accepted: it is the token of the connection from now on, and the identity of
+   * the refresh reply applies. A refused token is never taken, so the reconnects keep the one accepted before.
+   */
+  accepted(token: string, result: any): void {
+    this.host.setToken(token);
     this.host.debug('connection token refreshed');
     this.host.applyReply(result);
-    const identity: { user: string; authClass: string } = this.host.identity();
-    return { user: identity.user, authClass: identity.authClass, ttl: result.ttl ?? 0 };
   }
 
 
