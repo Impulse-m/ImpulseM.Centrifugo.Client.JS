@@ -237,6 +237,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     this._reconnectAttemptsResetPending = false;
 
     this._config = { ...defaults, ...options };
+    // An explicit undefined or null takes the default, as an omitted option does.
+    this._config.instance = this._config.instance ?? defaults.instance;
+    this._config.maxPendingRpc = this._config.maxPendingRpc ?? defaults.maxPendingRpc;
     this._validateRpcConfig();
     this._configure();
 

@@ -432,6 +432,17 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     }
   });
 
+  test('explicit undefined or null options take the defaults', async (): Promise<void> => {
+    const undefinedOptions: Partial<Options> = { instance: undefined, maxPendingRpc: undefined };
+    const nullOptions: Partial<Options> = { instance: null as unknown as string, maxPendingRpc: null as unknown as number };
+    const c: Centrifuge = create(undefinedOptions);
+    await connect(c);
+    expect(() => codecCase.createClient(server.url, nullOptions)).not.toThrow();
+
+    const connectCmd: any = server.received.find((cmd: any): boolean => cmd.connect !== undefined);
+    expect(connectCmd.connect.instance).toBeUndefined();
+  });
+
   test('a maxPendingRpc below 1 throws a configuration error', (): void => {
     let thrown: any = null;
     try {
