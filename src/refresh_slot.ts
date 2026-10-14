@@ -22,6 +22,8 @@ export interface RefreshSlotHost {
   /** Applies the reply of a refresh command to the identity of the connection. */
   applyReply(result: any): void;
   identity(): ConnectionIdentity;
+  /** Reports an error raised while a refresh was taken, e.g. by an 'auth' handler. */
+  dispatchFailed(err: any): void;
 }
 
 
@@ -39,10 +41,18 @@ export class RefreshSlot {
   private callToken?: string;
   // The refresh() calls in progress, the ones chained behind the call in flight included.
   private calls: number = 0;
+  // Moves on with each refresh() call started and each token accepted, see sendTimer.
+  private generationCount: number = 0;
 
 
   constructor(host: RefreshSlotHost) {
     this.host = host;
+  }
+
+
+  /** The generation of the refreshes: it moves on with each refresh() call started and each token accepted. */
+  currentGeneration(): number {
+    return this.generationCount;
   }
 
 
@@ -60,6 +70,7 @@ export class RefreshSlot {
       return Promise.reject(this.host.createError(errorCodes.limitExceeded, 'too many pending refresh calls'));
     }
     this.calls++;
+    this.generationCount++;
     const refresh: Promise<AuthContext> = pending === null
       ? run(token)
       : pending.then((): Promise<AuthContext> => run(token), (): Promise<AuthContext> => run(token));
@@ -102,11 +113,14 @@ export class RefreshSlot {
     try {
       ctx = await this.send(newToken);
     } catch (rejectCtx: any) {
-      if (rejectCtx.next !== undefined) {
+      // A refusal of the server carries next(); a connection lost meanwhile does not, and keeps the token:
+      // the next connect carries it, and the server answers for it.
+      const refused: boolean = rejectCtx.next !== undefined;
+      if (refused) {
         rejectCtx.next();
       }
-      // Refused or not sent: the reconnects keep the token the server accepted before.
-      if (this.host.token() === newToken) {
+      // Refused: the reconnects keep the token the server accepted before.
+      if (refused && this.host.token() === newToken) {
         this.host.setToken(previousToken);
       }
       throw rejectCtx.error;
@@ -115,7 +129,12 @@ export class RefreshSlot {
     if (ctx.next !== undefined) {
       ctx.next();
     }
-    this.accepted(newToken, result);
+    try {
+      this.accepted(newToken, result);
+    } catch (err) {
+      // The token is accepted: the refresh succeeded, and the error of a handler is reported as any other.
+      this.host.dispatchFailed(err);
+    }
     return this.host.identity().context(result.ttl ?? 0);
   }
 
@@ -125,6 +144,7 @@ export class RefreshSlot {
    * the refresh reply applies. A refused token is never taken, so the reconnects keep the one accepted before.
    */
   accepted(token: string, result: any): void {
+    this.generationCount++;
     this.host.setToken(token);
     this.host.debug('connection token refreshed');
     this.host.applyReply(result);
@@ -138,16 +158,39 @@ export class RefreshSlot {
    * good before the command could go out.
    */
   async send(token: string): Promise<CallResolveContext> {
-    let release: () => void;
-    try {
-      release = await this.claim();
-    } catch (error) {
-      throw { error: error };
-    }
+    const release: () => void = await this.claimCommand();
     try {
       return await this.host.sendCommand({ refresh: { token: token } });
     } finally {
       release();
+    }
+  }
+
+
+  /**
+   * Sends the token of a timer refresh, read at the given generation, once the command slot is free. It is
+   * not sent when a refresh() call started or a token was accepted since: then it is superseded, and
+   * resolves with null. A refresh() call made while the token was fetched is never overwritten by it.
+   */
+  async sendTimer(token: string, generation: number): Promise<CallResolveContext | null> {
+    const release: () => void = await this.claimCommand();
+    try {
+      if (this.generationCount !== generation) {
+        return null;
+      }
+      return await this.host.sendCommand({ refresh: { token: token } });
+    } finally {
+      release();
+    }
+  }
+
+
+  // Takes the slot of a refresh command. A client disconnected for good first rejects with the error alone.
+  private async claimCommand(): Promise<() => void> {
+    try {
+      return await this.claim();
+    } catch (error) {
+      throw { error: error };
     }
   }
 

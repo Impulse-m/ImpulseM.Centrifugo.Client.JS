@@ -2067,6 +2067,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     const self = this;
     // See _startReconnecting.
     let tokenResolved = false;
+    // A refresh() call started, or a token accepted, while the token is fetched supersedes it (see sendTimer).
+    const generation: number = this._refreshSlot.currentGeneration();
     this._getToken().then(function (token) {
       tokenResolved = true;
       if (clientId !== self._client) {
@@ -2076,14 +2078,25 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         self._failUnauthorized();
         return;
       }
+      const superseded: boolean = self._refreshSlot.currentGeneration() !== generation;
       if (!self._isConnected()) {
-        // The connect that comes next carries the token.
-        self._token = token;
-        self._debug('connection token refreshed');
+        // The connect that comes next carries the token, unless a refresh() call set one meanwhile.
+        if (!superseded) {
+          self._token = token;
+          self._debug('connection token refreshed');
+        }
         return;
       }
 
-      self._refreshSlot.send(token).then(resolveCtx => {
+      self._refreshSlot.sendTimer(token, generation).then(resolveCtx => {
+        if (resolveCtx === null) {
+          // Superseded: the token is dropped, and the refresh timer is due again.
+          if (self._refreshTimeout) {
+            clearTimeout(self._refreshTimeout);
+          }
+          self._refreshTimeout = setTimeout(() => self._refresh(), 0);
+          return;
+        }
         try {
           self._refreshSlot.accepted(token, resolveCtx.reply.refresh);
         } catch (err) {
@@ -2895,6 +2908,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         debug: (message: string): void => this._debug(message),
         applyReply: (result: any): void => this._refreshResponse(result),
         identity: (): ConnectionIdentity => this._identity,
+        dispatchFailed: (err: any): void => this._dispatchFailed(err),
       },
     };
   }

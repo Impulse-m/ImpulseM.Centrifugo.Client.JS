@@ -542,6 +542,94 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
     }
   });
 
+  test('a timer refresh whose token arrives after a refresh() call started is dropped, and the identity of the call stays', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated', expires: true, ttl: 1 };
+    server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? {
+      id: cmd.id,
+      refresh: { user: 'bob', auth_class: 'bot' },
+    } : undefined);
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      // The first token fetch of the timer is answered late, with a token of another user.
+      let fetches: number = 0;
+      let answerFirst: (token: string) => void = (): void => {};
+      const getToken: () => Promise<string> = (): Promise<string> => {
+        fetches++;
+        if (fetches === 1) {
+          return new Promise<string>((resolve: (token: string) => void): void => {
+            answerFirst = resolve;
+          });
+        }
+        return Promise.resolve('t2');
+      };
+      const c: Centrifuge = create({ token: 't0', getToken: getToken });
+      await connect(c);
+
+      jest.advanceTimersByTime(1000);
+      await until((): boolean => fetches === 1);
+      const explicit: AuthContext = await c.refresh('t2');
+      expect(explicit).toMatchObject({ user: 'bob', authClass: 'bot' });
+
+      answerFirst('t1');
+      await new Promise<void>((resolve: () => void): void => {
+        setImmediate(resolve);
+      });
+      // The superseded token is not sent: the timer is due again, and fetches a token once more.
+      jest.advanceTimersByTime(0);
+      await until((): boolean => refreshCommands().length === 2);
+    } finally {
+      jest.useRealTimers();
+    }
+
+    expect(refreshCommands().map((cmd: any): string => cmd.refresh.token)).toEqual(['t2', 't2']);
+    expect(authEvents[authEvents.length - 1]).toMatchObject({ user: 'bob', authClass: 'bot' });
+  });
+
+  test('an auth handler that throws on a refresh does not fail the refresh, whose token is accepted', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated' };
+    server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? {
+      id: cmd.id,
+      refresh: { user: 'bob', auth_class: 'bot' },
+    } : undefined);
+    const c: Centrifuge = create();
+    c.on('auth', (ctx: AuthContext): void => {
+      if (ctx.user === 'bob') {
+        throw new Error('handler failed');
+      }
+    });
+    // Applications see the exception as an unhandled rejection; captured here instead.
+    const reported: any[] = [];
+    (c as any)._reportDispatchError = (err: any): void => {
+      reported.push(err);
+    };
+    await connect(c);
+
+    await expect(c.refresh('new-token')).resolves.toMatchObject({ user: 'bob', authClass: 'bot' });
+    expect(reported.map((err: any): string => err.message)).toEqual(['handler failed']);
+  });
+
+  test('a refresh the connection loss ends keeps its token for the reconnect, which carries it', async (): Promise<void> => {
+    server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? holdReply : undefined);
+    const c: Centrifuge = create({ token: 'A' });
+    const refreshing: Promise<AuthContext> = c.refresh('B');
+    refreshing.catch((): void => {});
+    const connected: Promise<void> = new Promise<void>((resolve: () => void): void => {
+      c.once('connected', (): void => resolve());
+    });
+    c.connect();
+    await connected;
+    await server.waitFor((cmd: any): boolean => cmd.refresh !== undefined);
+
+    server.closeConnection();
+    await expect(refreshing).rejects.toMatchObject({ code: errorCodes.connectionClosed });
+    const reconnected: Promise<void> = new Promise<void>((resolve: () => void): void => {
+      c.once('connected', (): void => resolve());
+    });
+    await reconnected;
+
+    expect(connectCommands().map((cmd: any): string => cmd.connect.token)).toEqual(['B', 'B']);
+  });
+
   test('a timer refresh refused with 101 disconnects with that code, as before', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', expires: true, ttl: 1 };
     server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? { id: cmd.id, error: { code: 101, message: 'unauthorized' } } : undefined);
