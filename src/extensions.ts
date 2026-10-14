@@ -1,5 +1,8 @@
-import { ServerErrorFields } from './types';
+import { Options, ServerErrorFields } from './types';
 import { toOffset } from './utils';
+
+/** Default of maxPendingRpc: the calls tracked at once. */
+export const defaultMaxPendingRpc: number = 32;
 
 /**
  * Connect flag bit 32 of the protocol flag bitmask: the client understands RPC options
@@ -87,17 +90,28 @@ export function refreshKeepsConnection(code: number): boolean {
 }
 
 /**
- * The message of the first RPC option no call can work with, or null when the options are valid.
+ * Settles the RPC options of a client config: an unset instance is empty, an unset maxPendingRpc takes
+ * its default. Returns the message of the first option no call can work with, or null when they are valid.
  * @internal
  */
-export function rpcConfigError(instance: string, maxPendingRpc: number): string | null {
-  if (instance !== '' && !isValidInstance(instance)) {
+export function normaliseRpcOptions(config: Options): string | null {
+  config.instance = config.instance ?? '';
+  config.maxPendingRpc = config.maxPendingRpc ?? defaultMaxPendingRpc;
+  if (config.instance !== '' && !isValidInstance(config.instance)) {
     return 'instance must be 22 to 64 characters of A-Z, a-z, 0-9, "_" or "-"';
   }
-  if (!Number.isInteger(maxPendingRpc) || maxPendingRpc < 1) {
+  if (!Number.isInteger(config.maxPendingRpc) || config.maxPendingRpc < 1) {
     return 'maxPendingRpc must be a positive integer';
   }
   return null;
+}
+
+/**
+ * The config as the debug log shows it: the instance is a secret, so only whether one is set is shown.
+ * @internal
+ */
+export function loggedConfig(config: Options): Options {
+  return { ...config, instance: config.instance === '' ? '' : '<set>' };
 }
 
 /**

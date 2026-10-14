@@ -7,6 +7,12 @@ import { AuthContext } from './types';
 export class ConnectionIdentity {
   user: string = '';
   authClass: string = '';
+  // Called with the new identity when a refresh reply changes it.
+  private onChange: (ctx: AuthContext) => void;
+
+  constructor(onChange: (ctx: AuthContext) => void) {
+    this.onChange = onChange;
+  }
 
   /** Takes the identity of a connect reply. */
   applyConnect(result: any): void {
@@ -14,14 +20,16 @@ export class ConnectionIdentity {
     this.authClass = result.auth_class ?? '';
   }
 
-  /** Takes the identity of a refresh reply. Returns whether it changed the identity of the connection. */
-  applyRefresh(result: any): boolean {
+  /** Takes the identity of a refresh reply, and reports it when it changed the identity of the connection. */
+  applyRefresh(result: any): void {
     const user: string = result.user ?? '';
     const authClass: string = result.auth_class ?? '';
     const changed: boolean = user !== this.user || authClass !== this.authClass;
     this.user = user;
     this.authClass = authClass;
-    return changed;
+    if (changed) {
+      this.onChange(this.context(result.ttl ?? 0));
+    }
   }
 
   /** The auth context of the connection, with the ttl of the reply that confirmed it. */

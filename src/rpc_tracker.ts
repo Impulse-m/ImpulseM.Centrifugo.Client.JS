@@ -36,9 +36,8 @@ export function retrySignal(error: any): RetrySignal {
 /** The callbacks of a command waiting for its reply, as the client keeps them by command id. */
 export interface RpcCallbacks {
   callback: (ctx: CallResolveContext) => void;
+  // Called without a next() when the connection ends before the reply, or the write fails.
   errback: (ctx: CallRejectContext) => void;
-  // Called instead of errback when the connection is lost before the reply.
-  lost?: () => void;
   timeout: CallTimer | null;
 }
 
@@ -189,6 +188,11 @@ export class RpcTracker {
   }
 
 
+  /** Whether a write of these commands failed on a tracked call or a cancel: the transport is then taken as lost. */
+  writeFailed(commands: any[]): boolean {
+    return commands.some((command: any): boolean => command.rpc?.msg_id !== undefined || command.rpc?.cancel !== undefined);
+  }
+
   /** Rejects all tracked calls, e.g. on a disconnect that will not be followed by a reconnect. */
   rejectAll(code: number, message: string): void {
     this.cancels = [];
@@ -287,8 +291,7 @@ export class RpcTracker {
       call.sent = true;
       return {
         callback: (ctx: CallResolveContext): void => this.replied(call, ctx),
-        errback: (ctx: CallRejectContext): void => this.failed(call, ctx),
-        lost: (): void => this.lost(call, acks),
+        errback: (ctx: CallRejectContext): void => this.failed(call, ctx, acks),
         timeout: null,
       };
     });
@@ -332,8 +335,11 @@ export class RpcTracker {
     const rpc: any = { cancel: msgId };
     this.dispatch(rpc, (id: number, acks: number[]): RpcCallbacks => ({
       callback: (ctx: CallResolveContext): void => ctx.next?.(),
-      errback: (ctx: CallRejectContext): void => ctx.next?.(),
-      lost: (): void => {
+      errback: (ctx: CallRejectContext): void => {
+        if (ctx.next !== undefined) {
+          ctx.next();
+          return;
+        }
         this.keepCancel(msgId);
         this.restoreAcks(acks);
       },
@@ -377,9 +383,15 @@ export class RpcTracker {
   }
 
 
-  // An error reply of the server. A refusal with the retry signal did not run the call: it is sent again,
-  // and the error is not acknowledged (the server did not record it). Any other error is surfaced unchanged.
-  private failed(call: TrackedRpc, ctx: CallRejectContext): void {
+  // A rejection of the command: without a reply (next) the connection ended or the write failed, and the call
+  // waits for the next connection. An error reply of the server: a refusal with the retry signal did not run
+  // the call, so it is sent again, and the error is not acknowledged (the server did not record it). Any other
+  // error is surfaced unchanged.
+  private failed(call: TrackedRpc, ctx: CallRejectContext, acks: number[]): void {
+    if (ctx.next === undefined) {
+      this.lost(call, acks);
+      return;
+    }
     if (!call.settled && this.resend(call, retrySignal(ctx.error))) {
       ctx.next?.();
       return;

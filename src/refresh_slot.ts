@@ -9,8 +9,9 @@ export const maxRefreshCalls: number = 32;
 /** What the refresh slot needs from its client. */
 export interface RefreshSlotHost {
   isConnected(): boolean;
-  /** Resolves once the client is connected. Rejects when it is disconnected for good. */
-  waitConnected(): Promise<void>;
+  /** Resolves once the client is connected. Rejects after the timeout in milliseconds, or when it is disconnected
+   * for good; with a null timeout it waits without a limit. */
+  waitConnected(timeout: number | null): Promise<void>;
   createError(code: number, message: string): any;
   /** Sends a command on the connection. Resolves with the reply context, rejects with the rejection context. */
   sendCommand(command: any): Promise<CallResolveContext>;
@@ -196,6 +197,18 @@ export class RefreshSlot {
 
 
   /**
+   * Resolves once the client is connected and no refresh is in flight, so an rpc call can go out. Rejects with
+   * a timeout at the deadline (local time in milliseconds), or when the client is disconnected for good.
+   */
+  async ready(deadline: number): Promise<void> {
+    do {
+      await this.host.waitConnected(Math.max(0, deadline - Date.now()));
+      await this.settled();
+    } while (!this.host.isConnected());
+  }
+
+
+  /**
    * Resolves once no refresh is in flight, the timer-driven ones included. A refresh that failed is
    * reported to its caller, not here.
    */
@@ -223,7 +236,7 @@ export class RefreshSlot {
       if (this.commandInFlight !== null) {
         await this.commandInFlight;
       } else {
-        await this.host.waitConnected();
+        await this.host.waitConnected(null);
       }
     }
     let release: () => void = (): void => {};
