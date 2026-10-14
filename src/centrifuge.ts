@@ -67,6 +67,9 @@ export type SharedPollSubscription = CommonSurface
   }
   & TypedEventEmitter<SharedPollSubscriptionEvents>;
 
+// Default of maxPendingRpc, typed as a number: the Options type leaves the option optional.
+const defaultMaxPendingRpc: number = 32;
+
 const defaults: Options = {
   headers: {},
   token: '',
@@ -89,7 +92,7 @@ const defaults: Options = {
   maxServerPingDelay: 10000,
   networkEventTarget: null,
   instance: '',
-  maxPendingRpc: 32,
+  maxPendingRpc: defaultMaxPendingRpc,
 }
 
 const websocketNotFound = 'WebSocket constructor not found, make sure it is available globally or passed as a dependency in Centrifuge options';
@@ -239,8 +242,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     this._config = { ...defaults, ...options };
     // An explicit undefined or null takes the default, as an omitted option does.
     this._config.instance = this._config.instance ?? defaults.instance;
-    this._config.maxPendingRpc = this._config.maxPendingRpc ?? defaults.maxPendingRpc;
-    this._validateRpcConfig();
+    const maxPendingRpc: number = this._config.maxPendingRpc ?? defaultMaxPendingRpc;
+    this._config.maxPendingRpc = maxPendingRpc;
+    this._validateRpcConfig(maxPendingRpc);
     this._rpc = new RpcTracker({
       nextCommandId: (): number => this._nextCommandId(),
       addCommand: (command: any): void => this._addCommand(command),
@@ -253,7 +257,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       createError: (code: number, message: string): any => this._createErrorObject(code, message),
       serverTime: (): number => this.serverTime(),
       rpcOptionsSupported: (): boolean => this._rpcOptionsSupported,
-    }, this._config.maxPendingRpc, this._config.timeout);
+    }, maxPendingRpc, this._config.timeout);
     this._configure();
 
     if (this._debugEnabled) {
@@ -1794,7 +1798,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   }
 
   // Throws for a configuration no call can fix, before the client is used.
-  private _validateRpcConfig(): void {
+  private _validateRpcConfig(maxPendingRpc: number): void {
     const instance: string = this._config.instance ?? '';
     if (instance !== '' && !isValidInstance(instance)) {
       throw this._createErrorObject(
@@ -1802,7 +1806,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         'instance must be 22 to 64 characters of A-Z, a-z, 0-9, "_" or "-"'
       );
     }
-    const maxPendingRpc: number = this._config.maxPendingRpc;
     if (!Number.isInteger(maxPendingRpc) || maxPendingRpc < 1) {
       throw this._createErrorObject(
         errorCodes.badConfiguration,
