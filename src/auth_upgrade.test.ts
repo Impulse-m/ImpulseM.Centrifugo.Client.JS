@@ -437,6 +437,25 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase) => 
     expect(connectCommands()[1].connect.token).toBe('timer-token');
   });
 
+  test('an rpc waiting for a refresh ends at its deadline, also when the refresh waits for a reconnect', async () => {
+    server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? holdReply : undefined);
+    const c: Centrifuge = create({ timeout: 300, minReconnectDelay: 5000, maxReconnectDelay: 5000 });
+    await connect(c);
+    const first: Promise<AuthContext> = c.refresh('token-a');
+    const second: Promise<AuthContext> = c.refresh('token-b');
+    first.catch(() => undefined);
+    second.catch(() => undefined);
+    await server.waitFor(cmd => cmd.refresh !== undefined && cmd.refresh.token === 'token-a');
+
+    const started: number = Date.now();
+    const calling: Promise<unknown> = c.rpc('echo', codecCase.encode({}));
+    // The connection drops: the refresh in flight is lost, and the one behind it waits for a late reconnect.
+    server.closeConnection();
+
+    await expect(calling).rejects.toMatchObject({ code: errorCodes.timeout });
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
   test('refresh calls waiting for a connection are bounded by maxRefreshCalls', async () => {
     const c: Centrifuge = create();
     server.onCommand = (cmd: any) => (cmd.refresh !== undefined ? { id: cmd.id, refresh: {} } : undefined);

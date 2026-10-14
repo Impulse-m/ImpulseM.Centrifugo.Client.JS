@@ -25,7 +25,7 @@ import {
 
 import {
   rpcOptionsFlag, hasFlag, serverErrorFields, hasHeaders, serverTimeOffsetFrom, rpcConfigError,
-  refreshErrorKeepsConnection,
+  refreshErrorKeepsConnection, raceCall,
 } from './extensions';
 
 import { RpcCallbacks, RpcTracker } from './rpc_tracker';
@@ -599,15 +599,18 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   async rpc(method: string, data: any, opts?: RpcOptions): Promise<RpcResult> {
     const headers = opts?.headers;
     const signal = opts?.signal;
+    if (signal?.aborted) {
+      throw this._createErrorObject(errorCodes.cancelled, 'cancelled');
+    }
+    // The deadline of the call counts from now, across its wait and its attempts.
+    const deadline: number = Date.now() + this._config.timeout;
     // A call that may be tracked takes its place now, so the calls waiting for a connection count too.
     const counted: boolean = !this._isConnected() || this._rpcOptionsSupported;
     if (counted) {
       this._rpc.reserve();
     }
     try {
-      await this._methodCall();
-      // After the connection: a refresh in flight is confirmed on it, and the call goes out under that identity.
-      await this._refreshSlot.settled();
+      await this._awaitCallReady(deadline, signal);
     } finally {
       if (counted) {
         this._rpc.release();
@@ -639,10 +642,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         cached: result.cached === true
       };
     }
-    if (signal?.aborted) {
-      throw this._createErrorObject(errorCodes.cancelled, 'cancelled');
-    }
-    return this._rpc.track(method, data, headers, signal);
+    return this._rpc.track(method, data, headers, signal, deadline);
   }
 
   /** publish data to a channel. */
@@ -1745,6 +1745,24 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       }
     }
     return req;
+  }
+
+  // Waits for the connection and for a refresh in flight, before a call goes out. The deadline and the
+  // signal of the call end the wait, so a call never waits past its timeout.
+  private _awaitCallReady(deadline: number, signal: AbortSignal | undefined): Promise<void> {
+    return raceCall(
+      this._callReady(deadline),
+      deadline,
+      signal,
+      (): any => this._createErrorObject(errorCodes.timeout, 'timeout'),
+      (): any => this._createErrorObject(errorCodes.cancelled, 'cancelled'),
+    );
+  }
+
+  // After the connection: a refresh in flight is confirmed on it, and the call goes out under that identity.
+  private async _callReady(deadline: number): Promise<void> {
+    await this._methodCall(Math.max(0, deadline - Date.now()));
+    await this._refreshSlot.settled();
   }
 
   // Resolves once connected. Rejects with a timeout after the given milliseconds, or never

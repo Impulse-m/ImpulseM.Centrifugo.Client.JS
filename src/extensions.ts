@@ -78,6 +78,46 @@ export function refreshErrorKeepsConnection(code: number): boolean {
 }
 
 /**
+ * Settles like the promise, unless the deadline passes first (the timeout error) or the signal
+ * aborts first (the cancelled error). The timer and the abort listener are removed once it settled.
+ * @internal
+ */
+export function raceCall<T>(
+  promise: Promise<T>,
+  deadline: number,
+  signal: AbortSignal | undefined,
+  timeoutError: () => any,
+  cancelledError: () => any
+): Promise<T> {
+  return new Promise<T>((resolve: (value: T) => void, reject: (error: any) => void): void => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (): void => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const onAbort = (): void => {
+      finish();
+      reject(cancelledError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    timer = setTimeout((): void => {
+      finish();
+      reject(timeoutError());
+    }, Math.max(0, deadline - Date.now()));
+    promise.then((value: T): void => {
+      finish();
+      resolve(value);
+    }, (error: any): void => {
+      finish();
+      reject(error);
+    });
+  });
+}
+
+/**
  * The message of the first RPC option no call can work with, or null when the options are valid.
  * @internal
  */

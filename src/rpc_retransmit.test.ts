@@ -258,6 +258,18 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(callCommands()).toHaveLength(0);
   });
 
+  test('an abort while the client is not connected rejects with cancelled at once, and nothing is sent', async (): Promise<void> => {
+    const c: Centrifuge = create();
+    const controller: AbortController = new AbortController();
+    const started: number = Date.now();
+    const call: Promise<RpcResult> = c.rpc('x', codecCase.encode({}), { signal: controller.signal });
+    setTimeout((): void => controller.abort(), 100);
+
+    await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(server.received).toHaveLength(0);
+  });
+
   test('a call aborted after it is sent sends a cancel and rejects with cancelled', async (): Promise<void> => {
     const c: Centrifuge = create();
     await connect(c);

@@ -85,12 +85,16 @@ export class RpcTracker {
   }
 
 
-  /** Tracks a call: it is sent on the current connection, or on the next one if it is lost. */
+  /**
+   * Tracks a call: it is sent on the current connection, or on the next one if it is lost. The call
+   * rejects with a timeout at its deadline, counted from the moment of the rpc() call.
+   */
   track(
     method: string,
     data: any,
     headers: Record<string, string> | undefined,
-    signal: AbortSignal | undefined
+    signal: AbortSignal | undefined,
+    deadline: number
   ): Promise<RpcResult> {
     return new Promise<RpcResult>((resolve, reject) => {
       const call: TrackedRpc = {
@@ -98,7 +102,7 @@ export class RpcTracker {
         method: method,
         data: data,
         headers: headers,
-        deadline: Date.now() + this.callTimeout,
+        deadline: deadline,
         commandId: 0,
         timer: null,
         settled: false,
