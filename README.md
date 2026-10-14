@@ -343,9 +343,13 @@ centrifuge.rpc("my.method.name", {}).catch(function(err) {
 
 On a connection that supports RPC options, every `rpc` call carries a message id. When the transport is lost while a call waits for its reply, the call is kept instead of failing. After the next connect reply confirms the capability, the call is sent again with the same message id, in message id order, and the reply of the server completes the original call. Each call keeps its original deadline across attempts: the `timeout` option, default `5000` ms, counts from the moment of the call. A call whose deadline passes while the connection is down rejects with error code `errorCodes.timeout`.
 
-Calls kept this way are bounded by the `maxPendingRpc` option, default `32`. An `rpc` call beyond the bound rejects with error code `errorCodes.limitExceeded` (16) and is not sent.
+Calls kept this way are bounded by the `maxPendingRpc` option, default `32`. The bound counts the calls made while the client is disconnected too, from the moment of the call. An `rpc` call beyond the bound rejects with error code `errorCodes.limitExceeded` (16) and is not sent.
 
-A server error reply rejects the call with the error as the server sent it. The client does not send such a call again, because the server's codes for a rejected message id are configurable.
+A write error of a tracked call on an open transport is handled as a lost transport: the client reconnects, and the call is sent again on that connection with the same message id.
+
+A server error reply rejects the call with the error as the server sent it, including `msg_id_invalid`. This is a deviation from the retransmit rules: the client does not send such a call again, because the server's codes for a rejected message id are configurable and the client has no reliable signal to retry on. The message id of later calls follows the server time, but it never goes back: after a server clock correction backwards larger than the server's window, calls keep failing with `msg_id_invalid` until the clock catches up.
+
+A call that settles locally, by its deadline or its signal, keeps its callback for one call timeout, so a late reply is still acknowledged. Then the callback is dropped, and a server that never replies does not grow the client.
 
 On a connection without RPC options (legacy mode), calls are sent as plain requests without a message id, are not kept on a lost connection, and reject with `errorCodes.connectionClosed` when the transport is lost, as before.
 
@@ -641,7 +645,9 @@ const identity = await centrifuge.refresh('NEW-CONNECTION-TOKEN');
 console.log('now connected as', identity.user);
 ```
 
-While the client is disconnected, the refresh is sent on the next connect. Calls made while a refresh is pending share its promise, and `rpc` calls wait for it, so they go out under the new identity. When the server refuses the token, the promise rejects with the server error, and the connection keeps its identity. Whether the server accepts a change of user is decided by the server configuration.
+While the client is disconnected, the refresh is sent on the next connect, however long the reconnect takes: the call timeout does not apply to it. Calls with the same token, or without one, made while a refresh is pending share its promise. A refresh with another token is sent after the one in flight, and each caller gets the identity of its own token. The explicit refresh and the timer-driven refresh never have two refresh commands in flight. `rpc` calls wait for a refresh in flight, so they go out under the identity it confirms. When the server refuses the token, the promise rejects with the server error, the connection keeps its identity, and the reconnects keep the previous token. Whether the server accepts a change of user is decided by the server configuration.
+
+Deploy the server before the clients that use the identity fields: a server that does not send `user` and `auth_class` in its refresh replies makes each refresh read as an anonymous connection.
 
 ## Subscription API
 
