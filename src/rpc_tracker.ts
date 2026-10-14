@@ -183,7 +183,8 @@ export class RpcTracker {
 
 
   // Sends a cancel of a call. The reply to a cancel carries nothing the client needs. A cancel that
-  // is lost before the server got it is kept, and sent with the next connection.
+  // is lost before the server got it is kept, and sent with the next connection. Its callbacks stay
+  // until the reply or the disconnect, so a slow reply does not lose the cancel.
   private cancel(msgId: number): void {
     const id: number = this.host.nextCommandId();
     const rpc: any = { cancel: msgId };
@@ -197,7 +198,6 @@ export class RpcTracker {
       },
       timeout: null,
     });
-    this.forgetCommand(id);
     this.host.addCommand({ id: id, rpc: rpc });
   }
 

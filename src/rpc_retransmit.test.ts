@@ -497,6 +497,38 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(c.state).toBe(State.Connected);
   });
 
+  test('a cancel whose reply is slower than a call timeout is sent again with the next connection', async (): Promise<void> => {
+    const c: Centrifuge = create({ timeout: 100, minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    // Calls and cancels get no reply until the test sends one.
+    server.onCommand = (cmd: any): any => (isCall(cmd) || isCancel(cmd) ? holdReply : undefined);
+    const controller: AbortController = new AbortController();
+    const call: Promise<RpcResult> = c.rpc('x', codecCase.encode({}), { signal: controller.signal });
+    const sent: any = await server.waitFor(isCall);
+
+    controller.abort();
+    await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
+    await server.waitFor(isCancel);
+    // The reply of the cancel is later than a call timeout: its callbacks must still be there.
+    await new Promise<void>((resolve: () => void): void => {
+      setTimeout(resolve, 300);
+    });
+
+    server.closeConnection();
+    server.onCommand = (cmd: any): any => {
+      if (isCancel(cmd)) {
+        return holdReply;
+      }
+      return isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined;
+    };
+    // The cancels of the reconnect go out before the calls of the client.
+    await c.rpc('echo', codecCase.encode({}));
+
+    const cancels: any[] = server.received.filter(isCancel);
+    expect(cancels).toHaveLength(2);
+    expect(cancels.map((cmd: any): number => cmd.rpc.cancel)).toEqual([sent.rpc.msg_id, sent.rpc.msg_id]);
+  });
+
   test('the callback of a call that expired on a silent connection is dropped after one call timeout', async (): Promise<void> => {
     const c: Centrifuge = create({ timeout: 100 });
     await connect(c);
