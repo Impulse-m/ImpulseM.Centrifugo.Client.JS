@@ -1,20 +1,19 @@
 import { Centrifuge } from './centrifuge';
-import { FakeCentrifugoServer, holdReply } from './fakeServer';
 import { errorCodes } from './codes';
 import { maxRefreshCalls } from './refresh_slot';
 import { AuthContext, Options, State } from './types';
-import { CodecCase, codecCases, connectClient, disconnectAll, until } from './test_codecs';
+import { CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, holdReply, until } from './test_codecs';
 
 // The identity of a connection: the user and auth class of the connect and refresh replies,
 // the 'auth' event and the refresh() call. Every case runs over both codecs (see test_codecs.ts).
 
 describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): void => {
-  let server: FakeCentrifugoServer;
+  let server: WaitableFakeServer;
   const clients: Centrifuge[] = [];
   const authEvents: AuthContext[] = [];
 
   beforeEach(async (): Promise<void> => {
-    server = await FakeCentrifugoServer.start(codecCase.serverCodec);
+    server = await WaitableFakeServer.start(codecCase.serverCodec);
     authEvents.length = 0;
   });
 
@@ -498,7 +497,7 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
 
       jest.advanceTimersByTime(1000);
       await expect(failed).resolves.toMatchObject({ type: 'refresh', error: { code: 103 } });
-      await until((): boolean => refreshCommands().length === 1);
+      await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 1);
       expect(c.state).toBe(State.Connected);
       // No retry is scheduled: the refresh timer has nothing left to run.
       expect(jest.getTimerCount()).toBe(0);
@@ -534,7 +533,7 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
 
       // The retry waits for its backoff of 5 to 10 seconds, then asks for a token again.
       jest.advanceTimersByTime(10000);
-      await until((): boolean => refreshCommands().length === 2);
+      await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 2);
       expect(refreshCommands()[1].refresh.token).not.toBe(refreshCommands()[0].refresh.token);
       expect(c.state).toBe(State.Connected);
     } finally {
@@ -576,7 +575,7 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
       });
       // The superseded token is not sent: the timer is due again, and fetches a token once more.
       jest.advanceTimersByTime(0);
-      await until((): boolean => refreshCommands().length === 2);
+      await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 2);
     } finally {
       jest.useRealTimers();
     }

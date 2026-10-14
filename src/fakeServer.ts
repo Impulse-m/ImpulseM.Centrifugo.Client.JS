@@ -22,11 +22,9 @@ import { toOffset } from './utils';
 //   - Push to a subscription:                server.publish(42, { foo: 1 })   // by numeric id (compaction)
 //                                            server.publish('news', { foo: 1 }) // by channel name
 //   - Fully control any command reply:       server.onCommand = (cmd) => cmd.rpc ? { id: cmd.id, error: { code: 1, message: 'x' } } : undefined
-//   - Hold a reply, send it later:           server.onCommand = (cmd) => cmd.refresh ? holdReply : undefined, then server.send({ id, ... })
 //   - Send anything the protocol allows:     server.sendPush({ disconnect: { code: 3000, reason: 'bye' } })
 //   - Drive a reconnect:                     server.closeConnection()
 //   - Assert on what the client sent:        server.received / server.lastSubscribe
-//   - Wait for a command, then act:          await server.waitFor(cmd => cmd.rpc !== undefined)
 
 /** Options for a subscribe reply. Extend with more fields as scenarios need them. */
 export interface SubscribeReplyOptions {
@@ -46,9 +44,6 @@ export interface SubscribeReplyOptions {
 
 /** Push target: a numeric channel id (channel compaction) or a channel name. */
 export type PushTarget = number | string;
-
-/** Returned by a command handler to send no reply for the command yet: the test sends it later with send(). */
-export const holdReply: unique symbol = Symbol('holdReply');
 
 export type CommandHandler = (cmd: any, server: FakeCentrifugoServer) => any | null | undefined;
 export type SubscribeHandler = (channel: string, req: any) => SubscribeReplyOptions;
@@ -92,8 +87,6 @@ export class FakeCentrifugoServer {
   private current: WebSocket | null = null;
   private codec: FakeCodec;
   private protobuf: ProtobufCodec = new ProtobufCodec();
-  private closed: boolean = false;
-  private waiters: Array<{ predicate: (cmd: any) => boolean; resolve: (cmd: any) => void }> = [];
 
   /** All commands received from the client, in order. */
   readonly received: any[] = [];
@@ -108,7 +101,7 @@ export class FakeCentrifugoServer {
   /** Customize the subscribe result per channel (default: empty result). */
   onSubscribe: SubscribeHandler | null = null;
 
-  private constructor(wss: WebSocketServer, codec: FakeCodec) {
+  protected constructor(wss: WebSocketServer, codec: FakeCodec) {
     this.wss = wss;
     this.codec = codec;
     this.wss.on('connection', (ws: WebSocket) => {
@@ -148,26 +141,8 @@ export class FakeCentrifugoServer {
     return undefined;
   }
 
-  /**
-   * Resolves with the first command matching the predicate: one received already, or the next
-   * one received. Sees every command, so a test can wait for a call before it drops the transport.
-   */
-  waitFor(predicate: (cmd: any) => boolean): Promise<any> {
-    const found: any = this.received.find(predicate);
-    if (found !== undefined) {
-      return Promise.resolve(found);
-    }
-    return new Promise<any>(resolve => {
-      this.waiters.push({ predicate: predicate, resolve: resolve });
-    });
-  }
-
-  /** Stop the server. Calling it again does nothing. */
+  /** Stop the server. */
   close(): Promise<void> {
-    if (this.closed) {
-      return Promise.resolve();
-    }
-    this.closed = true;
     return new Promise<void>(resolve => this.wss.close(() => resolve()));
   }
 
@@ -177,18 +152,11 @@ export class FakeCentrifugoServer {
     this.current?.close();
   }
 
-  private dispatch(cmd: any) {
+  protected dispatch(cmd: any) {
     this.received.push(cmd);
-    for (const waiter of this.waiters.filter(w => w.predicate(cmd))) {
-      this.waiters.splice(this.waiters.indexOf(waiter), 1);
-      waiter.resolve(cmd);
-    }
 
     if (this.onCommand) {
       const reply = this.onCommand(cmd, this);
-      if (reply === holdReply) {
-        return;
-      }
       if (reply !== null && reply !== undefined) {
         this.send(reply);
         return;

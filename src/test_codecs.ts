@@ -1,8 +1,8 @@
 import { Centrifuge } from './centrifuge';
 import { Centrifuge as ProtobufCentrifuge } from './protobuf';
-import { FakeCodec } from './fakeServer';
+import { FakeCentrifugoServer, FakeCodec } from './fakeServer';
 import { Options, TransportName } from './types';
-import WebSocket from 'ws';
+import WebSocket, { WebSocketServer } from 'ws';
 
 // The codec cases and the connect and cleanup helpers the suites over both codecs share.
 
@@ -12,6 +12,83 @@ import WebSocket from 'ws';
 
 /** The connect flag of bit 32 (RPC options), as the wire carries it. */
 export const rpcOptionsWireFlag: number = 4294967296;
+
+/**
+ * Returned by a command handler to send no reply for the command yet: the test sends it later with send().
+ */
+export const holdReply: unique symbol = Symbol('holdReply');
+
+/**
+ * A fake server whose tests wait for the commands of the client: waitFor and waitForCount see every command
+ * received, so a test waits for an event instead of polling. A command handler returning holdReply sends no reply.
+ */
+export class WaitableFakeServer extends FakeCentrifugoServer {
+  private waiters: Array<() => boolean> = [];
+  private closed: boolean = false;
+
+  static async start(codec: FakeCodec = 'json'): Promise<WaitableFakeServer> {
+    const wss: WebSocketServer = new WebSocketServer({ port: 0 });
+    await new Promise<void>((resolve: () => void): void => {
+      wss.on('listening', (): void => resolve());
+    });
+    return new WaitableFakeServer(wss, codec);
+  }
+
+  /** Resolves with the first command matching the predicate: one received already, or the next one received. */
+  waitFor(predicate: (cmd: any) => boolean): Promise<any> {
+    return new Promise<any>((resolve: (cmd: any) => void): void => {
+      this.addWaiter((): boolean => {
+        const found: any = this.received.find(predicate);
+        if (found === undefined) {
+          return false;
+        }
+        resolve(found);
+        return true;
+      });
+    });
+  }
+
+  /** Resolves once at least count commands matching the predicate have been received. */
+  waitForCount(predicate: (cmd: any) => boolean, count: number): Promise<void> {
+    return new Promise<void>((resolve: () => void): void => {
+      this.addWaiter((): boolean => {
+        if (this.received.filter(predicate).length < count) {
+          return false;
+        }
+        resolve();
+        return true;
+      });
+    });
+  }
+
+  /** Stops the server. Calling it again does nothing. */
+  close(): Promise<void> {
+    if (this.closed) {
+      return Promise.resolve();
+    }
+    this.closed = true;
+    return super.close();
+  }
+
+  send(reply: any): void {
+    if (reply === holdReply) {
+      return;
+    }
+    super.send(reply);
+  }
+
+  protected dispatch(cmd: any): void {
+    super.dispatch(cmd);
+    this.waiters = this.waiters.filter((check: () => boolean): boolean => !check());
+  }
+
+  // Runs the check now and on every command after: it stays until it reports done.
+  private addWaiter(check: () => boolean): void {
+    if (!check()) {
+      this.waiters.push(check);
+    }
+  }
+}
 
 /** A codec the tests run over: the fake server codec, a client factory and the RPC data mapping. */
 export interface CodecCase {

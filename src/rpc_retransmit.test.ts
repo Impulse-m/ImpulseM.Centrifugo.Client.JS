@@ -1,9 +1,10 @@
 import { Centrifuge } from './centrifuge';
-import { FakeCentrifugoServer, holdReply } from './fakeServer';
 import { errorCodes } from './codes';
 import { Options, RpcResult, State } from './types';
 import { format } from 'util';
-import { CodecCase, codecCases, connectClient, disconnectAll, rpcOptionsWireFlag, until } from './test_codecs';
+import {
+  CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, holdReply, rpcOptionsWireFlag, until,
+} from './test_codecs';
 
 // Tracked RPC calls: message ids, the retransmit of calls that lost their transport, the queue
 // bound, acknowledgements, deadlines, cancels, legacy connections and the instance option. Every
@@ -56,11 +57,11 @@ function retryError(retry: 'new_msg_id' | 'later', code: number, temporary: bool
 
 describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase) => {
   const testInstance: string = 'AbCdEfGhIjKlMnOpQrStUv';
-  let server: FakeCentrifugoServer;
+  let server: WaitableFakeServer;
   const clients: Centrifuge[] = [];
 
   beforeEach(async (): Promise<void> => {
-    server = await FakeCentrifugoServer.start(codecCase.serverCodec);
+    server = await WaitableFakeServer.start(codecCase.serverCodec);
     server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25, flag: rpcOptionsWireFlag };
   });
 
@@ -241,13 +242,13 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     holdCalls();
     const first: Promise<RpcResult> = quiet(c.rpc('a', codecCase.encode(1)));
     const second: Promise<RpcResult> = quiet(c.rpc('b', codecCase.encode(2)));
-    await until((): boolean => callCommands().length === 2);
+    await server.waitForCount(isCall, 2);
 
     server.closeConnection();
     await expect(c.rpc('c', codecCase.encode(3))).rejects.toMatchObject({ code: errorCodes.limitExceeded });
 
     // The reconnect sends both calls again, and they still hold the two slots until they settle.
-    await until((): boolean => server.received.filter(isRetransmit).length === 2);
+    await server.waitForCount(isRetransmit, 2);
     for (const cmd of server.received.filter(isRetransmit)) {
       server.send({ id: cmd.id, rpc: { data: codecCase.encode({}) } });
     }
@@ -263,7 +264,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     await connect(c);
     holdCalls();
     const first: Promise<RpcResult> = quiet(c.rpc('a', codecCase.encode(1)));
-    await until((): boolean => callCommands().length === 1);
+    await server.waitForCount(isCall, 1);
 
     await expect(c.rpc('b', codecCase.encode(2))).rejects.toMatchObject({ code: errorCodes.limitExceeded });
     expect(callCommands()).toHaveLength(1);
@@ -283,7 +284,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     for (let i: number = 0; i < 3; i++) {
       calls.push(quiet(c.rpc('x', codecCase.encode(i))));
     }
-    await until((): boolean => callCommands().length === 3);
+    await server.waitForCount(isCall, 3);
 
     for (const cmd of callCommands()) {
       server.send({ id: cmd.id, rpc: { data: codecCase.encode({}) } });
@@ -624,7 +625,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       controllers.push(controller);
       calls.push(quiet(c.rpc('x', codecCase.encode(i), { signal: controller.signal })));
     }
-    await until((): boolean => callCommands().length === 32);
+    await server.waitForCount(isCall, 32);
     // The reconnect is a minute away: the calls are aborted while the client is disconnected.
     server.closeConnection();
     await until((): boolean => c.state !== State.Connected);
@@ -870,7 +871,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       expect(queue.waiting()).toHaveLength(1);
       // A call timer runs its grace callback one tick after the due time: advance past it.
       jest.advanceTimersByTime(2);
-      await until((): boolean => callCommands().length === 2);
+      await server.waitForCount(isCall, 2);
       const result: RpcResult = await call;
 
       expect(codecCase.decode(result.data)).toEqual({ answer: 1 });
@@ -892,13 +893,15 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       let sends: number = 0;
       for (const delay of [250, 500, 1000]) {
         sends++;
-        await until((): boolean => callCommands().length === sends && queue.waiting().length === 1);
+        await server.waitForCount(isCall, sends);
+        await until((): boolean => queue.waiting().length === 1);
         jest.advanceTimersByTime(delay - 1);
         expect(queue.waiting()).toHaveLength(1);
         jest.advanceTimersByTime(2);
       }
       sends++;
-      await until((): boolean => callCommands().length === sends && queue.waiting().length === 0);
+      await server.waitForCount(isCall, sends);
+      await until((): boolean => queue.waiting().length === 0);
       await expect(call).rejects.toMatchObject({
         code: 100,
         metadata: { 'x-centrifugo-retry': 'later' },
@@ -990,13 +993,15 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     try {
       const call: Promise<RpcResult> = c.rpc('work', codecCase.encode({}), { signal: controller.signal });
       quiet(call);
-      await until((): boolean => callCommands().length === 1 && queue.waiting().length === 1);
+      await server.waitForCount(isCall, 1);
+      await until((): boolean => queue.waiting().length === 1);
 
       // The reconnect comes before the first later delay ends: the call goes out with it and is refused again.
       server.closeConnection();
       await until((): boolean => c.state !== State.Connected);
       jest.advanceTimersByTime(60);
-      await until((): boolean => c.state === State.Connected && callCommands().length === 2 && queue.waiting().length === 1);
+      await server.waitForCount(isCall, 2);
+      await until((): boolean => c.state === State.Connected && queue.waiting().length === 1);
 
       controller.abort();
       const sentBeforeAbort: number = callCommands().length;
