@@ -157,6 +157,21 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     await expect(c.rpc('echo', codecCase.encode(4))).resolves.toMatchObject({ cached: false });
   });
 
+  test('calls made while disconnected count towards maxPendingRpc, and the excess rejects at once', async (): Promise<void> => {
+    const c: Centrifuge = create({ maxPendingRpc: 2 });
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
+    const first: Promise<RpcResult> = c.rpc('a', codecCase.encode(1));
+    const second: Promise<RpcResult> = c.rpc('b', codecCase.encode(2));
+
+    // Nothing is connected yet: the excess call rejects without waiting for a connection.
+    await expect(c.rpc('c', codecCase.encode(3))).rejects.toMatchObject({ code: errorCodes.limitExceeded });
+
+    await connect(c);
+    await expect(first).resolves.toMatchObject({ cached: false });
+    await expect(second).resolves.toMatchObject({ cached: false });
+    expect(callCommands()).toHaveLength(2);
+  });
+
   test('the ids of the replies received are sent with the next request', async (): Promise<void> => {
     const c: Centrifuge = create();
     await connect(c);
