@@ -173,36 +173,52 @@ export class RpcTracker {
       rpc.retransmit = true;
     }
     call.commandId = id;
+    const acks: number[] = this.takeAcks(rpc);
     this.host.setCallbacks(id, {
       callback: (ctx: RpcReplyContext): void => this.replied(call, ctx),
       errback: (ctx: RpcFailureContext): void => this.failed(call, ctx),
-      lost: (): void => this.lost(call),
+      lost: (): void => this.lost(call, acks),
       timeout: null,
     });
-    this.sendCommand(id, rpc);
-  }
-
-
-  // Sends a command with the message ids received so far, which are acknowledged by it.
-  private sendCommand(id: number, rpc: any): void {
-    const acks: number[] = this.queue.takeAcks();
-    if (acks.length > 0) {
-      rpc.ack = acks;
-    }
     this.host.addCommand({ id: id, rpc: rpc });
   }
 
 
-  // Sends a cancel of a call. The reply to a cancel carries nothing the client needs.
+  // Sets the message ids received so far as the acknowledgement of a command, and returns them.
+  private takeAcks(rpc: any): number[] {
+    const acks: number[] = this.queue.takeAcks();
+    if (acks.length > 0) {
+      rpc.ack = acks;
+    }
+    return acks;
+  }
+
+
+  // Puts the acknowledgements of a command that was not delivered back, so the next command carries them.
+  private restoreAcks(acks: number[]): void {
+    for (const msgId of acks) {
+      this.queue.addAck(msgId);
+    }
+  }
+
+
+  // Sends a cancel of a call. The reply to a cancel carries nothing the client needs. A cancel that
+  // is lost before the server got it is kept, and sent with the next connection.
   private cancel(msgId: number): void {
     const id: number = this.host.nextCommandId();
+    const rpc: any = { cancel: msgId };
+    const acks: number[] = this.takeAcks(rpc);
     this.host.setCallbacks(id, {
       callback: (ctx: RpcReplyContext): void => ctx.next?.(),
       errback: (ctx: RpcFailureContext): void => ctx.next?.(),
+      lost: (): void => {
+        this.cancels.push(msgId);
+        this.restoreAcks(acks);
+      },
       timeout: null,
     });
     this.forgetCommand(id);
-    this.sendCommand(id, { cancel: msgId });
+    this.host.addCommand({ id: id, rpc: rpc });
   }
 
 
@@ -245,9 +261,11 @@ export class RpcTracker {
   }
 
 
-  // The connection was lost before the reply: the call waits for the next connection.
-  private lost(call: TrackedRpc): void {
+  // The connection was lost before the reply: the call waits for the next connection. The
+  // acknowledgements of the command that carried it were not delivered, so they are sent again.
+  private lost(call: TrackedRpc, acks: number[]): void {
     call.commandId = 0;
+    this.restoreAcks(acks);
   }
 
 

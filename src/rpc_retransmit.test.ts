@@ -28,6 +28,21 @@ function quiet<T>(promise: Promise<T>): Promise<T> {
   return promise;
 }
 
+// Makes the next write of the client's transport throw, as a broken socket does. The transport
+// stays open for the client until it takes the write error as a lost connection.
+function failNextWrite(c: Centrifuge): void {
+  const transport: any = (c as any)._transport;
+  const write: (...args: any[]) => void = transport.send.bind(transport);
+  let failing: boolean = true;
+  transport.send = (...args: any[]): void => {
+    if (failing) {
+      failing = false;
+      throw new Error('write failed');
+    }
+    write(...args);
+  };
+}
+
 describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase) => {
   let server: FakeCentrifugoServer;
   const clients: Centrifuge[] = [];
@@ -104,16 +119,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     await connect(c);
     server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({ answer: 7 }) } } : undefined);
     // The transport stays open, but its next write throws: the next write is the call.
-    const transport: any = (c as any)._transport;
-    const write: (...args: any[]) => void = transport.send.bind(transport);
-    let failNextWrite: boolean = true;
-    transport.send = (...args: any[]): void => {
-      if (failNextWrite) {
-        failNextWrite = false;
-        throw new Error('write failed');
-      }
-      write(...args);
-    };
+    failNextWrite(c);
 
     const result: RpcResult = await c.rpc('echo', codecCase.encode({}));
 
@@ -310,6 +316,66 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(cancel.rpc.cancel).toBe(sent.rpc.msg_id);
     expect(server.received.some((cmd: any): boolean => isRetransmit(cmd) && cmd.rpc.msg_id === sent.rpc.msg_id))
       .toBe(false);
+  });
+
+  test('a cancel whose write fails is sent again with the next connection', async (): Promise<void> => {
+    const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    holdCalls();
+    const controller: AbortController = new AbortController();
+    const call: Promise<RpcResult> = c.rpc('x', codecCase.encode({}), { signal: controller.signal });
+    const sent: any = await server.waitFor(isCall);
+
+    // The next write is the cancel: it fails, so the server gets no cancel on this connection.
+    failNextWrite(c);
+    controller.abort();
+    await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
+
+    const cancel: any = await server.waitFor(isCancel);
+    expect(cancel.rpc.cancel).toBe(sent.rpc.msg_id);
+    expect(server.received.filter(isCancel)).toHaveLength(1);
+  });
+
+  test('the acknowledgements of a command that was not written are sent with the next request', async (): Promise<void> => {
+    const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
+    await c.rpc('echo', codecCase.encode(1));
+    const firstId: number = callCommands()[0].rpc.msg_id;
+
+    failNextWrite(c);
+    await c.rpc('echo', codecCase.encode(2));
+
+    // The command that carried the acknowledgement was never written: the retransmit of the call carries it.
+    const last: any = callCommands()[callCommands().length - 1];
+    expect(last.rpc.retransmit).toBe(true);
+    expect(last.rpc.ack).toEqual([firstId]);
+  });
+
+  test('a write error with several calls in flight sends all of them again in message id order', async (): Promise<void> => {
+    const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    holdCalls();
+    const calls: Promise<RpcResult>[] = ['a', 'b', 'c'].map(
+      (method: string): Promise<RpcResult> => quiet(c.rpc(method, codecCase.encode({})))
+    );
+    await server.waitFor((cmd: any): boolean => isCall(cmd) && cmd.rpc.method === 'c');
+
+    // The fourth call is the next write, and it fails: the three calls before it are still waiting.
+    server.onCommand = (cmd: any): any => {
+      if (!isCall(cmd)) {
+        return undefined;
+      }
+      return cmd.rpc.retransmit ? { id: cmd.id, rpc: { data: codecCase.encode({ method: cmd.rpc.method }) } } : holdReply;
+    };
+    failNextWrite(c);
+    const fourth: Promise<RpcResult> = quiet(c.rpc('d', codecCase.encode({})));
+
+    const results: RpcResult[] = await Promise.all([...calls, fourth]);
+    expect(results.map((r: RpcResult): any => codecCase.decode(r.data)))
+      .toEqual([{ method: 'a' }, { method: 'b' }, { method: 'c' }, { method: 'd' }]);
+    expect(server.received.filter(isRetransmit).map((cmd: any): string => cmd.rpc.method))
+      .toEqual(['a', 'b', 'c', 'd']);
   });
 
   test('the callback of a call that expired on a silent connection is dropped after one call timeout', async (): Promise<void> => {
