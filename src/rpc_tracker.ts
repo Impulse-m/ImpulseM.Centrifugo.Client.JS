@@ -58,11 +58,13 @@ export class RpcTracker {
   // Places taken by calls being admitted, see reserve.
   private reserved: number = 0;
 
+
   constructor(host: RpcHost, maxPendingRpc: number, callTimeout: number) {
     this.host = host;
     this.maxPendingRpc = maxPendingRpc;
     this.callTimeout = callTimeout;
   }
+
 
   /**
    * Takes a place for a call that may be tracked, so the calls tracked and the calls waiting to be
@@ -76,10 +78,12 @@ export class RpcTracker {
     this.reserved++;
   }
 
+
   /** Gives back the place taken by reserve. */
   release(): void {
     this.reserved--;
   }
+
 
   /** Tracks a call: it is sent on the current connection, or on the next one if it is lost. */
   track(
@@ -113,6 +117,7 @@ export class RpcTracker {
     });
   }
 
+
   /**
    * Acts on a connection that confirmed the capability: sends the cancels and the calls waiting
    * for a connection, in message id order, each with its original deadline. Without the capability
@@ -143,6 +148,7 @@ export class RpcTracker {
     }
   }
 
+
   /** Rejects all tracked calls, e.g. on a disconnect that will not be followed by a reconnect. */
   rejectAll(code: number, message: string): void {
     this.cancels = [];
@@ -151,6 +157,7 @@ export class RpcTracker {
       call.reject(this.host.createError(code, message));
     }
   }
+
 
   // Sends the call on the current connection. The command id is new for every attempt, the
   // message id is the call's.
@@ -177,6 +184,7 @@ export class RpcTracker {
     this.sendCommand(id, rpc);
   }
 
+
   // Sends a command with the message ids received so far, which are acknowledged by it.
   private sendCommand(id: number, rpc: any): void {
     const acks: number[] = this.queue.takeAcks();
@@ -185,6 +193,7 @@ export class RpcTracker {
     }
     this.host.addCommand({ id: id, rpc: rpc });
   }
+
 
   // Sends a cancel of a call. The reply to a cancel carries nothing the client needs.
   private cancel(msgId: number): void {
@@ -198,11 +207,13 @@ export class RpcTracker {
     this.sendCommand(id, { cancel: msgId });
   }
 
+
   // The callbacks of a command whose call settled locally stay for one call timeout, to acknowledge
   // a late reply. Then they are dropped, so a server that never replies does not grow them.
   private forgetCommand(id: number): void {
     setTimeout((): void => this.host.deleteCallbacks(id), this.callTimeout);
   }
+
 
   // A reply of the server: it settles the call, or only acknowledges it when the call settled
   // before (aborted or expired).
@@ -216,11 +227,13 @@ export class RpcTracker {
     });
   }
 
+
   // An error reply of the server, surfaced unchanged. It is not retried: the server's codes for a
   // rejected message id are configurable, so there is no signal to retry on.
   private failed(call: TrackedRpc, ctx: RpcFailureContext): void {
     this.answered(call, ctx, (): void => call.reject(ctx.error));
   }
+
 
   // Shared by replies and errors: acknowledges the call, and settles it with the outcome unless it
   // settled before.
@@ -233,10 +246,12 @@ export class RpcTracker {
     ctx.next?.();
   }
 
+
   // The connection was lost before the reply: the call waits for the next connection.
   private lost(call: TrackedRpc): void {
     call.commandId = 0;
   }
+
 
   private expire(call: TrackedRpc): void {
     call.timer = null;
@@ -246,6 +261,7 @@ export class RpcTracker {
     this.settleSent(call);
     call.reject(this.host.createError(errorCodes.timeout, 'timeout'));
   }
+
 
   // The signal of the call aborted: the call settles locally, and the server gets a cancel.
   private abort(call: TrackedRpc): void {
@@ -262,6 +278,7 @@ export class RpcTracker {
     call.reject(this.host.createError(errorCodes.cancelled, 'cancelled'));
   }
 
+
   // Settles a call that may wait for its reply on the current connection (see forgetCommand).
   private settleSent(call: TrackedRpc): void {
     const id: number = call.commandId;
@@ -270,6 +287,7 @@ export class RpcTracker {
       this.forgetCommand(id);
     }
   }
+
 
   // Settles the call: no timer, no abort listener, not tracked anymore.
   private settle(call: TrackedRpc): void {

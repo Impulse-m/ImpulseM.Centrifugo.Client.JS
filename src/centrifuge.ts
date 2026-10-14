@@ -525,8 +525,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
    * refresh sends the connection token to the server now, with the given token or the one
    * getToken returns, and resolves the identity the server confirms. The new token is used by
    * the following connects too. An 'auth' event is emitted when the user or auth class changed.
-   * While the client is disconnected, the refresh is sent on the next connect. Calls made while
-   * a refresh is pending share its promise, and rpc() waits for it. A rejected refresh, e.g. a
+   * While the client is disconnected, the refresh is sent on the next connect. A call with the same
+   * token, or none, made while a refresh is pending shares its promise. A refresh with another token
+   * is sent after the one in flight. rpc() waits for a refresh in flight. A rejected refresh, e.g. a
    * refused identity change, keeps the identity of the connection.
    */
   refresh(token?: string): Promise<AuthContext> {
@@ -2319,7 +2320,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   // A call made during a refresh goes out under the identity the refresh confirms. A failed
   // refresh is reported to its caller, the call goes out under the identity the connection kept.
-  // A refresh-command in flight, timer-driven ones included, counts too.
+  // A refresh command in flight, timer-driven ones included, is waited for too.
   private async _waitAuthRefresh(): Promise<void> {
     const pending: Promise<unknown> | null = this._authRefresh ?? this._refreshInFlight;
     if (pending === null) {
