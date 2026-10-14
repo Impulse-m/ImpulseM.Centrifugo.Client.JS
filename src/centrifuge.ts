@@ -24,7 +24,7 @@ import {
 } from './utils';
 
 import {
-  rpcOptionsFlag, hasFlag, serverErrorFields, hasHeaders, serverTimeOffsetFrom, isValidInstance,
+  rpcOptionsFlag, hasFlag, serverErrorFields, hasHeaders, serverTimeOffsetFrom, rpcConfigError,
   refreshErrorKeepsConnection,
 } from './extensions';
 
@@ -245,7 +245,11 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     this._config.instance = this._config.instance ?? defaults.instance;
     const maxPendingRpc: number = this._config.maxPendingRpc ?? defaultMaxPendingRpc;
     this._config.maxPendingRpc = maxPendingRpc;
-    this._validateRpcConfig(maxPendingRpc);
+    // Throws for a configuration no call can fix, before the client is used.
+    const configError: string | null = rpcConfigError(this._config.instance ?? '', maxPendingRpc);
+    if (configError !== null) {
+      throw this._createErrorObject(errorCodes.badConfiguration, configError);
+    }
     this._rpc = new RpcTracker({
       nextCommandId: (): number => this._nextCommandId(),
       addCommand: (command: any): void => this._addCommand(command),
@@ -1796,23 +1800,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         }
       );
     });
-  }
-
-  // Throws for a configuration no call can fix, before the client is used.
-  private _validateRpcConfig(maxPendingRpc: number): void {
-    const instance: string = this._config.instance ?? '';
-    if (instance !== '' && !isValidInstance(instance)) {
-      throw this._createErrorObject(
-        errorCodes.badConfiguration,
-        'instance must be 22 to 64 characters of A-Z, a-z, 0-9, "_" or "-"'
-      );
-    }
-    if (!Number.isInteger(maxPendingRpc) || maxPendingRpc < 1) {
-      throw this._createErrorObject(
-        errorCodes.badConfiguration,
-        'maxPendingRpc must be a positive integer'
-      );
-    }
   }
 
   private _dataReceived(data, transportId: number = this._transportId) {

@@ -78,6 +78,20 @@ export function refreshErrorKeepsConnection(code: number): boolean {
 }
 
 /**
+ * The message of the first RPC option no call can work with, or null when the options are valid.
+ * @internal
+ */
+export function rpcConfigError(instance: string, maxPendingRpc: number): string | null {
+  if (instance !== '' && !isValidInstance(instance)) {
+    return 'instance must be 22 to 64 characters of A-Z, a-z, 0-9, "_" or "-"';
+  }
+  if (!Number.isInteger(maxPendingRpc) || maxPendingRpc < 1) {
+    return 'maxPendingRpc must be a positive integer';
+  }
+  return null;
+}
+
+/**
  * Whether an RPC options object asks for headers. An empty headers object sends nothing,
  * so it counts as no headers.
  * @internal
