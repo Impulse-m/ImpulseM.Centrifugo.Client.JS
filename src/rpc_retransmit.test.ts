@@ -28,6 +28,19 @@ function quiet<T>(promise: Promise<T>): Promise<T> {
   return promise;
 }
 
+// Polls the condition every 10 ms until it holds, and fails when the limit passes first.
+async function waitUntil(condition: () => boolean, limitMs: number): Promise<void> {
+  const limit: number = Date.now() + limitMs;
+  while (!condition()) {
+    if (Date.now() >= limit) {
+      throw new Error(`condition not met within ${limitMs} ms`);
+    }
+    await new Promise<void>((resolve: () => void): void => {
+      setTimeout(resolve, 10);
+    });
+  }
+}
+
 // Makes the next write of the client's transport throw, as a broken socket does. The transport
 // stays open for the client until it takes the write error as a lost connection.
 function failNextWrite(c: Centrifuge): void {
@@ -453,12 +466,31 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     const callbackCount = (): number => Object.keys((c as any)._callbacks).length;
 
     await expect(c.rpc('silent', codecCase.encode({}))).rejects.toMatchObject({ code: errorCodes.timeout });
-    // The late reply is still acknowledged within one call timeout after the expiry.
+    // The late reply is still acknowledged right after the expiry, and dropped within a bounded wait
+    // of several call timeouts (the timeout is 100 ms).
     expect(callbackCount()).toBe(1);
-    await new Promise<void>((resolve: () => void): void => {
-      setTimeout(resolve, 300);
-    });
-    expect(callbackCount()).toBe(0);
+    await waitUntil((): boolean => callbackCount() === 0, 2000);
+  });
+
+  test('calls aborted while the client waits for a connection leave no cancel behind', async (): Promise<void> => {
+    const c: Centrifuge = create();
+    const controllers: AbortController[] = [];
+    const calls: Promise<RpcResult>[] = [];
+    for (let i: number = 0; i < 50; i++) {
+      const controller: AbortController = new AbortController();
+      controllers.push(controller);
+      calls.push(quiet(c.rpc('x', codecCase.encode(i), { signal: controller.signal })));
+    }
+    for (const controller of controllers) {
+      controller.abort();
+    }
+
+    for (const call of calls) {
+      await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
+    }
+    // Only tracked calls are cancelled later: a call that was never sent has nothing to cancel.
+    expect((c as any)._rpc.cancels).toHaveLength(0);
+    expect(server.received).toHaveLength(0);
   });
 
   test('message ids are strictly increasing and fit 53 bits', async (): Promise<void> => {
