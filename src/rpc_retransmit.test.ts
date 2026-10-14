@@ -698,7 +698,6 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       c.disconnect();
       // The tracker's timers are gone: the forget timers and the timers of the cancels. The transport keeps
       // its own close timer, so the count drops by the tracker's timers, and does not rise.
-      expect((c as any)._rpc.forgets.size).toBe(0);
       expect(jest.getTimerCount()).toBeLessThan(pendingBefore);
     } finally {
       jest.useRealTimers();

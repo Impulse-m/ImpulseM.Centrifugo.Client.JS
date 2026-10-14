@@ -79,7 +79,7 @@ export class RpcTracker {
   // Calls of this client holding a slot of maxPendingRpc: from the call until it settled.
   private pending: number = 0;
   // Timers that drop the callbacks of settled calls, see forgetCommand.
-  private forgets: Set<ReturnType<typeof setTimeout>> = new Set();
+  private forgets: Set<CallTimer> = new Set();
 
 
   constructor(host: RpcHost, maxPendingRpc: number, callTimeout: number) {
@@ -193,7 +193,7 @@ export class RpcTracker {
   rejectAll(code: number, message: string): void {
     this.cancels = [];
     for (const timer of this.forgets) {
-      clearTimeout(timer);
+      timer.clear();
     }
     this.forgets.clear();
     for (const call of this.queue.clear()) {
@@ -356,10 +356,10 @@ export class RpcTracker {
   // a late reply. Then they are dropped, so a server that never replies does not grow them. The timers
   // are owned here, and cleared when the client disconnects for good.
   private forgetCommand(id: number): void {
-    const timer: ReturnType<typeof setTimeout> = setTimeout((): void => {
+    const timer: CallTimer = callTimer(Date.now() + this.callTimeout, (): void => {
       this.forgets.delete(timer);
       this.host.deleteCallbacks(id);
-    }, this.callTimeout);
+    });
     this.forgets.add(timer);
   }
 
@@ -453,22 +453,20 @@ export class RpcTracker {
 
   // The deadline of the call passed: a call that went out gets a cancel, as one that was aborted.
   private expire(call: TrackedRpc): void {
-    call.timer = null;
-    if (call.settled) {
-      return;
-    }
-    const sent: boolean = call.sent;
-    this.settleSent(call);
-    if (sent) {
-      this.cancelSent(call.msgId);
-    }
-    call.reject(this.host.createError(errorCodes.timeout, 'timeout'));
+    this.end(call, errorCodes.timeout, 'timeout');
   }
 
 
   // The signal of the call aborted: the call settles locally, and the server gets a cancel when it may
   // have received the call.
   private abort(call: TrackedRpc): void {
+    this.end(call, errorCodes.cancelled, 'cancelled');
+  }
+
+
+  // Settles a call that is not settled yet with an error. A call that went out gets a cancel, on the
+  // current connection or with the next one: the server may have received it.
+  private end(call: TrackedRpc, code: number, message: string): void {
     if (call.settled) {
       return;
     }
@@ -477,7 +475,7 @@ export class RpcTracker {
     if (sent) {
       this.cancelSent(call.msgId);
     }
-    call.reject(this.host.createError(errorCodes.cancelled, 'cancelled'));
+    call.reject(this.host.createError(code, message));
   }
 
 
