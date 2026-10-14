@@ -216,8 +216,18 @@ export interface ErrorContext {
   transport?: string;
 }
 
+/** Application-defined error fields the server may attach to an error. Absent when the server did not send them. */
+export interface ServerErrorFields {
+  /** Application error code set by the server, when the server sent one. */
+  appCode?: number;
+  /** Application error type set by the server, when the server sent one. */
+  appType?: string;
+  /** Allow-listed metadata the server attached to the error, when there is any. */
+  metadata?: Record<string, string>;
+}
+
 /** Server error with a numeric code and message. */
-export interface Error {
+export interface Error extends ServerErrorFields {
   /** Numeric error code defined by the Centrifugo protocol. */
   code: number;
   /** Human-readable error description. */
@@ -469,6 +479,19 @@ export interface PublishResult {
 export interface RpcResult {
   /** Arbitrary data returned by the server-side RPC handler. */
   data: any;
+}
+
+/** Options of an RPC call. */
+export interface RpcOptions {
+  /** Headers sent with this call only. Needs a server that supports RPC options:
+   * when it does not, rpc() rejects with error code `errorCodes.unsupported`. */
+  headers?: Record<string, string>;
+}
+
+/** Capabilities the server confirmed for the current connection. */
+export interface ClientCapabilities {
+  /** True when the server supports RPC options, e.g. per-call headers. */
+  readonly rpcOptions: boolean;
 }
 
 /** Result of a presence call. */

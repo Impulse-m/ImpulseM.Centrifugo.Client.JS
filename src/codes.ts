@@ -13,6 +13,8 @@ export enum errorCodes {
   badConfiguration = 12,
   subscriptionGetState = 13,
   sharedPollGetSignature = 14,
+  // The server does not support the requested feature, the call was not sent.
+  unsupported = 15,
 }
 
 export enum connectingCodes {
