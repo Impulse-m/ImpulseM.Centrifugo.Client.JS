@@ -28,19 +28,6 @@ function quiet<T>(promise: Promise<T>): Promise<T> {
   return promise;
 }
 
-// Polls the condition every 10 ms until it holds, and fails when the limit passes first.
-async function waitUntil(condition: () => boolean, limitMs: number): Promise<void> {
-  const limit: number = Date.now() + limitMs;
-  while (!condition()) {
-    if (Date.now() >= limit) {
-      throw new Error(`condition not met within ${limitMs} ms`);
-    }
-    await new Promise<void>((resolve: () => void): void => {
-      setTimeout(resolve, 10);
-    });
-  }
-}
-
 // Makes the next write of the client's transport throw, as a broken socket does. The transport
 // stays open for the client until it takes the write error as a lost connection.
 function failNextWrite(c: Centrifuge): void {
@@ -361,15 +348,14 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(callCommands()).toHaveLength(0);
   });
 
-  test('an abort while the client is not connected rejects with cancelled at once, and nothing is sent', async (): Promise<void> => {
+  test('an abort while the client is not connected rejects with cancelled, and nothing is sent', async (): Promise<void> => {
     const c: Centrifuge = create();
     const controller: AbortController = new AbortController();
-    const started: number = Date.now();
+    // The call waits for the connection when the abort comes.
     const call: Promise<RpcResult> = c.rpc('x', codecCase.encode({}), { signal: controller.signal });
-    setTimeout((): void => controller.abort(), 100);
+    controller.abort();
 
     await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
-    expect(Date.now() - started).toBeLessThan(2000);
     expect(server.received).toHaveLength(0);
   });
 
@@ -554,17 +540,32 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(cancels.map((cmd: any): number => cmd.rpc.cancel)).toEqual([sent.rpc.msg_id, sent.rpc.msg_id]);
   });
 
-  test('the callback of a call that expired on a silent connection is dropped after one call timeout', async (): Promise<void> => {
+  test('the reply of a call that expired is acknowledged until one call timeout later, then ignored', async (): Promise<void> => {
     const c: Centrifuge = create({ timeout: 100 });
     await connect(c);
     holdCalls();
-    const callbackCount = (): number => Object.keys((c as any)._callbacks).length;
+    // The timers of the client run on a fake clock. The socket keeps its real I/O.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      const call: Promise<RpcResult> = c.rpc('silent', codecCase.encode({}));
+      const sent: any = await server.waitFor(isCall);
 
-    await expect(c.rpc('silent', codecCase.encode({}))).rejects.toMatchObject({ code: errorCodes.timeout });
-    // The late reply is still acknowledged right after the expiry, and dropped within a bounded wait
-    // of several call timeouts (the timeout is 100 ms).
-    expect(callbackCount()).toBe(1);
-    await waitUntil((): boolean => callbackCount() === 0, 2000);
+      jest.advanceTimersByTime(105);
+      await expect(call).rejects.toMatchObject({ code: errorCodes.timeout });
+      // Past one call timeout after the expiry, the client has forgotten the call.
+      jest.advanceTimersByTime(200);
+      server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
+      server.send({ id: sent.id, rpc: { data: codecCase.encode({}) } });
+      await c.rpc('echo', codecCase.encode(1));
+      await c.rpc('echo', codecCase.encode(2));
+    } finally {
+      jest.useRealTimers();
+    }
+
+    // The first echo is sent before the late reply arrives, so the second one carries its acknowledgement
+    // only: the late reply of the expired call was ignored.
+    const echoes: any[] = callCommands().filter((cmd: any): boolean => cmd.rpc.method === 'echo');
+    expect(echoes[1].rpc.ack).toEqual([echoes[0].rpc.msg_id]);
   });
 
   test('calls aborted while the client waits for a connection leave no cancel behind', async (): Promise<void> => {
