@@ -55,10 +55,6 @@ export class RpcTracker {
   // Message ids of calls aborted while they waited for a connection: sent as cancels with the
   // next connection, in case the server received the call before the connection was lost.
   private cancels: number[] = [];
-  // Places taken by calls being admitted, see reserve.
-  private reserved: number = 0;
-
-
   constructor(host: RpcHost, maxPendingRpc: number, callTimeout: number) {
     this.host = host;
     this.maxPendingRpc = maxPendingRpc;
@@ -67,27 +63,9 @@ export class RpcTracker {
 
 
   /**
-   * Takes a place for a call that may be tracked, so the calls tracked and the calls waiting to be
-   * tracked stay within maxPendingRpc. Throws errorCodes.limitExceeded when there is no place.
-   * Each reserve is paired with a release.
-   */
-  reserve(): void {
-    if (this.queue.size + this.reserved >= this.maxPendingRpc) {
-      throw this.host.createError(errorCodes.limitExceeded, 'too many pending rpc calls');
-    }
-    this.reserved++;
-  }
-
-
-  /** Gives back the place taken by reserve. */
-  release(): void {
-    this.reserved--;
-  }
-
-
-  /**
    * Tracks a call: it is sent on the current connection, or on the next one if it is lost. The call
-   * rejects with a timeout at its deadline, counted from the moment of the rpc() call.
+   * rejects with a timeout at its deadline, counted from the moment of the rpc() call. Rejects with
+   * errorCodes.limitExceeded when maxPendingRpc calls are tracked already.
    */
   track(
     method: string,
@@ -97,6 +75,10 @@ export class RpcTracker {
     deadline: number
   ): Promise<RpcResult> {
     return new Promise<RpcResult>((resolve, reject) => {
+      if (this.queue.size >= this.maxPendingRpc) {
+        reject(this.host.createError(errorCodes.limitExceeded, 'too many pending rpc calls'));
+        return;
+      }
       const call: TrackedRpc = {
         msgId: this.msgIds.next(this.host.serverTime()),
         method: method,

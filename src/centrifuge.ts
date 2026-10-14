@@ -604,45 +604,38 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
     // The deadline of the call counts from now, across its wait and its attempts.
     const deadline: number = Date.now() + this._config.timeout;
-    // A call that may be tracked takes its place now, so the calls waiting for a connection count too.
-    const counted: boolean = !this._isConnected() || this._rpcOptionsSupported;
-    if (counted) {
-      this._rpc.reserve();
-    }
-    try {
-      await this._awaitCallReady(deadline, signal);
-    } finally {
-      if (counted) {
-        this._rpc.release();
-      }
-    }
+    await this._awaitCallReady(deadline, signal);
     // Checked once connected: the capability belongs to the connection the call goes out on.
-    if (!this._rpcOptionsSupported) {
-      if (hasHeaders(headers)) {
-        throw this._createErrorObject(
-          errorCodes.unsupported,
-          'rpc headers are not supported by the server'
-        );
-      }
-      if (signal !== undefined) {
-        throw this._createErrorObject(
-          errorCodes.unsupported,
-          'rpc cancel is not supported by the server'
-        );
-      }
-      const cmd: any = {
-        rpc: {
-          method,
-          data
-        }
-      };
-      const result = await this._callPromise(cmd, (reply: any) => reply.rpc);
-      return {
-        data: result.data,
-        cached: result.cached === true
-      };
+    // Only a call with an instance is tracked: the server scopes the retransmit and the cancel by it.
+    if (this._rpcOptionsSupported && this._config.instance) {
+      return this._rpc.track(method, data, headers, signal, deadline);
     }
-    return this._rpc.track(method, data, headers, signal, deadline);
+    if (!this._rpcOptionsSupported && hasHeaders(headers)) {
+      throw this._createErrorObject(
+        errorCodes.unsupported,
+        'rpc headers are not supported by the server'
+      );
+    }
+    if (signal !== undefined) {
+      throw this._createErrorObject(
+        errorCodes.unsupported,
+        this._rpcOptionsSupported ? 'rpc cancel needs the instance option' : 'rpc cancel is not supported by the server'
+      );
+    }
+    const cmd: any = {
+      rpc: {
+        method,
+        data
+      }
+    };
+    if (this._rpcOptionsSupported && hasHeaders(headers)) {
+      cmd.rpc.headers = headers;
+    }
+    const result = await this._callPromise(cmd, (reply: any) => reply.rpc);
+    return {
+      data: result.data,
+      cached: result.cached === true
+    };
   }
 
   /** publish data to a channel. */

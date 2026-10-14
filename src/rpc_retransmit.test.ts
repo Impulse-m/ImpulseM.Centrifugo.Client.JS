@@ -44,6 +44,7 @@ function failNextWrite(c: Centrifuge): void {
 }
 
 describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase) => {
+  const testInstance: string = 'AbCdEfGhIjKlMnOpQrStUv';
   let server: FakeCentrifugoServer;
   const clients: Centrifuge[] = [];
 
@@ -60,8 +61,10 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     await server.close();
   });
 
+  // Most cases run with an instance, as retransmit and cancel need one. The cases without it pass
+  // instance: undefined.
   function create(options?: Partial<Options>): Centrifuge {
-    const c: Centrifuge = codecCase.createClient(server.url, options);
+    const c: Centrifuge = codecCase.createClient(server.url, { instance: testInstance, ...options });
     clients.push(c);
     return c;
   }
@@ -187,19 +190,72 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     await expect(c.rpc('echo', codecCase.encode(4))).resolves.toMatchObject({ cached: false });
   });
 
-  test('calls made while disconnected count towards maxPendingRpc, and the excess rejects at once', async (): Promise<void> => {
+  test('calls made while disconnected are counted when they are sent, and the excess rejects with limitExceeded', async (): Promise<void> => {
     const c: Centrifuge = create({ maxPendingRpc: 2 });
     server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
-    const first: Promise<RpcResult> = c.rpc('a', codecCase.encode(1));
-    const second: Promise<RpcResult> = c.rpc('b', codecCase.encode(2));
+    const calls: Promise<RpcResult>[] = [
+      quiet(c.rpc('a', codecCase.encode(1))),
+      quiet(c.rpc('b', codecCase.encode(2))),
+      quiet(c.rpc('c', codecCase.encode(3))),
+    ];
 
-    // Nothing is connected yet: the excess call rejects without waiting for a connection.
-    await expect(c.rpc('c', codecCase.encode(3))).rejects.toMatchObject({ code: errorCodes.limitExceeded });
+    // The calls wait for the connection. Once connected, the two first are tracked, the third is beyond the bound.
+    await connect(c);
+    await expect(calls[0]).resolves.toMatchObject({ cached: false });
+    await expect(calls[1]).resolves.toMatchObject({ cached: false });
+    await expect(calls[2]).rejects.toMatchObject({ code: errorCodes.limitExceeded });
+    expect(callCommands()).toHaveLength(2);
+  });
+
+  test('a burst of calls made before a legacy connection is not bounded and is sent as plain requests', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25 };
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
+    const c: Centrifuge = create({ maxPendingRpc: 2 });
+    const calls: Promise<RpcResult>[] = [];
+    for (let i: number = 0; i < 5; i++) {
+      calls.push(c.rpc('echo', codecCase.encode(i)));
+    }
 
     await connect(c);
-    await expect(first).resolves.toMatchObject({ cached: false });
-    await expect(second).resolves.toMatchObject({ cached: false });
-    expect(callCommands()).toHaveLength(2);
+    await expect(Promise.all(calls)).resolves.toHaveLength(5);
+    expect(callCommands()).toHaveLength(5);
+    expect(callCommands().every((cmd: any): boolean => cmd.rpc.msg_id === undefined)).toBe(true);
+  });
+
+  test('without an instance a call is a plain request and is not sent again on a lost connection', async (): Promise<void> => {
+    const c: Centrifuge = create({ instance: undefined });
+    await connect(c);
+    holdCalls();
+    const call: Promise<RpcResult> = quiet(c.rpc('x', codecCase.encode({})));
+    const sent: any = await server.waitFor(isCall);
+
+    expect(sent.rpc.msg_id).toBeUndefined();
+    expect(sent.rpc.retransmit).toBeUndefined();
+    server.closeConnection();
+    // The server has no scope to tell the call apart, so it is not sent again: it may have run.
+    await expect(call).rejects.toMatchObject({ code: errorCodes.connectionClosed });
+    expect(server.received.some(isRetransmit)).toBe(false);
+  });
+
+  test('without an instance a signal rejects with unsupported and nothing is sent', async (): Promise<void> => {
+    const c: Centrifuge = create({ instance: undefined });
+    await connect(c);
+    const controller: AbortController = new AbortController();
+
+    await expect(c.rpc('x', codecCase.encode({}), { signal: controller.signal }))
+      .rejects.toMatchObject({ code: errorCodes.unsupported });
+    expect(callCommands()).toHaveLength(0);
+  });
+
+  test('without an instance the headers of a call are sent with its plain request', async (): Promise<void> => {
+    const c: Centrifuge = create({ instance: undefined });
+    await connect(c);
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
+
+    await c.rpc('echo', codecCase.encode({}), { headers: { 'x-example': 'value' } });
+
+    expect(callCommands()[0].rpc.headers).toEqual({ 'x-example': 'value' });
+    expect(callCommands()[0].rpc.msg_id).toBeUndefined();
   });
 
   test('the ids of the replies received are sent with the next request', async (): Promise<void> => {
@@ -505,7 +561,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
   });
 
   test('no instance is sent when none is set', async (): Promise<void> => {
-    const c: Centrifuge = create();
+    const c: Centrifuge = create({ instance: undefined });
     await connect(c);
     const connectCmd: any = server.received.find((cmd: any): boolean => cmd.connect !== undefined);
     expect(connectCmd.connect.instance).toBeUndefined();
