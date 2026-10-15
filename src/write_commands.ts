@@ -8,7 +8,7 @@ export interface WriteHost {
   /** Writes encoded commands on the transport of the session and node. Throws when the transport refuses the write. */
   send(data: any, session: string, node: string): void;
   debug(message: string, ...args: any[]): void;
-  /** Settles the calls of the commands with a write error, refused ones with a refusal. */
+  /** Settles the calls of the commands, which were not written, with a write error; refused ones with a refusal. */
   handleWriteError(commands: any[], refused: boolean): void;
   /** Whether the failed write of these commands ends the connection: a tracked call or a cancel was in them. */
   writeFailed(commands: any[]): boolean;

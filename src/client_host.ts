@@ -92,6 +92,7 @@ export function createClientHost(client: Centrifuge): ClientHost {
         callbacks.errback({
           error: client['_createErrorObject'](errorCodes.transportWriteError, 'transport write error'),
           refused: refused,
+          unwritten: true,
         });
       }
     },

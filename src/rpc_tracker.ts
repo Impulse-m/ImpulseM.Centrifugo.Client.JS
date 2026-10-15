@@ -9,9 +9,10 @@ import { RpcOptions, RpcResult } from './types';
 export type CallResolveContext = { reply: any; next?: () => void };
 /**
  * The rejection of a command: next() is absent when the connection ended before a reply. refused is set when
- * the codec refused the command before any write: it never reached the connection.
+ * the codec refused the command before any write: it never reached the connection. unwritten is set when the
+ * command was never written, a write the transport refused or a command dropped before its write.
  */
-export type CallRejectContext = { error: any; next?: () => void; refused?: boolean };
+export type CallRejectContext = { error: any; next?: () => void; refused?: boolean; unwritten?: boolean };
 
 // The metadata key the server sets on its own rpc errors, and its two values, see retrySignal. Error
 // metadata of the server cannot carry this key itself.
@@ -358,12 +359,14 @@ export class RpcTracker {
     if (retransmit) {
       rpc.retransmit = true;
     }
+    // Whether the server had the call before this attempt: a command that is never written leaves it so.
+    const wasSent: boolean = call.sent;
     this.dispatch(rpc, (id: number, acks: number[]): RpcCallbacks => {
       call.commandId = id;
       call.sent = true;
       return {
         callback: (ctx: CallResolveContext): void => this.replied(call, ctx),
-        errback: (ctx: CallRejectContext): void => this.failed(call, ctx, acks),
+        errback: (ctx: CallRejectContext): void => this.failed(call, ctx, acks, wasSent),
         timeout: null,
       };
     });
@@ -463,8 +466,12 @@ export class RpcTracker {
   // A rejection of the command: without a reply (next) the connection ended or the write failed, and the call
   // waits for the next connection. An error reply of the server: a refusal with the retry signal did not run
   // the call, so it is sent again, and the error is not acknowledged (the server did not record it). Any other
-  // error is surfaced unchanged. A command the codec refused never reached the server: see refused.
-  private failed(call: TrackedRpc, ctx: CallRejectContext, acks: number[]): void {
+  // error is surfaced unchanged. A command the codec refused never reached the server: see refused. A command that
+  // was never written leaves the call as it was before the attempt: a retransmit is only for a call the server saw.
+  private failed(call: TrackedRpc, ctx: CallRejectContext, acks: number[], wasSent: boolean): void {
+    if (ctx.unwritten === true) {
+      call.sent = wasSent;
+    }
     if (ctx.refused === true) {
       this.refused(call, ctx, acks);
       return;

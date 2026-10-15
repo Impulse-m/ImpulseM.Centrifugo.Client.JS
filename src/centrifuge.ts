@@ -874,7 +874,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
   }
 
-  private _clearOutgoingRequests() {
+  private _clearOutgoingRequests(dropped: any[]) {
+    // The commands dropped before their write were never written: their errbacks say so.
+    const droppedIds = new Set(dropped.map((command) => command.id));
     // fire errbacks of registered outgoing calls.
     for (const id in this._callbacks) {
       if (this._callbacks.hasOwnProperty(id)) {
@@ -884,7 +886,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         if (!errback) {
           continue;
         }
-        errback({ error: this._createErrorObject(errorCodes.connectionClosed, 'connection closed') });
+        errback({ error: this._createErrorObject(errorCodes.connectionClosed, 'connection closed'), unwritten: droppedIds.has(Number(id)) });
       }
     }
     this._callbacks = {};
@@ -1889,8 +1891,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     // A connection that ends before it proved usable keeps the backoff growing.
     this._reconnectAttemptsResetPending = false;
     // Commands collected for the closed transport must not go out on the next one.
+    const dropped = this._commands;
     this._commands = [];
-    this._clearOutgoingRequests();
+    this._clearOutgoingRequests(dropped);
     if (!reconnect) {
       this._rpc.rejectAll(errorCodes.connectionClosed, 'connection closed');
       this._rejectPromises({ code: errorCodes.clientDisconnected, message: 'disconnected' });

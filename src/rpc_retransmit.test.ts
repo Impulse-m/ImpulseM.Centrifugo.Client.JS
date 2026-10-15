@@ -140,7 +140,8 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
 
     expect(codecCase.decode(result.data)).toEqual({ answer: 7 });
     expect(callCommands()).toHaveLength(1);
-    expect(callCommands()[0].rpc.retransmit).toBe(true);
+    // The write was refused, so the server never saw the message id: the call is not a retransmit.
+    expect(callCommands()[0].rpc.retransmit).toBeUndefined();
     expect(c.state).toBe(State.Connected);
   });
 
@@ -598,13 +599,14 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     failNextWrite(c);
     await c.rpc('echo', codecCase.encode(2));
 
-    // The command that carried the acknowledgement was never written: the retransmit of the call carries it.
+    // The command that carried the acknowledgement was never written: the call goes out again, and the server
+    // has not seen its message id, so it is not a retransmit.
     const last: any = callCommands()[callCommands().length - 1];
-    expect(last.rpc.retransmit).toBe(true);
+    expect(last.rpc.retransmit).toBeUndefined();
     expect(last.rpc.ack).toEqual([firstId]);
   });
 
-  test('a write error with several calls in flight sends all of them again in message id order', async (): Promise<void> => {
+  test('a write error with several calls in flight retransmits the sent ones in message id order, and sends the call whose write failed as a first send', async (): Promise<void> => {
     const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
     await connect(c);
     holdCalls();
@@ -613,21 +615,20 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     );
     await server.waitFor((cmd: any): boolean => isCall(cmd) && cmd.rpc.method === 'c');
 
-    // The fourth call is the next write, and it fails: the three calls before it are still waiting.
-    server.onCommand = (cmd: any): any => {
-      if (!isCall(cmd)) {
-        return undefined;
-      }
-      return cmd.rpc.retransmit ? { id: cmd.id, rpc: { data: codecCase.encode({ method: cmd.rpc.method }) } } : holdReply;
-    };
+    // The fourth call is the next write, and it fails: the three calls before it are still waiting. From now on the
+    // server answers every call: the retransmits, and the fourth call sent for the first time.
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({ method: cmd.rpc.method }) } } : undefined);
     failNextWrite(c);
     const fourth: Promise<RpcResult> = quiet(c.rpc('d', codecCase.encode({})));
 
     const results: RpcResult[] = await Promise.all([...calls, fourth]);
     expect(results.map((r: RpcResult): any => codecCase.decode(r.data)))
       .toEqual([{ method: 'a' }, { method: 'b' }, { method: 'c' }, { method: 'd' }]);
+    // The three calls were sent and are retransmitted. The fourth was never written: it is a first send on the reconnect.
     expect(server.received.filter(isRetransmit).map((cmd: any): string => cmd.rpc.method))
-      .toEqual(['a', 'b', 'c', 'd']);
+      .toEqual(['a', 'b', 'c']);
+    const fourthSend: any = server.received.find((cmd: any): boolean => isCall(cmd) && cmd.rpc.method === 'd');
+    expect(fourthSend.rpc.retransmit).toBeUndefined();
   });
 
   test('a write error on the calls sent with a reconnect sends all of them again on the next connection', async (): Promise<void> => {
