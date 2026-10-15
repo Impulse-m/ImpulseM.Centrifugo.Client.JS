@@ -1,14 +1,14 @@
-## ImpulseM fork
+## Fork of centrifuge-js
 
-This is the ImpulseM fork of [centrifuge-js](https://github.com/centrifugal/centrifuge-js), published to npm as [`@impulsem/centrifuge`](https://www.npmjs.com/package/@impulsem/centrifuge). Its API matches upstream, so the API documentation below applies unless noted otherwise. Install and import instructions in this README refer to `@impulsem/centrifuge`, not to the upstream `centrifuge` package.
+This is a fork of [centrifuge-js](https://github.com/centrifugal/centrifuge-js), published to npm as [`@impulsem/centrifuge`](https://www.npmjs.com/package/@impulsem/centrifuge). Its API matches upstream, so the API documentation below applies unless noted otherwise. Install and import instructions in this README refer to `@impulsem/centrifuge`, not to the upstream `centrifuge` package.
 
-The package has its own versioning, starting at `1.0.0`, independent of upstream `centrifuge-js` versions. Releases are listed on the [ImpulseM.Centrifugo.Client.JS releases page](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS/releases).
+The package has its own versioning, starting at `1.0.0`, independent of upstream `centrifuge-js` versions. Releases are listed on the [releases page](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS/releases).
 
-Related ImpulseM projects:
+Related projects of this fork:
 
-* [ImpulseM.Centrifugo](https://github.com/Impulse-m/ImpulseM.Centrifugo) - the server (Docker image `ghcr.io/impulse-m/impulsem.centrifugo`)
-* [ImpulseM.Centrifugo.Client.Swift](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift) - iOS client (Swift Package Manager)
-* [ImpulseM.Centrifugo.Client.Java](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Java) - Android client
+* [Centrifugo server fork](https://github.com/Impulse-m/ImpulseM.Centrifugo) - the server (Docker image `ghcr.io/impulse-m/impulsem.centrifugo`)
+* [Swift client](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift) - iOS client (Swift Package Manager)
+* [Java client](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Java) - Android client
 
 This SDK provides a client to connect to [Centrifugo](https://github.com/centrifugal/centrifugo) or any [Centrifuge-based](https://github.com/centrifugal/centrifuge) server using pure WebSocket or one of the alternative transports (HTTP-streaming, SSE/EventSource, experimental WebTransport) from web browser, ReactNative, or NodeJS environments.
 
