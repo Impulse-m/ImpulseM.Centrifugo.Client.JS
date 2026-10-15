@@ -1,6 +1,7 @@
 import { Centrifuge, UnauthorizedError } from './centrifuge';
 import { CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, until } from './testing/codecs';
-import { Options, State, TokenExchange, TokenExchangeContext, TokenExchangeResult } from './types';
+import { Options, State } from './types';
+import { TokenExchange, TokenExchangeContext, TokenExchangeResult } from './token_exchange';
 
 // The token exchange of the tokenExchange option, over both codecs. The fake issuer answers the exchange rpc, and every
 // exchange rotates the refresh token: the app starts with refresh-1, and the n-th exchange issues access-n and
@@ -468,6 +469,45 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     expect(events.filter((entry: string): boolean => entry === 'connected')).toHaveLength(1);
   });
 
+  test('a connection lost during the exchange stores its rotated token when nothing rotated meanwhile, and uses no access token', async (): Promise<void> => {
+    let calls: number = 0;
+    let release: (result: TokenExchangeResult) => void = (): void => {};
+    const c: Centrifuge = create({
+      exchange: (): Promise<TokenExchangeResult> => {
+        calls++;
+        return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+          release = resolve;
+        });
+      },
+    });
+    const events: string[] = record(c);
+    serve();
+    c.connect();
+    await until((): boolean => calls === 1);
+    c.disconnect();
+
+    release({ token: 'stale-access', refreshToken: 'refresh-2' });
+    await flush();
+
+    expect(order).toEqual(['connect', 'store:refresh-2']);
+    expect(stored).toBe('refresh-2');
+    expect(commands('refresh')).toHaveLength(0);
+    expect(events).not.toContain('connected');
+  });
+
+  test('refresh() during the connect waits for the connection, then exchanges over it', async (): Promise<void> => {
+    serve();
+    const c: Centrifuge = create();
+    const connected: Promise<void> = nextConnected(c);
+    c.connect();
+    const refreshed: Promise<any> = c.refresh();
+    await connected;
+    await refreshed;
+
+    expect(order).toEqual(['connect', 'rpc:exchange', 'store:refresh-2', 'refresh', 'rpc:exchange', 'store:refresh-3', 'refresh']);
+    expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1', 'access-2']);
+  });
+
   test('an empty refresh token at bootstrap leaves the connection anonymous, with no rpc', async (): Promise<void> => {
     serve();
     const c: Centrifuge = create({ load: (): null => null });
@@ -560,6 +600,10 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       expect(logged).not.toContain('access-1');
       const flow: any = c['_tokenExchange'];
       expect(Object.values(flow)).not.toContain('refresh-1');
+      // The flow's own state, without the client and the host it reaches: no refresh token in any of it, and no bootstrap left.
+      const kept: string = JSON.stringify(Object.entries(flow).filter((entry: [string, any]): boolean => entry[0] !== 'client' && entry[0] !== 'host'));
+      expect(kept).not.toContain('refresh-');
+      expect(flow.bootstrap).toBeNull();
       disconnectAll(clients);
     } finally {
       spy.mockRestore();
