@@ -28,7 +28,8 @@ export function refreshKeepsConnection(code: number): boolean {
 export interface RefreshSlotHost {
   isConnected(): boolean;
   /** Resolves once the client is connected. Rejects after the timeout in milliseconds, when the signal aborts, or when
-   * it is disconnected for good while the wait runs; with a null timeout it waits without a limit. */
+   * it is disconnected for good while the wait runs. With a null timeout it waits without a limit: when the client is
+   * already disconnected for good, until the next connect. */
   waitConnected(timeout: number | null, signal?: AbortSignal): Promise<void>;
   createError(code: number, message: string): any;
   /** Sends a command on the connection. Resolves with the reply context, rejects with the rejection context. */
@@ -40,7 +41,7 @@ export interface RefreshSlotHost {
   debug(message: string, ...args: any[]): void;
   /** Applies the reply of a refresh command to the identity of the connection. */
   applyReply(result: any): void;
-  /** Arms the refresh timer, when none is armed, to retry the refresh of a connection whose token expires. */
+  /** Replaces the armed refresh timer with a retry timer, to retry the refresh of a connection whose token expires. */
   armRefreshRetry(): void;
   identity(): ConnectionIdentity;
   /** Reports an error raised while a refresh was taken, e.g. by an 'auth' handler. */
@@ -271,7 +272,8 @@ export class RefreshSlot {
   /**
    * Takes the slot for one refresh command: waits until the client is connected and no other
    * command is in flight. The returned function gives the slot back, once the command settled.
-   * Rejects when the client is disconnected for good before the slot is free.
+   * Rejects when the client is disconnected for good while it waits for the slot. A claim made after such a disconnect
+   * waits for the next connect, without a limit, as a refresh(token) does while disconnected.
    */
   private async claim(): Promise<() => void> {
     while (this.commandInFlight !== null || !this.host.isConnected()) {

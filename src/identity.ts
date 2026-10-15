@@ -20,8 +20,11 @@ export class ConnectionIdentity {
     this.authClass = result.auth_class ?? '';
   }
 
-  /** Takes the identity of a refresh reply, and reports it when it changed the identity of the connection. */
-  applyRefresh(result: any): void {
+  /**
+   * Takes the identity of a refresh reply, and reports it through onChange when it changed the identity of the
+   * connection. Returns whether it changed.
+   */
+  applyRefresh(result: any): boolean {
     const user: string = result.user ?? '';
     const authClass: string = result.auth_class ?? '';
     const changed: boolean = user !== this.user || authClass !== this.authClass;
@@ -30,6 +33,7 @@ export class ConnectionIdentity {
     if (changed) {
       this.onChange(this.context(result.ttl ?? 0));
     }
+    return changed;
   }
 
   /** The auth context of the connection, with the ttl of the reply that confirmed it. */

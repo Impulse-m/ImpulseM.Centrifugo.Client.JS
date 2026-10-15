@@ -2,7 +2,7 @@ import { errorCodes } from './codes';
 import { Options } from './types';
 
 /** Default of maxPendingRpc: the calls tracked at once. */
-export const defaultMaxPendingRpc: number = 32;
+const defaultMaxPendingRpc: number = 32;
 
 /**
  * Pattern of a client instance identifier: a random secret of at least 128 bits, in base64url
