@@ -59,7 +59,7 @@ export function serverErrorFields(error: any): ServerErrorFields {
  * characters (22 characters carry 132 bits). The server drops any other value.
  * @internal
  */
-export const instancePattern: RegExp = /^[A-Za-z0-9_-]{22,64}$/;
+const instancePattern: RegExp = /^[A-Za-z0-9_-]{22,64}$/;
 
 /**
  * Whether a client instance identifier has the form the server accepts.
@@ -67,26 +67,6 @@ export const instancePattern: RegExp = /^[A-Za-z0-9_-]{22,64}$/;
  */
 export function isValidInstance(instance: string): boolean {
   return instancePattern.test(instance);
-}
-
-/**
- * Whether a server error of a timer-driven refresh is reported and retried with backoff and a fresh
- * token: a client error (code below 100), a temporary error, and 109 (the token the getter returned was
- * refused as expired). Any other error is not retried. An explicit refresh() is never retried.
- * @internal
- */
-export function refreshRetries(code: number, temporary: boolean): boolean {
-  return code < 100 || temporary || code === 109;
-}
-
-/**
- * Whether a server error of a timer-driven refresh keeps the connection, without a retry. 103 refuses
- * the identity change of the token the getter returned, and the same token would be refused again: the
- * connection keeps its identity, and the server ends it at its expiry.
- * @internal
- */
-export function refreshKeepsConnection(code: number): boolean {
-  return code === 103;
 }
 
 /**

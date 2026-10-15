@@ -5,10 +5,10 @@ export interface CallTimer {
 
 // A call or no-ping timer running at least this late means the event loop didn't
 // run meanwhile: the process was suspended or blocked (see callTimer).
-export const lateCallTimer: number = 1000;
+const lateCallTimer: number = 1000;
 // How long such a call still waits for its reply, or the connection for a ping,
 // before failing.
-export const lateCallGrace: number = 1000;
+const lateCallGrace: number = 1000;
 
 /**
  * Runs onDue at the due time, local time in milliseconds. A timer running late by lateCallTimer or

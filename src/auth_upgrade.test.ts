@@ -176,6 +176,36 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
     expect(c.state).toBe(State.Connected);
   });
 
+  test('refresh with getToken set to undefined rejects with a configuration error and sends nothing', async (): Promise<void> => {
+    // A token is set, so the connect does not need getToken; the refresh finds none and reports the configuration.
+    const c: Centrifuge = create({ token: 'token-a', getToken: undefined });
+    await connect(c);
+
+    await expect(c.refresh()).rejects.toMatchObject({ code: errorCodes.badConfiguration });
+    expect(refreshCommands()).toHaveLength(0);
+    expect(c.state).toBe(State.Connected);
+  });
+
+  test('a refresh with a new token that is never sent, the client being disconnected for good, leaves the token accepted before', async (): Promise<void> => {
+    const c: Centrifuge = create({ token: 'token-a' });
+    await connect(c);
+    const connecting: Promise<void> = new Promise<void>((resolve: () => void): void => {
+      c.once('connecting', (): void => resolve());
+    });
+    server.closeConnection();
+    await connecting;
+
+    // Waits for the connection with the new token set; the disconnect for good ends the wait.
+    const refreshing: Promise<AuthContext> = c.refresh('token-b');
+    refreshing.catch((): void => undefined);
+    c.disconnect();
+    await expect(refreshing).rejects.toMatchObject({ code: errorCodes.clientDisconnected });
+    expect(refreshCommands()).toHaveLength(0);
+
+    await connect(c);
+    expect(connectCommands()[connectCommands().length - 1].connect.token).toBe('token-a');
+  });
+
   test('refresh while disconnected is sent on the next connect', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated' };
     server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? {

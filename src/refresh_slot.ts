@@ -6,6 +6,24 @@ import { AuthContext } from './types';
 /** Most refresh() calls in progress at once, the one in flight included. Beyond it refresh() rejects with errorCodes.limitExceeded. */
 export const maxRefreshCalls: number = 32;
 
+/**
+ * Whether a server error of a timer-driven refresh is reported and retried with backoff and a fresh
+ * token: a client error (code below 100), a temporary error, and 109 (the token the getter returned was
+ * refused as expired). Any other error is not retried. An explicit refresh() is never retried.
+ */
+export function refreshRetries(code: number, temporary: boolean): boolean {
+  return code < 100 || temporary || code === 109;
+}
+
+/**
+ * Whether a server error of a timer-driven refresh keeps the connection, without a retry. 103 refuses
+ * the identity change of the token the getter returned, and the same token would be refused again: the
+ * connection keeps its identity, and the server ends it at its expiry.
+ */
+export function refreshKeepsConnection(code: number): boolean {
+  return code === 103;
+}
+
 /** What the refresh slot needs from its client. */
 export interface RefreshSlotHost {
   isConnected(): boolean;
@@ -62,7 +80,7 @@ export class RefreshSlot {
    * is in progress, else after the one in flight. Rejects with errorCodes.limitExceeded when
    * maxRefreshCalls calls are in progress already.
    */
-  call(token: string | undefined, run: (token: string | undefined) => Promise<AuthContext>): Promise<AuthContext> {
+  call(token: string | undefined): Promise<AuthContext> {
     const pending: Promise<AuthContext> | null = this.callInFlight;
     if (pending !== null && (token === undefined || token === this.callToken)) {
       return pending;
@@ -73,8 +91,8 @@ export class RefreshSlot {
     this.calls++;
     this.generationCount++;
     const refresh: Promise<AuthContext> = pending === null
-      ? run(token)
-      : pending.then((): Promise<AuthContext> => run(token), (): Promise<AuthContext> => run(token));
+      ? this.run(token)
+      : pending.then((): Promise<AuthContext> => this.run(token), (): Promise<AuthContext> => this.run(token));
     this.callInFlight = refresh;
     this.callToken = token;
     const settled = (): void => {
@@ -120,8 +138,8 @@ export class RefreshSlot {
       if (refused) {
         rejectCtx.next();
       }
-      // Refused: the reconnects keep the token the server accepted before.
-      if (refused && this.host.token() === newToken) {
+      // Refused, or never sent (the client was disconnected for good): the reconnects keep the token the server accepted before.
+      if ((refused || rejectCtx.unsent === true) && this.host.token() === newToken) {
         this.host.setToken(previousToken);
       }
       throw rejectCtx.error;
@@ -186,12 +204,26 @@ export class RefreshSlot {
   }
 
 
-  // Takes the slot of a refresh command. A client disconnected for good first rejects with the error alone.
+  /**
+   * Takes the token of a timer refresh fetched while the client is disconnected: it is the token of the next
+   * connect. Not taken when a refresh() call started or a token was accepted since the generation given.
+   */
+  takeTimerToken(token: string, generation: number): void {
+    if (this.generationCount !== generation) {
+      return;
+    }
+    this.host.setToken(token);
+    this.host.debug('connection token refreshed');
+  }
+
+
+  // Takes the slot of a refresh command. A client disconnected for good first rejects with the error alone,
+  // and the command was never sent.
   private async claimCommand(): Promise<() => void> {
     try {
       return await this.claim();
     } catch (error) {
-      throw { error: error };
+      throw { error: error, unsent: true };
     }
   }
 

@@ -25,12 +25,13 @@ import {
 
 import {
   rpcOptionsFlag, hasFlag, serverErrorFields, serverTimeOffsetFrom, normaliseRpcOptions, loggedConfig,
-  defaultMaxPendingRpc, refreshRetries, refreshKeepsConnection,
+  defaultMaxPendingRpc,
 } from './extensions';
 
 import { CallTimer, callTimer } from './call_timer';
-import { RpcCallbacks, RpcHost, RpcTracker } from './rpc_tracker';
-import { RefreshSlot, RefreshSlotHost } from './refresh_slot';
+import { RpcHost, RpcTracker } from './rpc_tracker';
+import { createClientHost } from './client_host';
+import { RefreshSlot, RefreshSlotHost, refreshKeepsConnection, refreshRetries } from './refresh_slot';
 import { ConnectionIdentity } from './identity';
 
 import {
@@ -229,7 +230,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     if (configError !== null) {
       throw this._createErrorObject(errorCodes.badConfiguration, configError);
     }
-    const host: RpcHost & RefreshSlotHost = this._createRpcHost();
+    const host: RpcHost & RefreshSlotHost = createClientHost(this);
     this._rpc = new RpcTracker(host, this._config.maxPendingRpc ?? defaultMaxPendingRpc, this._config.timeout);
     this._refreshSlot = new RefreshSlot(host);
     this._configure();
@@ -501,7 +502,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   /** Sends the connection token now, and resolves the identity the server confirms. */
   refresh(token?: string): Promise<AuthContext> {
-    return this._refreshSlot.call(token, (newToken: string | undefined): Promise<AuthContext> => this._refreshSlot.run(newToken));
+    return this._refreshSlot.call(token);
   }
 
   /** setData allows setting connection data. This only affects the next connection attempt,
@@ -2027,18 +2028,13 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         self._failUnauthorized();
         return;
       }
-      const superseded: boolean = self._refreshSlot.currentGeneration() !== generation;
       if (!self._isConnected()) {
-        if (!superseded) {
-          self._token = token;
-          self._debug('connection token refreshed');
-        }
+        self._refreshSlot.takeTimerToken(token, generation);
         return;
       }
 
       self._refreshSlot.sendTimer(token, generation).then(resolveCtx => {
         if (resolveCtx === null) {
-          // Superseded: the token is dropped, and the refresh starts over.
           self._refresh();
           return;
         }
@@ -2111,7 +2107,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     return backoff(0, 5000, 10000);
   }
 
-  private _refreshResponse(result: any) {
+  /** @internal Read by the host of the refresh slot (client_host.ts), which applies the refresh replies it accepts. */
+  _refreshResponse(result: any) {
     if (this._refreshTimeout) {
       clearTimeout(this._refreshTimeout);
       this._refreshTimeout = null;
@@ -2126,7 +2123,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       }
       this._refreshTimeout = setTimeout(() => this._refresh(), ttlMilliseconds(result.ttl));
     }
-    // The identity of a refresh reply replaces the one of the connection, and is reported when it changed.
     this._identity.applyRefresh(result);
   }
 
@@ -2325,7 +2321,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       return;
     }
 
-    // Before the calls waiting for the connection go on, in message id order.
     this._rpc.sendWaiting();
     this._resolvePromises();
 
@@ -2800,33 +2795,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       this._promises[id].reject(err);
       delete this._promises[id];
     }
-  }
-
-  // The host of the rpc tracker and of the refresh slot: the client's own state, as they use it.
-  private _createRpcHost(): RpcHost & RefreshSlotHost {
-    return {
-      isConnected: (): boolean => this._isConnected(),
-      createError: (code: number, message: string): any => this._createErrorObject(code, message),
-      hasInstance: (): boolean => !!this._config.instance,
-      ready: (deadline: number): Promise<void> => this._refreshSlot.ready(deadline),
-      plainCall: (command: any, deadline: number): Promise<any> => this._callPromise(command, (reply: any): any => reply.rpc, deadline),
-      nextCommandId: (): number => this._nextCommandId(),
-      addCommand: (command: any): void => this._addCommand(command),
-      setCallbacks: (id: number, callbacks: RpcCallbacks) => (this._callbacks[id] = callbacks),
-      deleteCallbacks: (id: number) => delete this._callbacks[id],
-      serverTime: (): number => this.serverTime(),
-      rpcOptionsSupported: (): boolean => this._rpcOptionsSupported,
-      waitConnected: (timeout: number | null): Promise<void> => this._methodCall(timeout),
-      sendCommand: (command: any): Promise<CallResolveContext> => this._call(command, false),
-      hasGetToken: (): boolean => this._config.getToken !== null,
-      getToken: (): Promise<string> => this._getToken(),
-      token: (): string => this._token,
-      setToken: (token: string) => (this._token = token),
-      debug: (message: string): void => this._debug(message),
-      applyReply: (result: any): void => this._refreshResponse(result),
-      identity: (): ConnectionIdentity => this._identity,
-      dispatchFailed: (err: any): void => this._dispatchFailed(err),
-    };
   }
 }
 
