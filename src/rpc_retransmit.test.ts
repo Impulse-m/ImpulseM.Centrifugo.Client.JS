@@ -1234,6 +1234,25 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(server.received.some(isRetransmit)).toBe(false);
   });
 
+  test('a call written and lost on a capable connection keeps its cancel through a legacy connection', async (): Promise<void> => {
+    const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    holdCalls();
+    const call: Promise<RpcResult> = quiet(c.rpc('x', codecCase.encode({})));
+    const sent: any = await server.waitFor(isCall);
+
+    server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25 };
+    server.closeConnection();
+    await expect(call).rejects.toMatchObject({ code: errorCodes.connectionClosed });
+    expect(server.received.filter(isCancel)).toHaveLength(0);
+
+    // The next capable connection carries the cancel: the server may have run the call.
+    server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25, flag: rpcOptionsWireFlag };
+    server.closeConnection();
+    const cancel: any = await server.waitFor(isCancel);
+    expect(cancel.rpc.cancel).toBe(sent.rpc.msg_id);
+  });
+
   test('an abort in the connected handler of a legacy connection sends no cancel, the cancel waits for a capable connection', async (): Promise<void> => {
     const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
     await connect(c);

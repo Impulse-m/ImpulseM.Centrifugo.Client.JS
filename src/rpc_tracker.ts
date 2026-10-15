@@ -156,6 +156,8 @@ export class RpcTracker {
       for (const call of this.queue.waiting()) {
         if (call.sent) {
           this.settle(call);
+          // The server may have run the call: its cancel waits for a connection that carries cancels, as in rejectAll.
+          this.keepCancel(call.msgId);
           call.reject(this.host.createError(errorCodes.connectionClosed, 'connection closed'));
         } else if (call.deadline <= Date.now()) {
           this.expire(call);
