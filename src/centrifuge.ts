@@ -24,8 +24,9 @@ import {
 } from './utils';
 
 import {
-  rpcOptionsFlag, hasFlag, serverErrorFields, serverTimeOffsetFrom, normaliseRpcOptions, loggedConfig,
+  rpcOptionsFlag, hasFlag, serverErrorFields, serverTimeOffsetFrom,
 } from './extensions';
+import { normaliseRpcOptions, loggedConfig } from './rpc_options';
 
 import { CallTimer, callTimer } from './call_timer';
 import { EncodedBatch, encodeBatch } from './encode_commands';

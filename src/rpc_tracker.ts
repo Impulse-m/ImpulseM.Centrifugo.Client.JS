@@ -1,7 +1,8 @@
 import { errorCodes } from './codes';
 import { CallTimer, callTimer, raceCall } from './call_timer';
 import { hasHeaders } from './extensions';
-import { MsgIdGenerator, RpcQueue, TrackedRpc } from './rpc_queue';
+import { MsgIdGenerator } from './msg_id';
+import { RpcQueue, TrackedRpc } from './rpc_queue';
 import { RpcOptions, RpcResult } from './types';
 
 /** The reply of a command, and next() to acknowledge it. */
