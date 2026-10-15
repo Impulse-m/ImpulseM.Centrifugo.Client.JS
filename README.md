@@ -2,13 +2,7 @@
 
 This is a fork of [centrifuge-js](https://github.com/centrifugal/centrifuge-js), published to npm as [`@impulsem/centrifuge`](https://www.npmjs.com/package/@impulsem/centrifuge). Its API matches upstream, so the API documentation below applies unless noted otherwise. Install and import instructions in this README refer to `@impulsem/centrifuge`, not to the upstream `centrifuge` package.
 
-The package has its own versioning, starting at `1.0.0`, independent of upstream `centrifuge-js` versions. Releases are listed on the [releases page](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS/releases).
-
-Related projects of this fork:
-
-* [Centrifugo server fork](https://github.com/Impulse-m/ImpulseM.Centrifugo) - the server (Docker image `ghcr.io/impulse-m/impulsem.centrifugo`)
-* [Swift client](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift) - iOS client (Swift Package Manager)
-* [Java client](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Java) - Android client
+The package has its own versioning, starting at `1.0.0`, independent of upstream `centrifuge-js` versions. Releases are listed on the GitHub releases page of the repository the package is published from.
 
 This SDK provides a client to connect to [Centrifugo](https://github.com/centrifugal/centrifugo) or any [Centrifuge-based](https://github.com/centrifugal/centrifuge) server using pure WebSocket or one of the alternative transports (HTTP-streaming, SSE/EventSource, experimental WebTransport) from web browser, ReactNative, or NodeJS environments.
 
@@ -346,6 +340,8 @@ On a connection that supports RPC options and has an `instance` (see below), eve
 The calls of a client with an `instance` are bounded by the `maxPendingRpc` option, default `32`. Each `rpc` call takes a slot when it is made, before it waits for the connection or a refresh, and gives the slot back when it settles: by its reply, its error, its timeout, its cancel, or a disconnect for good. A call beyond the bound rejects at once with error code `errorCodes.limitExceeded` (16) and is not sent. A call lost with its transport keeps its slot until it settles, so the bound also caps the retransmit burst of a reconnect. A client without an `instance` has no bound.
 
 A write error of a tracked call on an open transport is handled as a lost transport: the client reconnects, and the call is sent again on that connection with the same message id.
+
+A command the codec cannot encode, for example an rpc method that is not a string, is refused by its write: its call rejects with `errorCodes.transportWriteError` (10), the connection stays, and the other calls written with it are sent.
 
 A server error reply that carries the metadata key `x-centrifugo-retry` says that the server did not run the call, and the client sends the call again. The value `new_msg_id` means that the server refused the message id: the client re-syncs its message ids to the server time of that reply and sends the call again with a new id, at most twice. The value `later` means that the message id is still good: the call is sent again with the same id after 250 ms, then 500 ms, then 1000 ms, at most three times. All attempts stay within the call's timeout. When the attempts are used up, or the error carries no such key, the call rejects with the error as the server sent it, unchanged.
 
