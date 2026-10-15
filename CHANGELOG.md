@@ -5,19 +5,22 @@
 * Add `refresh(token?)`: sends the connection token now, with the given token or the one from `getToken`, and resolves the identity the server confirms. Calls with the same token share a promise, another token waits for the one in flight. At most 32 calls can be in progress.
 * Add the `instance` option: identifies the installation or the browser tab for the server's duplicate detection of retransmitted calls. The client never generates or stores it. A value of another form throws a configuration error when the client is created.
 * Retransmit tracked rpc calls across a lost connection, with the same message id, when the client has an `instance` and the server supports RPC options. A call is kept until it settles, and its deadline counts from the call.
-* Bound the tracked calls with the `maxPendingRpc` option (default `32`): a call beyond it rejects at once with `limitExceeded`.
+* Bound the tracked calls with the `maxPendingRpc` option (default `32`): a call beyond it rejects at once with `limitExceeded`. A call gives its place back as soon as it settles, so a call made right after an abort or a timeout is not refused.
 * Message ids follow the server time, hold their time part on a small clock correction backwards, and start at a random lane, so two clients of one instance do not share ids.
-* Add the `AbortSignal` option to `rpc`: aborting a sent call sends a cancel to the server. A sent call whose deadline passes sends the same cancel. Cancels waiting for a connection are bounded by `maxPendingRpc`, and a cancel unanswered for one call timeout is dropped.
+* Add the `AbortSignal` option to `rpc`: aborting a sent call sends a cancel to the server. A sent call whose deadline passes sends the same cancel. Cancels waiting for a connection are bounded by `maxPendingRpc`, and a cancel unanswered for one call timeout is dropped. An already aborted signal rejects with `cancelled` in every connection state: nothing was sent, so there is nothing to cancel on the server.
 * `rpc` resolves with `cached`: `true` when the server answered from the record of an earlier attempt of the same call.
 * Add error codes `16` (`limitExceeded`) and `17` (`cancelled`). Code `15` (`unsupported`) is documented. Codes 15 to 19 are reserved for client-local errors; a server never sends them.
 * Retry signal: a server error that carries the metadata key `x-centrifugo-retry` tells the client that the server did not run the call. The value `new_msg_id` (the message id was refused) sends the call again with a new id, at most twice. The value `later` sends it again with the same id after 250 ms, 500 ms and 1000 ms, at most three times. Other errors are surfaced unchanged.
 * Deviation from upstream: a timer-driven refresh refused with 109 (token expired) is reported and retried with backoff, with a fresh token from `getToken`. Upstream disconnects on it.
 * Deviation from upstream: a timer-driven refresh refused with 103 (permission denied) is reported and keeps the connection with its identity, without a retry. Upstream disconnects on it. The server ends the connection at the token expiry.
 * A timer-driven refresh whose token arrives after a `refresh()` call started or was accepted is dropped, so the connection keeps the token and identity of the last refresh that the server accepted.
-* A refresh that a connection loss ends keeps its token for the reconnect. Only a refusal by the server restores the token the server accepted before.
+* A refresh that a connection loss ends keeps its token for the reconnect. A refusal by the server, or a refresh that was never sent because the client was disconnected for good, restores the token the server accepted before.
+* A timer-driven refresh whose token is fetched while the client is disconnected sets the token of the next connect, as upstream does. The server confirms it at that connect.
 * An error thrown by an `auth` handler after a refresh was accepted is reported as other handler errors; `refresh()` still resolves with the identity.
-* A call whose connection is lost before it is written waits for the next connection, and is not marked as a retransmit when sent.
-* A cancel of a call aborted on a legacy connection is kept for the next connection that carries cancels.
+* A call whose connection is lost before it is written waits for the next connection, and is not marked as a retransmit when sent. A call that was never written and finds a connection without RPC options rejects with `cancelled`; a call that was written and finds one rejects with `connectionClosed`.
+* A call without tracking, on a connection without an instance or without RPC options, is a plain request whose deadline counts from the `rpc()` call, the wait for the connection included.
+* Acknowledgements of replies still waiting for the next request are dropped when the client disconnects for good, like the cancels.
+* A cancel of a call aborted on a legacy connection is kept for the next connection that carries cancels. A cancel whose write fails is kept for the next connection, together with the other cancels of the same write.
 
 5.0.2 and higher
 ================
