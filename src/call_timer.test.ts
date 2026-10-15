@@ -1,4 +1,4 @@
-import { addWaiter, callTimer, CallTimer } from './call_timer';
+import { addWaiter, callTimer, CallTimer, raceCall } from './call_timer';
 import { errorCodes } from './codes';
 
 describe('callTimer', () => {
@@ -95,5 +95,51 @@ describe('addWaiter', () => {
     jest.advanceTimersByTime(60000);
     expect(resolve).not.toHaveBeenCalled();
     expect(Object.keys(waiters)).toHaveLength(1);
+  });
+
+  test('a waiter whose signal is aborted already rejects at once, leaves no waiter and arms no timer', () => {
+    const waiters: Record<number, any> = {};
+    const controller: AbortController = new AbortController();
+    controller.abort();
+    const reject: jest.Mock = jest.fn();
+    addWaiter(waiters, 1, 100, controller.signal, jest.fn(), reject);
+
+    expect(reject).toHaveBeenCalledWith({ code: errorCodes.cancelled, message: 'cancelled' });
+    expect(waiters).toEqual({});
+    expect(jest.getTimerCount()).toBe(0);
+  });
+});
+
+describe('raceCall', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test('settles with the promise and clears its timer', async () => {
+    const race: Promise<number> = raceCall(Promise.resolve(7), Date.now() + 100, undefined, () => 'timeout', () => 'cancelled');
+
+    await expect(race).resolves.toBe(7);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  test('rejects with the timeout error at the deadline', async () => {
+    const race: Promise<number> = raceCall(new Promise<number>(() => {}), Date.now() + 100, undefined, () => 'timeout', () => 'cancelled');
+
+    jest.advanceTimersByTime(101);
+
+    await expect(race).rejects.toBe('timeout');
+  });
+
+  test('rejects with the cancelled error at once when the signal is aborted already, and arms no timer', async () => {
+    const controller: AbortController = new AbortController();
+    controller.abort();
+    const race: Promise<number> = raceCall(new Promise<number>(() => {}), Date.now() + 100, controller.signal, () => 'timeout', () => 'cancelled');
+
+    await expect(race).rejects.toBe('cancelled');
+    expect(jest.getTimerCount()).toBe(0);
   });
 });

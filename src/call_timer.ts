@@ -38,6 +38,45 @@ export function callTimer(due: number, onDue: () => void): CallTimer {
 }
 
 /**
+ * The one wait with a deadline and a signal, shared by the waiters and the races of the rpc calls. It calls
+ * onDue at the due time (local time in milliseconds, none when due is null), or onAbort when the signal aborts,
+ * whichever comes first, and only once. Either call removes the timer and the abort listener first. A signal
+ * that is aborted already calls onAbort at once and arms nothing. The returned timer clears the wait without a call.
+ * @internal
+ */
+export function armWait(
+  due: number | null,
+  signal: AbortSignal | undefined,
+  onDue: () => void,
+  onAbort: () => void
+): CallTimer {
+  if (signal?.aborted === true) {
+    onAbort();
+    return { clear: (): void => {} };
+  }
+  let timer: CallTimer | null = null;
+  const disarm: () => void = (): void => {
+    if (timer !== null) {
+      timer.clear();
+      timer = null;
+    }
+    signal?.removeEventListener('abort', onAbortEvent);
+  };
+  const onAbortEvent: () => void = (): void => {
+    disarm();
+    onAbort();
+  };
+  if (due !== null) {
+    timer = callTimer(due, (): void => {
+      disarm();
+      onDue();
+    });
+  }
+  signal?.addEventListener('abort', onAbortEvent, { once: true });
+  return { clear: disarm };
+}
+
+/**
  * Registers a waiter of a client under id: it settles with resolve or reject, with a timeout error after the timeout
  * in milliseconds (none when null), or with a cancelled error when the signal aborts. It leaves the waiters once it
  * settled, so its timer and its abort listener go with it.
@@ -51,21 +90,14 @@ export function addWaiter(
   resolve: (value: any) => void,
   reject: (error: any) => void
 ): void {
-  let timer: CallTimer | null = null;
+  let wait: CallTimer | null = null;
   const leave: () => void = (): void => {
-    timer?.clear();
-    signal?.removeEventListener('abort', onAbort);
+    if (wait !== null) {
+      wait.clear();
+    }
     delete waiters[id];
   };
-  const onAbort: () => void = (): void => {
-    leave();
-    reject({ code: errorCodes.cancelled, message: 'cancelled' });
-  };
-  timer = timeout === null ? null : callTimer(Date.now() + timeout, (): void => {
-    leave();
-    reject({ code: errorCodes.timeout, message: 'timeout' });
-  });
-  signal?.addEventListener('abort', onAbort, { once: true });
+  // The waiter is registered before the wait is armed: an aborted signal settles it at once, and leaves it.
   waiters[id] = {
     resolve: (value: any): void => {
       leave();
@@ -76,6 +108,18 @@ export function addWaiter(
       reject(error);
     },
   };
+  wait = armWait(
+    timeout === null ? null : Date.now() + timeout,
+    signal,
+    (): void => {
+      leave();
+      reject({ code: errorCodes.timeout, message: 'timeout' });
+    },
+    (): void => {
+      leave();
+      reject({ code: errorCodes.cancelled, message: 'cancelled' });
+    }
+  );
 }
 
 /**
@@ -91,28 +135,21 @@ export function raceCall<T>(
   cancelledError: () => any
 ): Promise<T> {
   return new Promise<T>((resolve: (value: T) => void, reject: (error: any) => void): void => {
-    let timer: CallTimer | null = null;
-    const finish: () => void = (): void => {
-      if (timer !== null) {
-        timer.clear();
-        timer = null;
+    const wait: CallTimer = armWait(
+      deadline,
+      signal,
+      (): void => {
+        reject(timeoutError());
+      },
+      (): void => {
+        reject(cancelledError());
       }
-      signal?.removeEventListener('abort', onAbort);
-    };
-    const onAbort: () => void = (): void => {
-      finish();
-      reject(cancelledError());
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
-    timer = callTimer(deadline, (): void => {
-      finish();
-      reject(timeoutError());
-    });
+    );
     promise.then((value: T): void => {
-      finish();
+      wait.clear();
       resolve(value);
     }, (error: any): void => {
-      finish();
+      wait.clear();
       reject(error);
     });
   });
