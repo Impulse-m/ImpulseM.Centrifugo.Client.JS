@@ -412,7 +412,12 @@ export class TokenExchangeFlow {
       }
       await this.options.store(rotated);
     } catch (err: any) {
-      this.client['_emitError']({ type: 'tokenStore', error: this.host.createError(errorCodes.clientRefreshToken, err?.toString() ?? '') }, (): void => {});
+      try {
+        this.client['_emitError']({ type: 'tokenStore', error: this.host.createError(errorCodes.clientRefreshToken, err?.toString() ?? '') }, (): void => {});
+      } catch (handlerErr: any) {
+        // Thrown by an error handler: reported, so the exchange still goes on with its access token.
+        this.client['_reportDispatchError'](handlerErr);
+      }
     }
   }
 

@@ -569,6 +569,31 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1']);
   });
 
+  test('an error handler that throws on tokenStore does not end the exchange: the bootstrap completes with its access token', async (): Promise<void> => {
+    serve();
+    const reported: any[] = [];
+    const c: Centrifuge = create({
+      store: (): void => {
+        throw new Error('disk full');
+      },
+    });
+    (c as any)._reportDispatchError = (err: any): void => {
+      reported.push(err);
+    };
+    c.on('error', (ctx: any): void => {
+      if (ctx.type === 'tokenStore') {
+        throw new Error('broken logger');
+      }
+    });
+    const events: string[] = record(c);
+    await connectClient(c);
+
+    expect(reported.map((err: any): string => err.message)).toEqual(['broken logger']);
+    expect(events).toContain('connected');
+    expect(c.state).toBe(State.Connected);
+    expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1']);
+  });
+
   test('tokenExchange together with getToken throws at construction', async (): Promise<void> => {
     expect(() => codecCase.createClient(server.url, {
       getToken: async (): Promise<string> => 'token',
