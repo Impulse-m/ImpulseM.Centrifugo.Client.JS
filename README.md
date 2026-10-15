@@ -659,6 +659,47 @@ While the client is disconnected, the refresh is sent on the next connect, howev
 
 Deploy the server before the clients that use the identity fields: a server that does not send `user` and `auth_class` in its refresh replies makes each refresh read as an anonymous connection.
 
+#### Token exchange over the connection
+
+With the `tokenExchange` option the application persists one long-lived refresh token, and the SDK obtains and renews the short access token (the connection token) itself, over the connection it already has. Set it instead of `getToken`: setting both throws when the client is created. The default is `null`, which leaves the client as it was.
+
+The option has three callbacks. `load` returns the refresh token the application stored, or `null` when there is none, and it is called before every exchange. `store` persists a rotated refresh token, and the SDK awaits it before it uses the access token that came with it. `exchange` gets the refresh token and a `ctx.rpc(method, data)` function that sends a plain rpc call over the connection the exchange runs on. The exchange calls its own rpc method with the refresh token, decodes the reply, and resolves `{ token, refreshToken }`, where `refreshToken` is present only when the issuer rotated it. When the issuer refuses the refresh token, `exchange` throws `Centrifuge.UnauthorizedError`, which ends the session.
+
+```javascript
+import { Centrifuge, UnauthorizedError } from '@impulsem/centrifuge';
+
+const centrifuge = new Centrifuge('wss://example.com/connection/websocket', {
+  tokenExchange: {
+    load: () => localStorage.getItem('refreshToken'),
+    store: (refreshToken) => localStorage.setItem('refreshToken', refreshToken),
+    exchange: async (ctx) => {
+      const reply = await ctx.rpc('auth.exchange', { refreshToken: ctx.refreshToken });
+      if (reply.data.refused) {
+        throw new UnauthorizedError('refresh token refused');
+      }
+      return { token: reply.data.token, refreshToken: reply.data.refreshToken };
+    },
+  },
+});
+centrifuge.connect();
+```
+
+The flow: on connect the client sends a connect command without a token. When the reply is anonymous and `load` returns a refresh token, the SDK runs `exchange` over that same connection, stores the rotated refresh token, sends the access token in a refresh command, and reports `connected` once, with the identity of the refresh reply. The renewal is driven by the expiry of the access token: the SDK runs the exchange over the connected socket at a random moment between 0.7 and 0.9 of the token's ttl, so clients that connected together spread their renewals. A renewal that fails is reported and retried with backoff, as `getToken` failures are. The access token stays in memory; the SDK never stores either token itself.
+
+Several tabs or processes of one installation can share the refresh token through the same storage without a lock. The SDK reads `load` right before each exchange and stores the rotated token right after it. A client that is refused because another one rotated the token meanwhile reads `load` again and retries once with the new value, with no event; the refresh token is terminal only when the value is the same.
+
+The events an application sees:
+
+| Event | When |
+|---|---|
+| `connected` | with an empty `user` when `load` returns nothing at connect: the connection is anonymous |
+| `error`, type `connectToken` | `load` or `exchange` failed at connect, other than `UnauthorizedError`; retried on the same connection with backoff |
+| `error`, type `refreshToken` | the renewal failed; retried with backoff |
+| `error`, type `tokenStore` | `store` threw or rejected; the exchange went on with its access token |
+| `disconnected`, code `1` (`unauthorized`) | the session is dead: `exchange` threw `UnauthorizedError` and the refresh token is still the same, or `load` returned nothing at renewal. The client does not reconnect |
+
+The server must accept a connection without a token (`client.allow_anonymous_connect_without_token: true`), must allow a refresh that changes the user (`client.rebind.enabled: true`), and the exchange method must be callable by an anonymous connection: a registry entry with `auth_class: anonymous`, whose calls never carry the connection token, so the issuer authenticates the exchange by the refresh token alone. The access token is the connection token: the same `client.token` verification applies, and its `exp` drives the renewal.
+
 ## Subscription API
 
 What we usually want from Centrifugo is to receive new messages published into channels. To do this we must create `Subscription` object.
