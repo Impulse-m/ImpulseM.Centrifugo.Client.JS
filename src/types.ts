@@ -534,7 +534,8 @@ export interface TokenExchangeResult {
 
 /** Persistence and exchange of the refresh token, see the tokenExchange option. */
 export interface TokenExchange {
-  /** The refresh token the application persisted, or null/undefined/'' when there is none. Called before every exchange. */
+  /** The refresh token the application persisted, or null/undefined/'' when there is none. Called before every exchange.
+   * Throw `UnauthorizedError` when the refresh token is gone for good: the session is dead, at bootstrap and at renewal. */
   load: () => string | null | undefined | Promise<string | null | undefined>;
   /** Persists a rotated refresh token. Awaited before the access token issued with it is used. */
   store: (refreshToken: string) => void | Promise<void>;
