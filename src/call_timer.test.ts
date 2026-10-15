@@ -1,4 +1,5 @@
-import { callTimer, CallTimer } from './call_timer';
+import { addWaiter, callTimer, CallTimer } from './call_timer';
+import { errorCodes } from './codes';
 
 describe('callTimer', () => {
   beforeEach(() => {
@@ -37,5 +38,62 @@ describe('callTimer', () => {
     timer.clear();
     jest.advanceTimersByTime(5000);
     expect(onDue).not.toHaveBeenCalled();
+  });
+});
+
+describe('addWaiter', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test('a waiter that is resolved leaves the waiters, with its timer and its abort listener', () => {
+    const waiters: Record<number, any> = {};
+    const controller: AbortController = new AbortController();
+    const resolve: jest.Mock = jest.fn();
+    addWaiter(waiters, 1, 100, controller.signal, resolve, jest.fn());
+
+    waiters[1].resolve(undefined);
+
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(waiters).toEqual({});
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  test('a waiter that times out rejects with the timeout and leaves the waiters', () => {
+    const waiters: Record<number, any> = {};
+    const reject: jest.Mock = jest.fn();
+    addWaiter(waiters, 1, 100, undefined, jest.fn(), reject);
+
+    jest.advanceTimersByTime(101);
+
+    expect(reject).toHaveBeenCalledWith({ code: errorCodes.timeout, message: 'timeout' });
+    expect(waiters).toEqual({});
+  });
+
+  test('a waiter whose signal aborts rejects with cancelled and leaves the waiters, with its timer', () => {
+    const waiters: Record<number, any> = {};
+    const controller: AbortController = new AbortController();
+    const reject: jest.Mock = jest.fn();
+    addWaiter(waiters, 1, 100, controller.signal, jest.fn(), reject);
+
+    controller.abort();
+
+    expect(reject).toHaveBeenCalledWith({ code: errorCodes.cancelled, message: 'cancelled' });
+    expect(waiters).toEqual({});
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  test('a waiter with no timeout waits until it is settled', () => {
+    const waiters: Record<number, any> = {};
+    const resolve: jest.Mock = jest.fn();
+    addWaiter(waiters, 1, null, undefined, resolve, jest.fn());
+
+    jest.advanceTimersByTime(60000);
+    expect(resolve).not.toHaveBeenCalled();
+    expect(Object.keys(waiters)).toHaveLength(1);
   });
 });

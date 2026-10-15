@@ -28,7 +28,7 @@ import {
 } from './extensions';
 import { normaliseRpcOptions, loggedConfig } from './rpc_options';
 
-import { CallTimer, callTimer } from './call_timer';
+import { addWaiter, CallTimer, callTimer } from './call_timer';
 import { CallRejectContext, CallResolveContext, RpcTracker } from './rpc_tracker';
 import { ClientHost, createClientHost } from './client_host';
 import { writeCommands } from './write_commands';
@@ -875,7 +875,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   }
 
   private _clearOutgoingRequests(dropped: any[]) {
-    // The commands dropped before their write were never written: their errbacks say so.
     const droppedIds = new Set(dropped.map((command) => command.id));
     // fire errbacks of registered outgoing calls.
     for (const id in this._callbacks) {
@@ -1614,33 +1613,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       return Promise.resolve();
     }
     return new Promise((res, rej) => {
-      const id = this._nextPromiseId();
-      let timer: CallTimer | null = null;
-      // The waiter leaves once it is settled, timed out or aborted: its timer and its abort listener go with it.
-      const leave = () => {
-        timer?.clear();
-        signal?.removeEventListener('abort', onAbort);
-        delete this._promises[id];
-      };
-      const onAbort = () => {
-        leave();
-        rej({ code: errorCodes.cancelled, message: 'cancelled' });
-      };
-      timer = timeout === null ? null : callTimer(Date.now() + timeout, () => {
-        leave();
-        rej({ code: errorCodes.timeout, message: 'timeout' });
-      });
-      signal?.addEventListener('abort', onAbort, { once: true });
-      this._promises[id] = {
-        resolve: () => {
-          leave();
-          res(undefined);
-        },
-        reject: (err: any) => {
-          leave();
-          rej(err);
-        }
-      };
+      addWaiter(this._promises, this._nextPromiseId(), timeout, signal, res, rej);
     });
   }
 
