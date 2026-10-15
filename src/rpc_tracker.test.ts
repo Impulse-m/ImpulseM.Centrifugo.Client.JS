@@ -5,7 +5,9 @@ import { RpcResult } from './types';
 // The tracker against a host that records what it writes, without a client or a socket.
 
 class StubHost implements RpcHost {
-  connected: boolean = true;
+  private up: boolean = true;
+  // The calls waiting in ready() for the connection.
+  private connectWaiters: Array<() => void> = [];
   supported: boolean = true;
   // The commands the tracker added to the connection, in order.
   commands: any[] = [];
@@ -49,8 +51,29 @@ class StubHost implements RpcHost {
     return true;
   }
 
+  // Setting the connection up releases the calls waiting in ready(), as the client does.
+  get connected(): boolean {
+    return this.up;
+  }
+
+  set connected(value: boolean) {
+    this.up = value;
+    if (value) {
+      const waiters: Array<() => void> = this.connectWaiters;
+      this.connectWaiters = [];
+      for (const release of waiters) {
+        release();
+      }
+    }
+  }
+
   ready(): Promise<void> {
-    return Promise.resolve();
+    if (this.up) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve: () => void): void => {
+      this.connectWaiters.push(resolve);
+    });
   }
 
   // The plain requests sent, answered with 'plain' at once.
@@ -95,22 +118,17 @@ describe('RpcTracker', () => {
     const host: StubHost = new StubHost();
     const tracker: RpcTracker = new RpcTracker(host, 32, 30000);
     // The connection is lost in the microtasks between the ready wait and the tracking of the call.
-    host.ready = (): Promise<void> => {
-      queueMicrotask((): void => {
-        host.connected = false;
-      });
-      return Promise.resolve();
-    };
-
     const call: Promise<RpcResult> = tracker.call('m', {}, undefined, Date.now() + 30000);
-    // Lets the pending microtasks run: the call has passed the ready wait by then.
-    await new Promise<void>((resolve: () => void): void => {
-      setImmediate(resolve);
+    queueMicrotask((): void => {
+      host.connected = false;
     });
+    // Lets the pending microtasks run: the call has passed the ready wait by then.
+    await settleMicrotasks();
     expect(host.commands).toHaveLength(0);
 
     host.connected = true;
     tracker.sendWaiting();
+    await settleMicrotasks();
     expect(host.commands).toHaveLength(1);
     expect(host.commands[0].rpc.retransmit).toBeUndefined();
     expect(host.commands[0].rpc.msg_id).toBeDefined();
@@ -126,8 +144,9 @@ describe('RpcTracker', () => {
     const call: Promise<RpcResult> = tracker.call('m', {}, undefined, Date.now() + 30000);
     await settleMicrotasks();
 
+    // The next connection has no RPC options: the call waits for it, and goes out plain.
     host.supported = false;
-    tracker.sendWaiting();
+    host.connected = true;
 
     await expect(call).resolves.toMatchObject({ data: 'plain' });
     expect(host.commands).toHaveLength(0);
@@ -144,7 +163,7 @@ describe('RpcTracker', () => {
     await settleMicrotasks();
 
     host.supported = false;
-    tracker.sendWaiting();
+    host.connected = true;
 
     await expect(call).rejects.toMatchObject({ code: errorCodes.unsupported });
     expect(host.plainCommands).toHaveLength(0);
@@ -165,14 +184,9 @@ describe('RpcTracker', () => {
     expect(host.plainCommands).toHaveLength(0);
   });
 
-  test('a terminal disconnect rejects a never-written call with cancelled and a written one with the given code', async (): Promise<void> => {
+  test('a terminal disconnect rejects a written call with the given code', async (): Promise<void> => {
     const host: StubHost = new StubHost();
     const tracker: RpcTracker = new RpcTracker(host, 32, 30000);
-    host.connected = false;
-    const unsent: Promise<RpcResult> = tracker.call('a', {}, undefined, Date.now() + 30000);
-    await settleMicrotasks();
-
-    host.connected = true;
     const sent: Promise<RpcResult> = tracker.call('b', {}, undefined, Date.now() + 30000);
     await settleMicrotasks();
     expect(host.commands).toHaveLength(1);
@@ -181,7 +195,6 @@ describe('RpcTracker', () => {
 
     tracker.rejectAll(errorCodes.connectionClosed, 'connection closed');
 
-    await expect(unsent).rejects.toMatchObject({ code: errorCodes.cancelled });
     await expect(sent).rejects.toMatchObject({ code: errorCodes.connectionClosed });
   });
 
@@ -229,6 +242,30 @@ describe('RpcTracker', () => {
     expect(host.commands[2].rpc.ack).not.toContain(refusedMsgId);
     host.reply(host.commands[2].id, 'next');
     await expect(next).resolves.toMatchObject({ data: 'next' });
+  });
+
+  test('a disconnect in the microtasks after the connection was ready makes the call wait, it is not sent plain', async (): Promise<void> => {
+    const host: StubHost = new StubHost();
+    const tracker: RpcTracker = new RpcTracker(host, 32, 30000);
+    // The connection is lost after the wait resolved, before the call resumes; the next connection has the capability.
+    const call: Promise<RpcResult> = tracker.call('m', {}, undefined, Date.now() + 30000);
+    queueMicrotask((): void => {
+      host.connected = false;
+      host.supported = false;
+    });
+    await settleMicrotasks();
+    expect(host.commands).toHaveLength(0);
+    expect(host.plainCommands).toHaveLength(0);
+
+    host.supported = true;
+    host.connected = true;
+    await settleMicrotasks();
+    expect(host.plainCommands).toHaveLength(0);
+    expect(host.commands).toHaveLength(1);
+    expect(host.commands[0].rpc.msg_id).toBeDefined();
+
+    host.reply(host.commands[0].id, 'done');
+    await expect(call).resolves.toMatchObject({ data: 'done' });
   });
 
   test('a cancel the codec refuses is not kept for the next connection', async (): Promise<void> => {

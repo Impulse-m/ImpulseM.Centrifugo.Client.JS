@@ -209,19 +209,23 @@ export class RpcTracker {
       request.release();
       throw this.host.createError(errorCodes.cancelled, 'cancelled');
     }
-    await raceCall(
-      this.host.ready(request.deadline),
-      request.deadline,
-      signal,
-      (): any => {
-        request.release();
-        return this.host.createError(errorCodes.timeout, 'timeout');
-      },
-      (): any => {
-        request.release();
-        return this.host.createError(errorCodes.cancelled, 'cancelled');
-      },
-    );
+    // Repeated while the connection is down: a disconnect in the microtasks after ready resolved must not send the
+    // call on a connection without a transport, or decide its kind on a connection that is gone.
+    do {
+      await raceCall(
+        this.host.ready(request.deadline),
+        request.deadline,
+        signal,
+        (): any => {
+          request.release();
+          return this.host.createError(errorCodes.timeout, 'timeout');
+        },
+        (): any => {
+          request.release();
+          return this.host.createError(errorCodes.cancelled, 'cancelled');
+        },
+      );
+    } while (!this.host.isConnected());
     // Checked once connected: the capability belongs to the connection the call goes out on.
     // Only a call with an instance is tracked: the server scopes the retransmit and the cancel by it.
     if (this.host.rpcOptionsSupported() && this.host.hasInstance()) {
@@ -306,7 +310,14 @@ export class RpcTracker {
       }
       this.queue.add(call);
       call.timer = callTimer(call.deadline, (): void => this.expire(call));
-      this.send(call, false);
+      try {
+        this.send(call, false);
+      } catch (e) {
+        // The write failed and an exception of a handler of the disconnect it caused escaped. The server did not
+        // receive the call, so it is not kept for a retransmit: the call settles with the exception, once.
+        this.settle(call);
+        throw e;
+      }
     });
   }
 

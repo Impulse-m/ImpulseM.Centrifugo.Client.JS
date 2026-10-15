@@ -1262,6 +1262,27 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(c.state).toBe(State.Connected);
   });
 
+  test('an app handler that throws on the connecting event of a write failure settles the call once, and nothing of it is sent again', async (): Promise<void> => {
+    const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    let armed: boolean = true;
+    c.on('connecting', (): void => {
+      if (armed) {
+        armed = false;
+        throw new Error('app handler failed');
+      }
+    });
+    const reconnected: Promise<void> = nextEvent(c, 'connected');
+    failNextWrite(c);
+
+    await expect(c.rpc('work', codecCase.encode({}))).rejects.toThrow('app handler failed');
+    await reconnected;
+    // The server gets the frames of the client in order: the reply to this call means the reconnect's writes arrived.
+    await c.rpc('echo', codecCase.encode({}));
+
+    expect(server.received.filter((cmd: any): boolean => cmd.rpc?.method === 'work')).toHaveLength(0);
+  });
+
   test('a terminal disconnect rejects a call never written with cancelled, and a call still waiting for a connection with clientDisconnected', async (): Promise<void> => {
     const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
     await connect(c);
