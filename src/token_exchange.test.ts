@@ -1,5 +1,5 @@
 import { Centrifuge, UnauthorizedError } from './centrifuge';
-import { CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, until } from './testing/codecs';
+import { CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, holdReply, until } from './testing/codecs';
 import { Options, State } from './types';
 import { TokenExchange, TokenExchangeContext, TokenExchangeResult } from './token_exchange';
 
@@ -525,6 +525,26 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     expect(stored).toBe('refresh-2');
     expect(commands('refresh')).toHaveLength(0);
     expect(events).not.toContain('connected');
+  });
+
+  test('a connection lost during the bootstrap refresh drops the unaccepted access token: the reconnect is anonymous and bootstraps', async (): Promise<void> => {
+    let refreshes: number = 0;
+    serve({
+      refresh: (cmd: any): any => {
+        refreshes++;
+        return refreshes === 1 ? holdReply : refreshReply(cmd, 900);
+      },
+    });
+    const c: Centrifuge = create();
+    const reconnected: Promise<void> = nextConnected(c);
+    c.connect();
+    await until((): boolean => commands('refresh').length === 1);
+    server.closeConnection();
+    await reconnected;
+
+    expect(commands('connect').map((cmd: any): string => cmd.connect.token ?? '')).toEqual(['', '']);
+    expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1', 'access-2']);
+    expect(c.state).toBe(State.Connected);
   });
 
   test('refresh() during the connect waits for the connection, then exchanges over it', async (): Promise<void> => {
