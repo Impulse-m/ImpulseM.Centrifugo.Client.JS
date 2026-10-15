@@ -322,6 +322,23 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     expect(commands('connect')).toHaveLength(1);
   });
 
+  test('an UnauthorizedError from load at bootstrap is terminal, as at renewal: disconnected with code 1, no retry', async (): Promise<void> => {
+    serve();
+    const c: Centrifuge = create({
+      load: (): string => {
+        throw new UnauthorizedError('refresh token deleted');
+      },
+    });
+    const events: string[] = record(c);
+    c.connect();
+    await until((): boolean => c.state === State.Disconnected);
+    await flush();
+
+    expect(events).toEqual(['disconnected:1']);
+    expect(commands('connect')).toHaveLength(1);
+    expect(commands('rpc')).toHaveLength(0);
+  });
+
   test('a rejected exchange at bootstrap reports connectToken and retries in place after the backoff', async (): Promise<void> => {
     serve();
     useFakeClock();

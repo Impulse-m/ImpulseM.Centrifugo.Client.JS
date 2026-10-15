@@ -227,6 +227,13 @@ export class TokenExchangeFlow {
     try {
       refreshToken = await this.options.load();
     } catch (err: any) {
+      if (!this.isCurrent(bootstrap)) {
+        return;
+      }
+      if (err instanceof UnauthorizedError) {
+        this.client['_failUnauthorized']();
+        return;
+      }
       this.retry(bootstrap, result, resume, 'connectToken', this.connectTokenError(err));
       return;
     }
