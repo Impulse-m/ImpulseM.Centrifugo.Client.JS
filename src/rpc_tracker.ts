@@ -68,8 +68,8 @@ export interface RpcHost {
   rpcOptionsSupported(): boolean;
   isConnected(): boolean;
   hasInstance(): boolean;
-  /** Resolves once a call can go out: connected, and no refresh in flight. Rejects when the client is disconnected for good. */
-  ready(deadline: number): Promise<void>;
+  /** Resolves once a call can go out: connected, and no refresh in flight. Rejects when the client is disconnected for good, or when the signal aborts. */
+  ready(deadline: number, signal?: AbortSignal): Promise<void>;
   /** Sends a plain rpc request on the connection. Resolves with the result of its reply, which is due at the deadline (local time in milliseconds). */
   plainCall(command: any, deadline: number): Promise<any>;
 }
@@ -223,7 +223,7 @@ export class RpcTracker {
     // call on a connection without a transport, or decide its kind on a connection that is gone.
     do {
       await raceCall(
-        this.host.ready(request.deadline),
+        this.host.ready(request.deadline, signal),
         request.deadline,
         signal,
         (): any => {

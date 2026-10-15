@@ -319,6 +319,28 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     await expect(Promise.all(calls)).resolves.toHaveLength(3);
   });
 
+  test('a call aborted while it waits for a connection leaves no waiter and no timer behind', async (): Promise<void> => {
+    const c: Centrifuge = create({ timeout: 60000 });
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      const controller: AbortController = new AbortController();
+      const call: Promise<RpcResult> = quiet(c.rpc('x', codecCase.encode({}), { signal: controller.signal }));
+      await new Promise<void>((resolve: () => void): void => {
+        setImmediate(resolve);
+      });
+      const pendingBefore: number = jest.getTimerCount();
+      expect(Object.keys((c as any)._promises)).toHaveLength(1);
+
+      controller.abort();
+
+      await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
+      expect(Object.keys((c as any)._promises)).toHaveLength(0);
+      expect(jest.getTimerCount()).toBeLessThan(pendingBefore);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a plain reply without an rpc part resolves with an empty result', async (): Promise<void> => {
     const c: Centrifuge = create({ instance: undefined });
     await connect(c);

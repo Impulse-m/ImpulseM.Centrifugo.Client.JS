@@ -1607,21 +1607,39 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     return req;
   }
 
-  // Resolves once connected; a null timeout waits until the client is disconnected for good.
-  private _methodCall(timeout: number | null = this._config.timeout): any {
+  // Resolves once connected; a null timeout waits until the client is disconnected for good. A signal that aborts
+  // the wait rejects it with cancelled.
+  private _methodCall(timeout: number | null = this._config.timeout, signal?: AbortSignal): any {
     if (this._isConnected()) {
       return Promise.resolve();
     }
     return new Promise((res, rej) => {
       const id = this._nextPromiseId();
-      const timer = timeout === null ? null : setTimeout(() => {
+      let timer: CallTimer | null = null;
+      // The waiter leaves once it is settled, timed out or aborted: its timer and its abort listener go with it.
+      const leave = () => {
+        timer?.clear();
+        signal?.removeEventListener('abort', onAbort);
         delete this._promises[id];
+      };
+      const onAbort = () => {
+        leave();
+        rej({ code: errorCodes.cancelled, message: 'cancelled' });
+      };
+      timer = timeout === null ? null : callTimer(Date.now() + timeout, () => {
+        leave();
         rej({ code: errorCodes.timeout, message: 'timeout' });
-      }, timeout);
+      });
+      signal?.addEventListener('abort', onAbort, { once: true });
       this._promises[id] = {
-        timeout: timer,
-        resolve: res,
-        reject: rej
+        resolve: () => {
+          leave();
+          res(undefined);
+        },
+        reject: (err: any) => {
+          leave();
+          rej(err);
+        }
       };
     });
   }

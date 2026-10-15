@@ -27,9 +27,9 @@ export function refreshKeepsConnection(code: number): boolean {
 /** What the refresh slot needs from its client. */
 export interface RefreshSlotHost {
   isConnected(): boolean;
-  /** Resolves once the client is connected. Rejects after the timeout in milliseconds, or when it is disconnected
-   * for good; with a null timeout it waits without a limit. */
-  waitConnected(timeout: number | null): Promise<void>;
+  /** Resolves once the client is connected. Rejects after the timeout in milliseconds, when the signal aborts, or when
+   * it is disconnected for good while the wait runs; with a null timeout it waits without a limit. */
+  waitConnected(timeout: number | null, signal?: AbortSignal): Promise<void>;
   createError(code: number, message: string): any;
   /** Sends a command on the connection. Resolves with the reply context, rejects with the rejection context. */
   sendCommand(command: any): Promise<CallResolveContext>;
@@ -231,9 +231,9 @@ export class RefreshSlot {
    * Resolves once the client is connected and no refresh is in flight, so an rpc call can go out. Rejects with
    * a timeout at the deadline (local time in milliseconds), or when the client is disconnected for good.
    */
-  async ready(deadline: number): Promise<void> {
+  async ready(deadline: number, signal?: AbortSignal): Promise<void> {
     do {
-      await this.host.waitConnected(Math.max(0, deadline - Date.now()));
+      await this.host.waitConnected(Math.max(0, deadline - Date.now()), signal);
       await this.settled();
     } while (!this.host.isConnected());
   }
