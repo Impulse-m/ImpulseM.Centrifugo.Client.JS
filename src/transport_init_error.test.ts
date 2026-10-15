@@ -121,10 +121,12 @@ describe('transport failures', () => {
       const websocket = function (this: any, url: string) {
         return url === hanging ? new stub() : new WebSocket(url);
       } as any;
+      // The connect timeout applies to the real socket of the next transport too: a short one fails that
+      // socket under load, and the client goes back to the hanging transport.
       const { c, errors } = newClient([
         { transport: 'websocket' as TransportName, endpoint: hanging },
         { transport: 'websocket' as TransportName, endpoint: server.url },
-      ], { websocket, timeout: 200 });
+      ], { websocket, timeout: 1000 });
 
       c.connect();
       await c.ready(3000);
