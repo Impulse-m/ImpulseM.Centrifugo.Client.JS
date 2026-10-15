@@ -24,7 +24,7 @@ import {
 } from './utils';
 
 import {
-  rpcOptionsFlag, hasFlag, serverErrorFields, serverTimeOffsetFrom, normaliseRpcOptions, loggedConfig, defaultMaxPendingRpc,
+  rpcOptionsFlag, hasFlag, serverErrorFields, serverTimeOffsetFrom, normaliseRpcOptions, loggedConfig,
 } from './extensions';
 
 import { CallTimer, callTimer } from './call_timer';
@@ -228,7 +228,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       throw this._createErrorObject(errorCodes.badConfiguration, configError);
     }
     const host: RpcHost & RefreshSlotHost = createClientHost(this);
-    this._rpc = new RpcTracker(host, this._config.maxPendingRpc ?? defaultMaxPendingRpc, this._config.timeout);
+    // Set to a positive integer by normaliseRpcOptions, the one place of the default.
+    this._rpc = new RpcTracker(host, this._config.maxPendingRpc as number, this._config.timeout);
     this._refreshSlot = new RefreshSlot(host);
     this._configure();
 
@@ -2085,7 +2086,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
           message: e !== undefined ? e.toString() : ''
         }
       }, () => {
-        self._refreshTimeout = setTimeout(() => self._refresh(), self._getRefreshRetryDelay());
+        self._scheduleRefresh(self._getRefreshRetryDelay());
       });
     });
   }
@@ -2096,7 +2097,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         type: 'refresh',
         error: err
       }, () => {
-        this._refreshTimeout = setTimeout(() => this._refresh(), this._getRefreshRetryDelay());
+        this._scheduleRefresh(this._getRefreshRetryDelay());
       });
     } else if (refreshKeepsConnection(err.code)) {
       this._emitError({ type: 'refresh', error: err }, () => {});
@@ -2268,11 +2269,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       return;
     }
 
-    if (this._refreshTimeout) {
-      clearTimeout(this._refreshTimeout);
-    }
+    this._clearRefreshTimeout();
     if (result.expires) {
-      this._refreshTimeout = setTimeout(() => this._refresh(), ttlMilliseconds(result.ttl));
+      this._scheduleRefresh(ttlMilliseconds(result.ttl));
     }
 
     this._session = result.session;
@@ -2371,6 +2370,12 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       clearTimeout(this._refreshTimeout);
       this._refreshTimeout = null;
     }
+  }
+
+  // Arms the refresh timer in place of the one armed before: a timer that fired, or one a newer token superseded.
+  private _scheduleRefresh(delay: number) {
+    this._clearRefreshTimeout();
+    this._refreshTimeout = setTimeout(() => this._refresh(), delay);
   }
 
   private _clearReconnectTimeout() {

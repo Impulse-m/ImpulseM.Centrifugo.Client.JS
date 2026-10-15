@@ -36,17 +36,10 @@ export function createClientHost(client: Centrifuge): RpcHost & RefreshSlotHost 
     },
     debug: (message: string): void => client['_debug'](message),
     armRefreshRetry: (): void => {
-      // The timer field may hold a timer that fired already: it is replaced, not kept.
-      if (client['_refreshTimeout']) {
-        clearTimeout(client['_refreshTimeout']);
-      }
-      client['_refreshTimeout'] = setTimeout((): void => client['_refresh'](), client['_getRefreshRetryDelay']());
+      client['_scheduleRefresh'](client['_getRefreshRetryDelay']());
     },
     applyReply: (result: any): void => {
-      if (client['_refreshTimeout']) {
-        clearTimeout(client['_refreshTimeout']);
-        client['_refreshTimeout'] = null;
-      }
+      client['_clearRefreshTimeout']();
       if (result.expires) {
         // The client id of the connection only changes if the reply carries one — and
         // Centrifugo never sets that field of a refresh reply. Taking an absent one
@@ -55,7 +48,7 @@ export function createClientHost(client: Centrifuge): RpcHost & RefreshSlotHost 
         if (result.client) {
           client['_client'] = result.client;
         }
-        client['_refreshTimeout'] = setTimeout((): void => client['_refresh'](), ttlMilliseconds(result.ttl));
+        client['_scheduleRefresh'](ttlMilliseconds(result.ttl));
       }
       client['_identity'].applyRefresh(result);
     },
