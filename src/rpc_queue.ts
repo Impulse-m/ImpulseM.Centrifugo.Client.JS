@@ -1,4 +1,5 @@
 import { CallTimer } from './call_timer';
+import type { CallRequest } from './rpc_tracker';
 import { RpcResult } from './types';
 
 /** Bits of the sequence part of a message id. */
@@ -29,6 +30,9 @@ export interface TrackedRpc {
   headers: Record<string, string> | undefined;
   // Local time in milliseconds after which the call rejects with a timeout, across all attempts.
   deadline: number;
+  // The call as the application made it: sent as a plain request when it was never written on a connection
+  // that carries the capability.
+  request: CallRequest;
   commandId: number;
   // Set once the call went out on a connection, for the first time or as a retransmit.
   sent: boolean;

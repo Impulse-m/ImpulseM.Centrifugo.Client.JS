@@ -60,7 +60,7 @@ export interface RpcHost {
 
 
 // A call of the application as the tracker runs it. Release gives back the slot of maxPendingRpc the call holds.
-interface CallRequest {
+export interface CallRequest {
   method: string;
   data: any;
   opts: RpcOptions | undefined;
@@ -130,18 +130,21 @@ export class RpcTracker {
   /**
    * Acts on a connection that confirmed the capability: sends the cancels and the calls waiting
    * for a connection, in message id order, each with its original deadline. Without the capability
-   * the waiting calls are rejected: a call that was written on a lost connection may have run, so it
-   * is rejected with connectionClosed and not sent again; a call never written is cancelled.
+   * the waiting calls go out as plain requests when they were never written, and are rejected when
+   * they were: a call that was written on a lost connection may have run, so it is rejected with
+   * connectionClosed and not sent again.
    */
   sendWaiting(): void {
     if (!this.host.rpcOptionsSupported()) {
       // The cancels wait for a connection that carries them.
       for (const call of this.queue.waiting()) {
-        this.settle(call);
         if (call.sent) {
+          this.settle(call);
           call.reject(this.host.createError(errorCodes.connectionClosed, 'connection closed'));
+        } else if (call.deadline <= Date.now()) {
+          this.expire(call);
         } else {
-          call.reject(this.host.createError(errorCodes.cancelled, 'cancelled'));
+          this.sendPlain(call);
         }
       }
       return;
@@ -167,7 +170,11 @@ export class RpcTracker {
     return commands.some((command: any): boolean => command.rpc?.msg_id !== undefined || command.rpc?.cancel !== undefined);
   }
 
-  /** Rejects all tracked calls, e.g. on a disconnect that will not be followed by a reconnect. */
+  /**
+   * Rejects all tracked calls, e.g. on a disconnect that will not be followed by a reconnect. A call that
+   * was written rejects with the code given; a call never written rejects with cancelled, whatever the
+   * connection state: nothing reached the server.
+   */
   rejectAll(code: number, message: string): void {
     this.cancels = [];
     this.queue.clearAcks();
@@ -177,7 +184,11 @@ export class RpcTracker {
     this.forgets.clear();
     for (const call of this.queue.clear()) {
       this.settle(call);
-      call.reject(this.host.createError(code, message));
+      if (call.sent) {
+        call.reject(this.host.createError(code, message));
+      } else {
+        call.reject(this.host.createError(errorCodes.cancelled, 'cancelled'));
+      }
     }
   }
 
@@ -185,7 +196,6 @@ export class RpcTracker {
   // The attempt of a call: see call. The slot is released by the settle of a tracked call, by the error
   // callbacks of the waits below, and by call once the attempt settled.
   private async attempt(request: CallRequest): Promise<RpcResult> {
-    const headers: Record<string, string> | undefined = request.opts?.headers;
     const signal: AbortSignal | undefined = request.opts?.signal;
     if (signal?.aborted) {
       // Nothing was sent, so there is nothing to tell the server: cancelled, whatever the connection.
@@ -210,6 +220,15 @@ export class RpcTracker {
     if (this.host.rpcOptionsSupported() && this.host.hasInstance()) {
       return this.track(request);
     }
+    return this.plain(request);
+  }
+
+
+  // A plain request: no message id, no ack, not kept on a lost transport. A connection without the
+  // capability cannot carry the headers or the cancel of a signal, so a call with either is refused.
+  private async plain(request: CallRequest): Promise<RpcResult> {
+    const headers: Record<string, string> | undefined = request.opts?.headers;
+    const signal: AbortSignal | undefined = request.opts?.signal;
     if (!this.host.rpcOptionsSupported() && hasHeaders(headers)) {
       throw this.host.createError(errorCodes.unsupported, 'rpc headers are not supported by the server');
     }
@@ -233,6 +252,14 @@ export class RpcTracker {
   }
 
 
+  // Sends a call that was never written as a plain request, on a connection without the capability. Nothing of
+  // it reached the server, so sending it again is not a retransmit. Its own signal and deadline still apply.
+  private sendPlain(call: TrackedRpc): void {
+    this.unlink(call);
+    this.plain(call.request).then(call.resolve, call.reject);
+  }
+
+
   /**
    * Tracks a call: it is sent on the current connection, or on the next one if it is lost. The call
    * rejects with a timeout at its deadline, counted from the moment of the rpc() call.
@@ -251,6 +278,7 @@ export class RpcTracker {
         data: request.data,
         headers: request.opts?.headers,
         deadline: request.deadline,
+        request: request,
         commandId: 0,
         sent: false,
         timer: null,
@@ -440,6 +468,10 @@ export class RpcTracker {
       return true;
     }
     if (signal === rpcRetryLater && call.laterResends < maxLaterResends) {
+      // Past the deadline the error is surfaced: no attempt would run before the call times out.
+      if (call.deadline <= Date.now()) {
+        return false;
+      }
       const delay: number = laterResendBase * 2 ** call.laterResends;
       call.laterResends++;
       // Waits as a waiting call: a connection lost meanwhile sends it with the reconnect.
@@ -538,6 +570,14 @@ export class RpcTracker {
   // Settles the call: no timer, no abort listener, not tracked anymore, and its slot of maxPendingRpc is given back
   // before the caller sees the outcome.
   private settle(call: TrackedRpc): void {
+    this.unlink(call);
+    call.release();
+  }
+
+
+  // Takes a call off the tracker, without giving back its slot: see settle. A call that goes on as a plain
+  // request keeps its slot until that request settles.
+  private unlink(call: TrackedRpc): void {
     call.settled = true;
     if (call.timer !== null) {
       call.timer.clear();
@@ -548,7 +588,6 @@ export class RpcTracker {
       call.resend = null;
     }
     call.detach();
-    call.release();
     this.queue.remove(call);
   }
 }

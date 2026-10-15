@@ -1,3 +1,4 @@
+import { errorCodes } from './codes';
 import { RpcCallbacks, RpcHost, RpcTracker } from './rpc_tracker';
 import { CallResolveContext } from './centrifuge';
 import { RpcResult } from './types';
@@ -53,8 +54,12 @@ class StubHost implements RpcHost {
     return Promise.resolve();
   }
 
-  plainCall(): Promise<any> {
-    return Promise.reject(new Error('not used'));
+  // The plain requests sent, answered with 'plain' at once.
+  plainCommands: any[] = [];
+
+  plainCall(command: any): Promise<any> {
+    this.plainCommands.push(command);
+    return Promise.resolve({ data: 'plain' });
   }
 
   // Answers the command with the given id, as the server does.
@@ -62,6 +67,23 @@ class StubHost implements RpcHost {
     const ctx: CallResolveContext = { reply: { rpc: { data: data } } };
     this.callbacks.get(id)?.callback(ctx);
   }
+
+  // Answers the command with the given id with an error, as the server does: the reply carries next.
+  replyError(id: number, error: any): void {
+    this.callbacks.get(id)?.errback({ error: error, next: (): void => {} });
+  }
+
+  // The connection ends before the command gets its reply: the command has no next.
+  lose(id: number): void {
+    this.callbacks.get(id)?.errback({ error: undefined });
+  }
+}
+
+// Lets the pending microtasks run, so a call has passed its wait for the connection.
+function settleMicrotasks(): Promise<void> {
+  return new Promise<void>((resolve: () => void): void => {
+    setImmediate(resolve);
+  });
 }
 
 describe('RpcTracker', () => {
@@ -91,5 +113,91 @@ describe('RpcTracker', () => {
 
     host.reply(host.commands[0].id, 'done');
     await expect(call).resolves.toMatchObject({ data: 'done' });
+  });
+
+  test('a call never written goes out as a plain request when the next connection has no RPC options', async (): Promise<void> => {
+    const host: StubHost = new StubHost();
+    const tracker: RpcTracker = new RpcTracker(host, 32, 30000);
+    host.connected = false;
+    const call: Promise<RpcResult> = tracker.call('m', {}, undefined, Date.now() + 30000);
+    await settleMicrotasks();
+
+    host.supported = false;
+    tracker.sendWaiting();
+
+    await expect(call).resolves.toMatchObject({ data: 'plain' });
+    expect(host.commands).toHaveLength(0);
+    expect(host.plainCommands).toHaveLength(1);
+    expect(host.plainCommands[0].rpc.msg_id).toBeUndefined();
+  });
+
+  test('a never-written call with a signal is refused as unsupported on a connection without RPC options', async (): Promise<void> => {
+    const host: StubHost = new StubHost();
+    const tracker: RpcTracker = new RpcTracker(host, 32, 30000);
+    host.connected = false;
+    const controller: AbortController = new AbortController();
+    const call: Promise<RpcResult> = tracker.call('m', {}, { signal: controller.signal }, Date.now() + 30000);
+    await settleMicrotasks();
+
+    host.supported = false;
+    tracker.sendWaiting();
+
+    await expect(call).rejects.toMatchObject({ code: errorCodes.unsupported });
+    expect(host.plainCommands).toHaveLength(0);
+    expect(host.commands).toHaveLength(0);
+  });
+
+  test('a call written and lost is rejected with connectionClosed on a connection without RPC options', async (): Promise<void> => {
+    const host: StubHost = new StubHost();
+    const tracker: RpcTracker = new RpcTracker(host, 32, 30000);
+    const call: Promise<RpcResult> = tracker.call('m', {}, undefined, Date.now() + 30000);
+    await settleMicrotasks();
+    host.lose(host.commands[0].id);
+
+    host.supported = false;
+    tracker.sendWaiting();
+
+    await expect(call).rejects.toMatchObject({ code: errorCodes.connectionClosed });
+    expect(host.plainCommands).toHaveLength(0);
+  });
+
+  test('a terminal disconnect rejects a never-written call with cancelled and a written one with the given code', async (): Promise<void> => {
+    const host: StubHost = new StubHost();
+    const tracker: RpcTracker = new RpcTracker(host, 32, 30000);
+    host.connected = false;
+    const unsent: Promise<RpcResult> = tracker.call('a', {}, undefined, Date.now() + 30000);
+    await settleMicrotasks();
+
+    host.connected = true;
+    const sent: Promise<RpcResult> = tracker.call('b', {}, undefined, Date.now() + 30000);
+    await settleMicrotasks();
+    expect(host.commands).toHaveLength(1);
+    host.lose(host.commands[0].id);
+    host.connected = false;
+
+    tracker.rejectAll(errorCodes.connectionClosed, 'connection closed');
+
+    await expect(unsent).rejects.toMatchObject({ code: errorCodes.cancelled });
+    await expect(sent).rejects.toMatchObject({ code: errorCodes.connectionClosed });
+  });
+
+  test('a call whose deadline passed when its later attempt is due is surfaced at once, with no cancel', async (): Promise<void> => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] });
+    try {
+      const host: StubHost = new StubHost();
+      const tracker: RpcTracker = new RpcTracker(host, 32, 30000);
+      const call: Promise<RpcResult> = tracker.call('m', {}, undefined, Date.now() + 250);
+      await settleMicrotasks();
+
+      // The reply arrives after the deadline, before its timer ran: the call is not run again.
+      jest.setSystemTime(Date.now() + 300);
+      host.replyError(host.commands[0].id, { code: 100, message: 'dedup_unavailable', temporary: true, metadata: { 'x-centrifugo-retry': 'later' } });
+
+      await expect(call).rejects.toMatchObject({ code: 100 });
+      expect(host.commands).toHaveLength(1);
+      expect(host.commands.some((command: any): boolean => command.rpc.cancel !== undefined)).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

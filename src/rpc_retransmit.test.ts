@@ -1189,9 +1189,12 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(cancel.rpc.cancel).toBe(sent.rpc.msg_id);
   });
 
-  test('a call that was never written is cancelled when the next connection is legacy', async (): Promise<void> => {
+  test('a call that was never written goes out as a plain request when the next connection is legacy', async (): Promise<void> => {
     const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
     await connect(c);
+    server.onCommand = (cmd: any): any => (isCall(cmd)
+      ? { id: cmd.id, rpc: { data: codecCase.encode({ plain: true }) } }
+      : undefined);
     const track: (request: any) => Promise<RpcResult> = (c as any)._rpc.track.bind((c as any)._rpc);
     (c as any)._rpc.track = (request: any): Promise<RpcResult> => {
       // The connection is lost before the call is written, and the next connection has no RPC options.
@@ -1200,8 +1203,33 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       return track(request);
     };
 
-    // Nothing reached the server, so the call is cancelled, not reported as connectionClosed.
-    await expect(c.rpc('x', codecCase.encode({}))).rejects.toMatchObject({ code: errorCodes.cancelled });
+    // Nothing reached the server, so the call goes out as a plain request, without a message id.
+    const result: RpcResult = await c.rpc('x', codecCase.encode({}));
+    expect(codecCase.decode(result.data)).toEqual({ plain: true });
+    expect(callCommands()).toHaveLength(1);
+    expect(callCommands()[0].rpc.msg_id).toBeUndefined();
+  });
+
+  test('a terminal disconnect rejects a call never written with cancelled, and a call still waiting for a connection with clientDisconnected', async (): Promise<void> => {
+    const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    const track: (request: any) => Promise<RpcResult> = (c as any)._rpc.track.bind((c as any)._rpc);
+    let tracked: number = 0;
+    (c as any)._rpc.track = (request: any): Promise<RpcResult> => {
+      // The connection is lost before the call is written: the call is tracked and waits for a connection.
+      tracked++;
+      (c as any)._disconnect(connectingCodes.transportClosed, 'transport closed', true);
+      return track(request);
+    };
+    const unsent: Promise<RpcResult> = quiet(c.rpc('x', codecCase.encode({})));
+    await until((): boolean => tracked === 1);
+    // The second call waits in ready(), for a connection that does not come.
+    const waiting: Promise<RpcResult> = quiet(c.rpc('y', codecCase.encode({})));
+
+    c.disconnect();
+
+    await expect(unsent).rejects.toMatchObject({ code: errorCodes.cancelled });
+    await expect(waiting).rejects.toMatchObject({ code: errorCodes.clientDisconnected });
     expect(callCommands()).toHaveLength(0);
   });
 
