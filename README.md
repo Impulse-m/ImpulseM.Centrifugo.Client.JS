@@ -812,10 +812,6 @@ When the server sets a publish debounce interval for the channel (Centrifugo opt
 
 Debouncing is meant for fire-and-forget data such as cursor positions. Use it only when intermediate values may be dropped: a publish that is replaced inside the window is never delivered.
 
-#### Channel compaction
-
-When the server allows channel compaction (`allow_channel_compaction`), the SDK negotiates a numeric channel id on subscribe automatically, and the server then sends the id instead of the channel name in publication, join and leave pushes. Nothing needs to be configured on the client. Server-side subscriptions (for example those from the connection token) are not compacted.
-
 #### unsubscribe method of subscription
 
 You can call `unsubscribe` method to unsubscribe from a channel:
@@ -956,13 +952,17 @@ Max delay between resubscribe attempts in milliseconds. Default is `20000`.
 
 Delta format to be used for differential updates. Currently only `'fossil'` is supported. Cannot be used together with `tagsFilter`.
 
-Delta also works without positioning (no `since`, no recovery) when the server keeps the latest publication of the channel (`keep_latest_publication`): the first publication after subscribe is full, and the following ones are deltas against it.
+Delta also works without positioning (no `since`, no recovery) when the server keeps the latest publication of the channel (`keep_latest_publication`): the first publication after subscribe is full; later publications are deltas when the publisher sets `delta` on publish (or the namespace has `delta_publish`). The base is kept per node, so this is at most once; map subscriptions are not covered.
 
 ```javascript
 const sub = centrifuge.newSubscription("news", {
     delta: 'fossil'
 });
 ```
+
+#### Channel compaction
+
+When the server allows channel compaction (`allow_channel_compaction`), the SDK negotiates a numeric channel id on subscribe automatically, and the server then sends the id instead of the channel name in publication, join and leave pushes. Nothing needs to be configured on the client. Server-side subscriptions (for example those from the connection token) are not compacted.
 
 #### tagsFilter
 
