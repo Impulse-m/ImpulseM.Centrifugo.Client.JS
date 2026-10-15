@@ -24,6 +24,7 @@
 * Acknowledgements of replies still waiting for the next request are dropped when the client disconnects for good. The cancels of sent calls are kept across that disconnect, so the next `connect()` sends them, as the server may have run those calls.
 * A cancel of a call aborted on a legacy connection is kept for the next connection that carries cancels. A cancel whose write fails is kept for the next connection, together with the other cancels of the same write.
 * A command that the codec refuses is never acknowledged as received: its call rejects, and the acknowledgements the refused command carried go with the next command.
+* Default behaviour change from upstream: an rpc call waits for a refresh command in flight before it goes out, also on a client without an `instance`. Upstream sends it at once. The wait is bounded by the deadline of the call.
 * A call made in the gap between the connection being ready and its tracking waits for the next connection when the connection drops there. A call whose write fails and whose app handler throws during the reconnect settles once with that exception, and is not sent again.
 
 5.0.2 and higher
