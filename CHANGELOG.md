@@ -1,4 +1,4 @@
-5.8.0
+1.2.0
 =====
 
 * Add the `auth` event: emitted on connect, and on a refresh reply that changes the user or the auth class. The connected context carries `user` and `authClass`.
@@ -23,6 +23,8 @@
 * A call without tracking, on a connection without an instance or without RPC options, is a plain request whose deadline counts from the `rpc()` call, the wait for the connection included.
 * Acknowledgements of replies still waiting for the next request are dropped when the client disconnects for good, like the cancels.
 * A cancel of a call aborted on a legacy connection is kept for the next connection that carries cancels. A cancel whose write fails is kept for the next connection, together with the other cancels of the same write.
+* A command that the codec refuses is never acknowledged as received: its call rejects, and the acknowledgements the refused command carried go with the next command.
+* A call made in the gap between the connection being ready and its tracking waits for the next connection when the connection drops there. A call whose write fails and whose app handler throws during the reconnect settles once with that exception, and is not sent again.
 
 5.0.2 and higher
 ================
