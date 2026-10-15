@@ -220,6 +220,21 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
+  test('a state invalidated disconnect drops the access token: the reconnect is anonymous and bootstraps again', async (): Promise<void> => {
+    serve();
+    const c: Centrifuge = create();
+    await connectClient(c);
+
+    const reconnected: Promise<void> = nextConnected(c);
+    server.disconnect(3014, 'state invalidated');
+    await reconnected;
+
+    expect(commands('connect').map((cmd: any): string => cmd.connect.token ?? '')).toEqual(['', '']);
+    expect(commands('rpc')).toHaveLength(2);
+    expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1', 'access-2']);
+    expect(c.state).toBe(State.Connected);
+  });
+
   test('a token refused at connect with 109 reconnects anonymously and bootstraps, without a configuration error', async (): Promise<void> => {
     serve({
       connect: (cmd: any): any => (cmd.connect.token ? { id: cmd.id, error: { code: 109, message: 'token expired' } } : undefined),
