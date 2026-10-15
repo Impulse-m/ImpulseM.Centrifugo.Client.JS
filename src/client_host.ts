@@ -8,6 +8,12 @@ import { ttlMilliseconds } from './utils';
  * The host of the rpc tracker and of the refresh slot: the state and the commands of a client, as they use
  * them. The members of the client read here are its private ones, reached by name: the client keeps them out
  * of its API, and this is the one place that uses them for the rpc and refresh machinery.
+ *
+ * The private members reached here (a rename of any of them in centrifuge.ts must change this file too):
+ * _isConnected, _createErrorObject, _config, _refreshSlot, _callPromise, _nextCommandId, _addCommand,
+ * _callbacks, _rpcOptionsSupported, _methodCall, _call, _getToken, _token, _debug, _getRefreshRetryDelay,
+ * _scheduleRefresh, _clearRefreshTimeout, _client, _identity, _dispatchFailed.
+ * Accepted by the wave's contract (section 10); the bracket reads are not counted as uses by noUnusedLocals.
  */
 export function createClientHost(client: Centrifuge): RpcHost & RefreshSlotHost {
   return {
