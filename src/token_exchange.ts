@@ -4,7 +4,7 @@ import { errorCodes } from './codes';
 import type { ClientHost } from './client_host';
 import type { CallRejectContext, CallResolveContext } from './rpc_tracker';
 import { refreshRetries } from './refresh_slot';
-import type { RpcResult, TokenExchange, TokenExchangeResult } from './types';
+import type { Options, RpcResult, TokenExchange, TokenExchangeResult } from './types';
 import { backoff, ttlMilliseconds } from './utils';
 import { writeCommands } from './write_commands';
 
@@ -435,4 +435,19 @@ export class TokenExchangeFlow {
         throw rejectCtx.error;
       });
   }
+}
+
+
+/**
+ * The flow of the tokenExchange option of a client, or null without the option. The option is exclusive with getToken:
+ * setting both throws.
+ */
+export function createTokenExchangeFlow(client: Centrifuge, host: ClientHost, options: Options): TokenExchangeFlow | null {
+  if (!options.tokenExchange) {
+    return null;
+  }
+  if (options.getToken) {
+    throw new Error('tokenExchange and getToken are exclusive');
+  }
+  return new TokenExchangeFlow(client, host, options.tokenExchange);
 }
