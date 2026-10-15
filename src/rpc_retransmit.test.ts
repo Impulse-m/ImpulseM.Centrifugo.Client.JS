@@ -319,6 +319,17 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     await expect(Promise.all(calls)).resolves.toHaveLength(3);
   });
 
+  test('a plain reply without an rpc part resolves with an empty result', async (): Promise<void> => {
+    const c: Centrifuge = create({ instance: undefined });
+    await connect(c);
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id } : undefined);
+
+    const result: RpcResult = await c.rpc('echo', codecCase.encode({}));
+
+    expect(result.data).toBeUndefined();
+    expect(result.cached).toBe(false);
+  });
+
   test('without an instance a call is a plain request and is not sent again on a lost connection', async (): Promise<void> => {
     const c: Centrifuge = create({ instance: undefined });
     await connect(c);
@@ -400,7 +411,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(c.state).not.toBe(State.Connected);
   });
 
-  test('a plain call is bounded by its deadline from the rpc() call, the wait for the connection included', async (): Promise<void> => {
+  test('a plain reply has a call timeout from the connection, as upstream: the wait for the connection does not shorten it', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25 };
     const c: Centrifuge = create({ timeout: 400 });
     holdCalls();
@@ -411,14 +422,15 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       call.catch((error: any): void => {
         outcome = error;
       });
-      // The connection is made 200 ms after the call: the reply has the 200 ms left of its deadline.
+      // The connection is made 200 ms after the call. The reply then has a full call timeout of 400 ms from the
+      // connection, although the call itself has 200 ms left of its deadline.
       jest.advanceTimersByTime(200);
       const connected: Promise<void> = nextEvent(c, 'connected');
       c.connect();
       await connected;
       await server.waitFor(isCall);
 
-      jest.advanceTimersByTime(199);
+      jest.advanceTimersByTime(399);
       await new Promise<void>((resolve: () => void): void => {
         setImmediate(resolve);
       });

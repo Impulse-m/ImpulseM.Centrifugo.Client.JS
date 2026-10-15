@@ -28,8 +28,10 @@ const laterResendBase: number = 250;
 type RetrySignal = 'new_msg_id' | 'later' | null;
 
 // The result of an rpc reply: cached is true when the server answered from the record of an earlier attempt.
+// A reply without an rpc part gives an empty result.
 function rpcResult(rpc: any): RpcResult {
-  return { data: rpc.data, cached: rpc.cached === true };
+  const reply: any = rpc || {};
+  return { data: reply.data, cached: reply.cached === true };
 }
 
 /**
@@ -262,7 +264,9 @@ export class RpcTracker {
     if (this.host.rpcOptionsSupported() && hasHeaders(headers)) {
       cmd.rpc.headers = headers;
     }
-    const result: any = await this.host.plainCall(cmd, request.deadline);
+    // The reply has a call timeout from the moment it is sent, as an upstream call has: the wait for the
+    // connection, bounded by the deadline of the call, does not shorten it.
+    const result: any = await this.host.plainCall(cmd, Date.now() + this.callTimeout);
     return rpcResult(result);
   }
 
@@ -458,7 +462,7 @@ export class RpcTracker {
   // before (aborted or expired).
   private replied(call: TrackedRpc, ctx: CallResolveContext): void {
     this.answered(call, ctx, (): void => {
-      call.resolve(rpcResult(ctx.reply.rpc || {}));
+      call.resolve(rpcResult(ctx.reply.rpc));
     });
   }
 
