@@ -4,12 +4,18 @@ import type { RefreshSlotHost } from './refresh_slot';
 import type { CallResolveContext, RpcCallbacks, RpcHost } from './rpc_tracker';
 import type { ConnectionIdentity } from './identity';
 import type { WriteHost } from './write_commands';
+import type { TokenExchangeFlow } from './token_exchange';
 import { ttlMilliseconds } from './utils';
 
 /** The host of the rpc tracker, the refresh slot and the write of commands: see createClientHost. */
 export interface ClientHost extends RpcHost, RefreshSlotHost, WriteHost {
   /** Arms the refresh timer in place of the one armed before: refresh runs after the delay in milliseconds. */
   scheduleRefresh(delay: number, refresh: () => void): void;
+  /**
+   * Arms the refresh timer for the expiry of the connection token, from the ttl of the reply that set it: with the
+   * tokenExchange option the delay is a random moment before the expiry, and the expiry of the token is recorded.
+   */
+  scheduleExpiry(ttl: number, refresh: () => void): void;
 }
 
 /**
@@ -21,7 +27,7 @@ export interface ClientHost extends RpcHost, RefreshSlotHost, WriteHost {
  * _isConnected, _createErrorObject, _config, _refreshSlot, _callPromise, _nextCommandId, _addCommand,
  * _callbacks, _rpcOptionsSupported, _methodCall, _call, _getToken, _token, _debug, _getRefreshRetryDelay,
  * _clearRefreshTimeout, _refreshTimeout, _refresh, _client, _identity, _dispatchFailed, _rpc, _codec, _transport,
- * _disconnect.
+ * _disconnect, _tokenExchange.
  * Accepted by the wave's contract (section 10); the bracket reads are not counted as uses by noUnusedLocals.
  */
 export function createClientHost(client: Centrifuge): ClientHost {
@@ -29,6 +35,11 @@ export function createClientHost(client: Centrifuge): ClientHost {
     // The timer field may hold a timer that fired already, or one a newer token superseded: it is replaced.
     client['_clearRefreshTimeout']();
     client['_refreshTimeout'] = setTimeout(refresh, delay);
+  };
+  const scheduleExpiry = (ttl: number, refresh: () => void): void => {
+    const flow: TokenExchangeFlow | null = client['_tokenExchange'];
+    scheduleRefresh(flow === null ? ttlMilliseconds(ttl) : flow.renewalDelay(ttl), refresh);
+    flow?.observe(client['_token'], ttl);
   };
   return {
     isConnected: (): boolean => client['_isConnected'](),
@@ -48,7 +59,7 @@ export function createClientHost(client: Centrifuge): ClientHost {
     rpcOptionsSupported: (): boolean => client['_rpcOptionsSupported'],
     waitConnected: (timeout: number | null, signal?: AbortSignal): Promise<void> => client['_methodCall'](timeout, signal),
     sendCommand: (command: any): Promise<CallResolveContext> => client['_call'](command, false),
-    hasGetToken: (): boolean => !!client['_config'].getToken,
+    hasGetToken: (): boolean => !!client['_config'].getToken || client['_tokenExchange'] !== null,
     getToken: (): Promise<string> => client['_getToken'](),
     token: (): string => client['_token'],
     setToken: (token: string): void => {
@@ -56,6 +67,7 @@ export function createClientHost(client: Centrifuge): ClientHost {
     },
     debug: (message: string, ...args: any[]): void => client['_debug'](message, ...args),
     scheduleRefresh: scheduleRefresh,
+    scheduleExpiry: scheduleExpiry,
     armRefreshRetry: (): void => {
       scheduleRefresh(client['_getRefreshRetryDelay'](), (): void => client['_refresh']());
     },
@@ -69,7 +81,7 @@ export function createClientHost(client: Centrifuge): ClientHost {
         if (result.client) {
           client['_client'] = result.client;
         }
-        scheduleRefresh(ttlMilliseconds(result.ttl), (): void => client['_refresh']());
+        scheduleExpiry(result.ttl, (): void => client['_refresh']());
       }
       client['_identity'].applyRefresh(result);
     },

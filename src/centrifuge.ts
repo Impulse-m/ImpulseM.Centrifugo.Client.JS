@@ -19,7 +19,7 @@ import { JsonCodec } from './json';
 
 import {
   isFunction, log, startsWith, errorExists,
-  backoff, ttlMilliseconds, localStorageItem,
+  backoff, localStorageItem,
   hasOffset, toOffset,
 } from './utils';
 
@@ -34,6 +34,7 @@ import { ClientHost, createClientHost } from './client_host';
 import { writeCommands } from './write_commands';
 import { RefreshSlot, refreshKeepsConnection, refreshRetries } from './refresh_slot';
 import { ConnectionIdentity } from './identity';
+import { TokenExchangeFlow } from './token_exchange';
 
 import {
   State, Options, SubscriptionState, ClientEvents, AuthContext,
@@ -168,6 +169,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _refreshSlot: RefreshSlot;
   private _rpc: RpcTracker;
   private _host: ClientHost;
+  private _tokenExchange: TokenExchangeFlow | null = null;
 
   private _debugEnabled: boolean;
   private _config: Options;
@@ -716,6 +718,10 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
     this._codec = new JsonCodec();
     this._formatOverride();
+    if (this._config.tokenExchange && this._config.getToken) {
+      throw new Error('tokenExchange and getToken are exclusive');
+    }
+    this._tokenExchange = this._config.tokenExchange ? new TokenExchangeFlow(this, this._host, this._config.tokenExchange) : null;
 
     if (this._config.debug === true || localStorageItem('centrifuge.debug')) {
       this._debugEnabled = true;
@@ -1336,6 +1342,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     // it. Not the transport id: _initializeTransport changes it too, and its
     // exceptions must still reach the error handlers below.
     const disconnects = this._disconnects;
+    this._tokenExchange?.beforeConnect();
     const emptyToken = this._token === '';
     const needTokenRefresh = this._refreshRequired || (emptyToken && this._config.getToken !== null);
     // Whether the token or data promise resolved: an error caught after that was thrown
@@ -1882,6 +1889,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       this._deviceWentOffline = false;
     }
 
+    this._tokenExchange?.reset();
     const ctx = {
       code: code,
       reason: reason
@@ -1927,6 +1935,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   private _getToken(): Promise<string> {
     this._debug('get connection token');
+    if (this._tokenExchange) {
+      return this._tokenExchange.fetchToken();
+    }
     if (!this._config.getToken) {
       try {
         this.emit('error', {
@@ -2197,6 +2208,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     // Connected again: a later online event must not take the device for having been
     // offline and abort a transport that works.
     this._deviceWentOffline = false;
+    if (this._tokenExchange?.intercept(result, (merged: any): void => this._connectResponse(merged))) {
+      return;
+    }
 
     if (this._isConnected()) {
       return;
@@ -2212,7 +2226,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
     this._clearRefreshTimeout();
     if (result.expires) {
-      this._host.scheduleRefresh(ttlMilliseconds(result.ttl), () => this._refresh());
+      this._host.scheduleExpiry(result.ttl, () => this._refresh());
     }
 
     this._session = result.session;
@@ -2627,6 +2641,10 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   }
 
   private _handlePush(data: any, next: any) {
+    if (this._tokenExchange?.holdPush(data)) {
+      next();
+      return;
+    }
     const channel = data.channel;
     const id = data.id;
     if (data.pub) {
