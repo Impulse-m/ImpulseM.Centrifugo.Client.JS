@@ -445,18 +445,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
       default:
         return new Promise((resolve, reject) => {
-          const id = this._nextPromiseId();
-          const ctx: any = { resolve, reject };
-
-          if (timeout) {
-            ctx.timeout = setTimeout(() => {
-              // A call that gave up waiting leaves no waiter behind.
-              delete this._promises[id];
-              reject({ code: errorCodes.timeout, message: 'timeout' });
-            }, timeout);
-          }
-
-          this._promises[id] = ctx;
+          addWaiter(this._promises, this._nextPromiseId(), timeout || null, undefined, resolve, reject);
         });
     }
   }
@@ -2710,9 +2699,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       if (!this._promises.hasOwnProperty(id)) {
         continue;
       }
-      if (this._promises[id].timeout) {
-        clearTimeout(this._promises[id].timeout);
-      }
       this._promises[id].resolve();
       delete this._promises[id];
     }
@@ -2722,9 +2708,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     for (const id in this._promises) {
       if (!this._promises.hasOwnProperty(id)) {
         continue;
-      }
-      if (this._promises[id].timeout) {
-        clearTimeout(this._promises[id].timeout);
       }
       this._promises[id].reject(err);
       delete this._promises[id];
