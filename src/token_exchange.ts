@@ -432,9 +432,12 @@ export class TokenExchangeFlow {
   // Settles with the reply context, or rejects with the rejection context: the caller calls next() of the context it gets.
   private plainCall(cmd: any, session: string, node: string): Promise<CallResolveContext> {
     const call: Promise<CallResolveContext> = this.client['_call'](cmd, true);
-    if (!writeCommands(this.host, [cmd], session, node)) {
+    // Without a transport nothing is written, and writeCommands settles nothing: the call is settled here. Otherwise
+    // writeCommands settles the commands it refused or could not write.
+    if (!this.host.hasTransport()) {
       this.host.handleWriteError([cmd], false);
     }
+    writeCommands(this.host, [cmd], session, node);
     return call;
   }
 
