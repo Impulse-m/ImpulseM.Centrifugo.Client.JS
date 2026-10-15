@@ -688,7 +688,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     // The call is collected for the batch of the write, and the connection ends before the batch is written.
     (c as any)._batching = true;
     const call: Promise<RpcResult> = quiet(c.rpc('echo', codecCase.encode({})));
-    await until((): boolean => (c as any)._commands.length === 1);
+    expect(await until((): boolean => (c as any)._commands.length === 1)).toBe(true);
     (c as any)._disconnect(connectingCodes.transportClosed, 'transport closed', true);
 
     const result: RpcResult = await call;
@@ -1037,7 +1037,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     try {
       const call: Promise<RpcResult> = c.rpc('work', codecCase.encode({}));
       const first: any = await server.waitFor(isCall);
-      await until((): boolean => queue.waiting().length === 1);
+      expect(await until((): boolean => queue.waiting().length === 1)).toBe(true);
 
       jest.advanceTimersByTime(249);
       expect(queue.waiting()).toHaveLength(1);
@@ -1066,7 +1066,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       for (const delay of [250, 500, 1000]) {
         sends++;
         await server.waitForCount(isCall, sends);
-        await until((): boolean => queue.waiting().length === 1);
+        expect(await until((): boolean => queue.waiting().length === 1)).toBe(true);
         jest.advanceTimersByTime(delay - 1);
         expect(queue.waiting()).toHaveLength(1);
         jest.advanceTimersByTime(2);
@@ -1098,7 +1098,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     };
     const call: Promise<RpcResult> = c.rpc('work', codecCase.encode({}));
     const first: any = await server.waitFor(isCall);
-    await until((): boolean => queue.waiting().length === 1);
+    expect(await until((): boolean => queue.waiting().length === 1)).toBe(true);
 
     server.closeConnection();
     const result: RpcResult = await call;
@@ -1120,7 +1120,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     try {
       const call: Promise<RpcResult> = c.rpc('work', codecCase.encode({}));
       sent = await server.waitFor(isCall);
-      await until((): boolean => queue.waiting().length === 1);
+      expect(await until((): boolean => queue.waiting().length === 1)).toBe(true);
 
       // The deadline timer runs its grace callback one tick after the deadline, as the expiry test does.
       jest.advanceTimersByTime(101);
@@ -1165,7 +1165,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       const call: Promise<RpcResult> = c.rpc('work', codecCase.encode({}), { signal: controller.signal });
       quiet(call);
       await server.waitForCount(isCall, 1);
-      await until((): boolean => queue.waiting().length === 1);
+      expect(await until((): boolean => queue.waiting().length === 1)).toBe(true);
 
       // The reconnect comes before the first later delay ends: the call goes out with it and is refused again.
       const connecting: Promise<void> = nextEvent(c, 'connecting');
@@ -1175,7 +1175,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       jest.advanceTimersByTime(60);
       await server.waitForCount(isCall, 2);
       await reconnected;
-      await until((): boolean => queue.waiting().length === 1);
+      expect(await until((): boolean => queue.waiting().length === 1)).toBe(true);
 
       controller.abort();
       const sentBeforeAbort: number = callCommands().length;

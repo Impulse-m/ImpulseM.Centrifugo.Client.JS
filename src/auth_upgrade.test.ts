@@ -604,7 +604,7 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
       await connect(c);
 
       jest.advanceTimersByTime(1000);
-      await until((): boolean => fetches === 1);
+      expect(await until((): boolean => fetches === 1)).toBe(true);
       const explicit: AuthContext = await c.refresh('t2');
       expect(explicit).toMatchObject({ user: 'bob', authClass: 'bot' });
 
@@ -652,7 +652,7 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
       await connect(c);
 
       jest.advanceTimersByTime(1000);
-      await until((): boolean => fetches === 1);
+      expect(await until((): boolean => fetches === 1)).toBe(true);
       const refused: Promise<AuthContext> = c.refresh('t2');
       await expect(refused).rejects.toMatchObject({ code: 103 });
 
@@ -663,7 +663,7 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
       expect(refreshCommands().map((cmd: any): string => cmd.refresh.token)).toEqual(['t2']);
 
       jest.advanceTimersByTime(20000);
-      await until((): boolean => fetches === 2);
+      expect(await until((): boolean => fetches === 2)).toBe(true);
       await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 2);
     } finally {
       jest.useRealTimers();
