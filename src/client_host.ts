@@ -1,21 +1,35 @@
 import type { Centrifuge } from './centrifuge';
+import { connectingCodes, errorCodes } from './codes';
 import type { RefreshSlotHost } from './refresh_slot';
 import type { CallResolveContext, RpcCallbacks, RpcHost } from './rpc_tracker';
 import type { ConnectionIdentity } from './identity';
+import type { WriteHost } from './write_commands';
 import { ttlMilliseconds } from './utils';
 
+/** The host of the rpc tracker, the refresh slot and the write of commands: see createClientHost. */
+export interface ClientHost extends RpcHost, RefreshSlotHost, WriteHost {
+  /** Arms the refresh timer in place of the one armed before: refresh runs after the delay in milliseconds. */
+  scheduleRefresh(delay: number, refresh: () => void): void;
+}
+
 /**
- * The host of the rpc tracker and of the refresh slot: the state and the commands of a client, as they use
- * them. The members of the client read here are its private ones, reached by name: the client keeps them out
- * of its API, and this is the one place that uses them for the rpc and refresh machinery.
+ * The host of the rpc tracker, of the refresh slot and of the write of commands: the state and the commands of a
+ * client, as they use them. The members of the client read here are its private ones, reached by name: the client
+ * keeps them out of its API, and this is the one place that uses them for the rpc, refresh and write machinery.
  *
  * The private members reached here (a rename of any of them in centrifuge.ts must change this file too):
  * _isConnected, _createErrorObject, _config, _refreshSlot, _callPromise, _nextCommandId, _addCommand,
  * _callbacks, _rpcOptionsSupported, _methodCall, _call, _getToken, _token, _debug, _getRefreshRetryDelay,
- * _scheduleRefresh, _clearRefreshTimeout, _client, _identity, _dispatchFailed.
+ * _clearRefreshTimeout, _refreshTimeout, _refresh, _client, _identity, _dispatchFailed, _rpc, _codec, _transport,
+ * _disconnect.
  * Accepted by the wave's contract (section 10); the bracket reads are not counted as uses by noUnusedLocals.
  */
-export function createClientHost(client: Centrifuge): RpcHost & RefreshSlotHost {
+export function createClientHost(client: Centrifuge): ClientHost {
+  const scheduleRefresh = (delay: number, refresh: () => void): void => {
+    // The timer field may hold a timer that fired already, or one a newer token superseded: it is replaced.
+    client['_clearRefreshTimeout']();
+    client['_refreshTimeout'] = setTimeout(refresh, delay);
+  };
   return {
     isConnected: (): boolean => client['_isConnected'](),
     createError: (code: number, message: string): any => client['_createErrorObject'](code, message),
@@ -40,9 +54,10 @@ export function createClientHost(client: Centrifuge): RpcHost & RefreshSlotHost 
     setToken: (token: string): void => {
       client['_token'] = token;
     },
-    debug: (message: string): void => client['_debug'](message),
+    debug: (message: string, ...args: any[]): void => client['_debug'](message, ...args),
+    scheduleRefresh: scheduleRefresh,
     armRefreshRetry: (): void => {
-      client['_scheduleRefresh'](client['_getRefreshRetryDelay']());
+      scheduleRefresh(client['_getRefreshRetryDelay'](), (): void => client['_refresh']());
     },
     applyReply: (result: any): void => {
       client['_clearRefreshTimeout']();
@@ -54,11 +69,35 @@ export function createClientHost(client: Centrifuge): RpcHost & RefreshSlotHost 
         if (result.client) {
           client['_client'] = result.client;
         }
-        client['_scheduleRefresh'](ttlMilliseconds(result.ttl));
+        scheduleRefresh(ttlMilliseconds(result.ttl), (): void => client['_refresh']());
       }
       client['_identity'].applyRefresh(result);
     },
     identity: (): ConnectionIdentity => client['_identity'],
     dispatchFailed: (err: any): void => client['_dispatchFailed'](err),
+    hasTransport: (): boolean => !!client['_transport'],
+    encode: (commands: any[]): any => client['_codec'].encodeCommands(commands),
+    send: (data: any, session: string, node: string): void => {
+      client['_transport'].send(data, session, node);
+    },
+    handleWriteError: (commands: any[], refused: boolean): void => {
+      for (const command of commands) {
+        const id: number = command.id;
+        if (!(id in client['_callbacks'])) {
+          continue;
+        }
+        const callbacks: RpcCallbacks = client['_callbacks'][id];
+        callbacks.timeout?.clear();
+        delete client['_callbacks'][id];
+        callbacks.errback({
+          error: client['_createErrorObject'](errorCodes.transportWriteError, 'transport write error'),
+          refused: refused,
+        });
+      }
+    },
+    writeFailed: (commands: any[]): boolean => client['_rpc'].writeFailed(commands),
+    disconnectWriteFailed: (): void => {
+      client['_disconnect'](connectingCodes.transportClosed, 'transport write error', true);
+    },
   };
 }

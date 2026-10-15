@@ -37,7 +37,7 @@ export interface RefreshSlotHost {
   getToken(): Promise<string>;
   token(): string;
   setToken(token: string): void;
-  debug(message: string): void;
+  debug(message: string, ...args: any[]): void;
   /** Applies the reply of a refresh command to the identity of the connection. */
   applyReply(result: any): void;
   /** Arms the refresh timer, when none is armed, to retry the refresh of a connection whose token expires. */

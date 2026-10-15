@@ -29,10 +29,10 @@ import {
 import { normaliseRpcOptions, loggedConfig } from './rpc_options';
 
 import { CallTimer, callTimer } from './call_timer';
-import { EncodedBatch, encodeBatch } from './encode_commands';
-import { CallRejectContext, CallResolveContext, RpcHost, RpcTracker } from './rpc_tracker';
-import { createClientHost } from './client_host';
-import { RefreshSlot, RefreshSlotHost, refreshKeepsConnection, refreshRetries } from './refresh_slot';
+import { CallRejectContext, CallResolveContext, RpcTracker } from './rpc_tracker';
+import { ClientHost, createClientHost } from './client_host';
+import { writeCommands } from './write_commands';
+import { RefreshSlot, refreshKeepsConnection, refreshRetries } from './refresh_slot';
 import { ConnectionIdentity } from './identity';
 
 import {
@@ -167,6 +167,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _identity: ConnectionIdentity = new ConnectionIdentity((ctx: AuthContext) => this.emit('auth', ctx));
   private _refreshSlot: RefreshSlot;
   private _rpc: RpcTracker;
+  private _host: ClientHost;
 
   private _debugEnabled: boolean;
   private _config: Options;
@@ -223,15 +224,10 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     this._reconnectAttemptsResetPending = false;
 
     this._config = { ...defaults, ...options };
-    // Throws for a configuration no call can fix, before the client is used.
-    const configError: string | null = normaliseRpcOptions(this._config);
-    if (configError !== null) {
-      throw this._createErrorObject(errorCodes.badConfiguration, configError);
-    }
-    const host: RpcHost & RefreshSlotHost = createClientHost(this);
-    // Set to a positive integer by normaliseRpcOptions, the one place of the default.
-    this._rpc = new RpcTracker(host, this._config.maxPendingRpc as number, this._config.timeout);
-    this._refreshSlot = new RefreshSlot(host);
+    normaliseRpcOptions(this._config);
+    this._host = createClientHost(this);
+    this._rpc = new RpcTracker(this._host, this._config.maxPendingRpc as number, this._config.timeout);
+    this._refreshSlot = new RefreshSlot(this._host);
     this._configure();
 
     if (this._debugEnabled) {
@@ -920,47 +916,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
   }
 
-  private _handleWriteError(commands: any[], refused: boolean = false) {
-    for (const command of commands) {
-      const id = command.id;
-      if (!(id in this._callbacks)) {
-        continue;
-      }
-      const callbacks = this._callbacks[id];
-      this._callbacks[id].timeout?.clear();
-      delete this._callbacks[id];
-      const errback = callbacks.errback;
-      errback({
-        error: this._createErrorObject(errorCodes.transportWriteError, 'transport write error'),
-        refused: refused,
-      });
-    }
-  }
-
   private _transportSendCommands(commands: any[]) {
-    if (!commands.length) {
-      return true;
-    }
-    if (!this._transport) {
-      return false
-    }
-    // A command the codec refuses is refused alone, the others of the write are sent (see encodeBatch).
-    const batch: EncodedBatch = encodeBatch((items: any[]): any => this._codec.encodeCommands(items), commands);
-    this._handleWriteError(batch.refused, true);
-    if (batch.data === null) {
-      return false;
-    }
-    try {
-      this._transport.send(batch.data, this._session, this._node);
-    } catch (e) {
-      this._debug('error writing commands', e);
-      this._handleWriteError(batch.encodable);
-      if (this._rpc.writeFailed(batch.encodable)) {
-        this._disconnect(connectingCodes.transportClosed, 'transport write error', true);
-      }
-      return false;
-    }
-    return true;
+    return writeCommands(this._host, commands, this._session, this._node);
   }
 
   private _advanceTransportIndex() {
@@ -2087,7 +2044,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
           message: e !== undefined ? e.toString() : ''
         }
       }, () => {
-        self._scheduleRefresh(self._getRefreshRetryDelay());
+        self._host.scheduleRefresh(self._getRefreshRetryDelay(), () => self._refresh());
       });
     });
   }
@@ -2098,7 +2055,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         type: 'refresh',
         error: err
       }, () => {
-        this._scheduleRefresh(this._getRefreshRetryDelay());
+        this._host.scheduleRefresh(this._getRefreshRetryDelay(), () => this._refresh());
       });
     } else if (refreshKeepsConnection(err.code)) {
       this._emitError({ type: 'refresh', error: err }, () => {});
@@ -2272,7 +2229,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
     this._clearRefreshTimeout();
     if (result.expires) {
-      this._scheduleRefresh(ttlMilliseconds(result.ttl));
+      this._host.scheduleRefresh(ttlMilliseconds(result.ttl), () => this._refresh());
     }
 
     this._session = result.session;
@@ -2371,12 +2328,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       clearTimeout(this._refreshTimeout);
       this._refreshTimeout = null;
     }
-  }
-
-  // Arms the refresh timer in place of the one armed before: a timer that fired, or one a newer token superseded.
-  private _scheduleRefresh(delay: number) {
-    this._clearRefreshTimeout();
-    this._refreshTimeout = setTimeout(() => this._refresh(), delay);
   }
 
   private _clearReconnectTimeout() {

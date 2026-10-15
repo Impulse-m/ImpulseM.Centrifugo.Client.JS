@@ -1,3 +1,4 @@
+import { errorCodes } from './codes';
 import { Options } from './types';
 
 /** Default of maxPendingRpc: the calls tracked at once. */
@@ -19,20 +20,20 @@ function isValidInstance(instance: string): boolean {
 }
 
 /**
- * Settles the RPC options of a client config: an unset instance is empty, an unset maxPendingRpc takes
- * its default. Returns the message of the first option no call can work with, or null when they are valid.
+ * Settles the RPC options of a client config: an unset instance is empty, an unset maxPendingRpc takes its default,
+ * so the config carries a positive integer afterwards. Throws a configuration error, before the client is used,
+ * for an option no call can work with.
  * @internal
  */
-export function normaliseRpcOptions(config: Options): string | null {
+export function normaliseRpcOptions(config: Options): void {
   config.instance = config.instance ?? '';
   config.maxPendingRpc = config.maxPendingRpc ?? defaultMaxPendingRpc;
   if (config.instance !== '' && !isValidInstance(config.instance)) {
-    return 'instance must be 22 to 64 characters of A-Z, a-z, 0-9, "_" or "-"';
+    throw { code: errorCodes.badConfiguration, message: 'instance must be 22 to 64 characters of A-Z, a-z, 0-9, "_" or "-"' };
   }
   if (!Number.isInteger(config.maxPendingRpc) || config.maxPendingRpc < 1) {
-    return 'maxPendingRpc must be a positive integer';
+    throw { code: errorCodes.badConfiguration, message: 'maxPendingRpc must be a positive integer' };
   }
-  return null;
 }
 
 /**
