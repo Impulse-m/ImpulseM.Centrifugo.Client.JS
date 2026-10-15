@@ -6,8 +6,11 @@ import { RpcOptions, RpcResult } from './types';
 
 /** The reply of a command, and next() to acknowledge it. */
 export type CallResolveContext = { reply: any; next?: () => void };
-/** The rejection of a command: next() is absent when the connection ended before a reply. */
-export type CallRejectContext = { error: any; next?: () => void };
+/**
+ * The rejection of a command: next() is absent when the connection ended before a reply. refused is set when
+ * the codec refused the command before any write: it never reached the connection.
+ */
+export type CallRejectContext = { error: any; next?: () => void; refused?: boolean };
 
 // The metadata key the server sets on its own rpc errors, and its two values, see retrySignal. Error
 // metadata of the server cannot carry this key itself.
@@ -391,6 +394,11 @@ export class RpcTracker {
     this.dispatch(rpc, (id: number, acks: number[]): RpcCallbacks => ({
       callback: (ctx: CallResolveContext): void => ctx.next?.(),
       errback: (ctx: CallRejectContext): void => {
+        if (ctx.refused === true) {
+          // A cancel the codec refuses is not kept: it would be refused again with every connection.
+          this.restoreAcks(acks);
+          return;
+        }
         if (ctx.next !== undefined) {
           ctx.next();
           return;
@@ -441,8 +449,12 @@ export class RpcTracker {
   // A rejection of the command: without a reply (next) the connection ended or the write failed, and the call
   // waits for the next connection. An error reply of the server: a refusal with the retry signal did not run
   // the call, so it is sent again, and the error is not acknowledged (the server did not record it). Any other
-  // error is surfaced unchanged.
+  // error is surfaced unchanged. A command the codec refused never reached the server: see refused.
   private failed(call: TrackedRpc, ctx: CallRejectContext, acks: number[]): void {
+    if (ctx.refused === true) {
+      this.refused(call, ctx, acks);
+      return;
+    }
     if (ctx.next === undefined) {
       this.lost(call, acks);
       return;
@@ -519,6 +531,17 @@ export class RpcTracker {
   private lost(call: TrackedRpc, acks: number[]): void {
     call.commandId = 0;
     this.restoreAcks(acks);
+  }
+
+
+  // The codec refused the command before any write: the server never saw the call, so it is settled with the
+  // error, and not acknowledged. The acknowledgements of the command were not delivered either.
+  private refused(call: TrackedRpc, ctx: CallRejectContext, acks: number[]): void {
+    this.restoreAcks(acks);
+    if (!call.settled) {
+      this.settle(call);
+      call.reject(ctx.error);
+    }
   }
 
 

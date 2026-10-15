@@ -1232,6 +1232,36 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(c.state).toBe(State.Connected);
   });
 
+  test('a call queued offline that cannot be encoded is refused alone on the reconnect, the valid call and the pending cancel go on', async (): Promise<void> => {
+    const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    holdCalls();
+    const aborted: AbortController = new AbortController();
+    const sent: Promise<RpcResult> = quiet(c.rpc('x', codecCase.encode(0), { signal: aborted.signal }));
+    await server.waitForCount(isCall, 1);
+    const abortedMsgId: number = callCommands()[0].rpc.msg_id;
+
+    // The call is aborted while the connection is down: its cancel waits for the next connection.
+    const connecting: Promise<void> = nextEvent(c, 'connecting');
+    server.closeConnection();
+    await connecting;
+    aborted.abort();
+    await expect(sent).rejects.toMatchObject({ code: errorCodes.cancelled });
+
+    // Both calls are queued while the client waits for the connection: one of them cannot be encoded.
+    server.onCommand = (cmd: any): any => (isCall(cmd)
+      ? { id: cmd.id, rpc: { data: codecCase.encode({ n: 3 }) } }
+      : undefined);
+    const refused: Promise<RpcResult> = quiet(c.rpc(BigInt(1) as any, codecCase.encode({})));
+    const valid: Promise<RpcResult> = c.rpc('echo', codecCase.encode({ n: 3 }));
+    await expect(refused).rejects.toMatchObject({ code: errorCodes.transportWriteError });
+
+    const result: RpcResult = await valid;
+    expect(codecCase.decode(result.data)).toEqual({ n: 3 });
+    expect(server.received.filter(isCancel).map((cmd: any): number => cmd.rpc.cancel)).toEqual([abortedMsgId]);
+    expect(c.state).toBe(State.Connected);
+  });
+
   test('a terminal disconnect rejects a call never written with cancelled, and a call still waiting for a connection with clientDisconnected', async (): Promise<void> => {
     const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
     await connect(c);

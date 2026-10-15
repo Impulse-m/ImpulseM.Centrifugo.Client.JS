@@ -76,6 +76,11 @@ class StubHost implements RpcHost {
   lose(id: number): void {
     this.callbacks.get(id)?.errback({ error: undefined });
   }
+
+  // The codec refuses the command before any write: it never reaches the connection.
+  refuse(id: number): void {
+    this.callbacks.get(id)?.errback({ error: { code: errorCodes.transportWriteError, message: 'refused' }, refused: true });
+  }
 }
 
 // Lets the pending microtasks run, so a call has passed its wait for the connection.
@@ -198,5 +203,47 @@ describe('RpcTracker', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  test('a call the codec refuses is rejected at once, not resent, and its message id is not acknowledged', async (): Promise<void> => {
+    const host: StubHost = new StubHost();
+    const tracker: RpcTracker = new RpcTracker(host, 32, 30000);
+    const first: Promise<RpcResult> = tracker.call('a', {}, undefined, Date.now() + 30000);
+    await settleMicrotasks();
+    host.reply(host.commands[0].id, 'done');
+    await expect(first).resolves.toMatchObject({ data: 'done' });
+    const firstMsgId: number = host.commands[0].rpc.msg_id;
+
+    const refused: Promise<RpcResult> = tracker.call('b', {}, undefined, Date.now() + 30000);
+    await settleMicrotasks();
+    const refusedMsgId: number = host.commands[1].rpc.msg_id;
+    // The acknowledgement of the first call rode on the refused command: it is not lost with it.
+    expect(host.commands[1].rpc.ack).toEqual([firstMsgId]);
+    host.refuse(host.commands[1].id);
+    await expect(refused).rejects.toMatchObject({ code: errorCodes.transportWriteError });
+    expect(host.commands).toHaveLength(2);
+
+    const next: Promise<RpcResult> = tracker.call('c', {}, undefined, Date.now() + 30000);
+    await settleMicrotasks();
+    expect(host.commands[2].rpc.ack).toEqual([firstMsgId]);
+    expect(host.commands[2].rpc.ack).not.toContain(refusedMsgId);
+    host.reply(host.commands[2].id, 'next');
+    await expect(next).resolves.toMatchObject({ data: 'next' });
+  });
+
+  test('a cancel the codec refuses is not kept for the next connection', async (): Promise<void> => {
+    const host: StubHost = new StubHost();
+    const tracker: RpcTracker = new RpcTracker(host, 32, 30000);
+    const controller: AbortController = new AbortController();
+    const call: Promise<RpcResult> = tracker.call('m', {}, { signal: controller.signal }, Date.now() + 30000);
+    await settleMicrotasks();
+
+    controller.abort();
+    await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
+    expect(host.commands).toHaveLength(2);
+    host.refuse(host.commands[1].id);
+
+    tracker.sendWaiting();
+    expect(host.commands).toHaveLength(2);
   });
 });

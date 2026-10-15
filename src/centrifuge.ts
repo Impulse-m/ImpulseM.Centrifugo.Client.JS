@@ -28,6 +28,7 @@ import {
 } from './extensions';
 
 import { CallTimer, callTimer } from './call_timer';
+import { EncodedBatch, encodeBatch } from './encode_commands';
 import { CallRejectContext, CallResolveContext, RpcHost, RpcTracker } from './rpc_tracker';
 import { createClientHost } from './client_host';
 import { RefreshSlot, RefreshSlotHost, refreshKeepsConnection, refreshRetries } from './refresh_slot';
@@ -929,7 +930,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       const errback = callbacks.errback;
       errback({
         error: this._createErrorObject(errorCodes.transportWriteError, 'transport write error'),
-        next: refused ? (): void => {} : undefined,
+        refused: refused,
       });
     }
   }
@@ -941,19 +942,18 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     if (!this._transport) {
       return false
     }
-    let data: any;
-    try {
-      data = this._codec.encodeCommands(commands);
-    } catch (e) {
-      this._handleWriteError(commands, true);
+    // A command the codec refuses is refused alone, the others of the write are sent (see encodeBatch).
+    const batch: EncodedBatch = encodeBatch((items: any[]): any => this._codec.encodeCommands(items), commands);
+    this._handleWriteError(batch.refused, true);
+    if (batch.data === null) {
       return false;
     }
     try {
-      this._transport.send(data, this._session, this._node);
+      this._transport.send(batch.data, this._session, this._node);
     } catch (e) {
       this._debug('error writing commands', e);
-      this._handleWriteError(commands);
-      if (this._rpc.writeFailed(commands)) {
+      this._handleWriteError(batch.encodable);
+      if (this._rpc.writeFailed(batch.encodable)) {
         this._disconnect(connectingCodes.transportClosed, 'transport write error', true);
       }
       return false;
