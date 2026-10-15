@@ -10,7 +10,7 @@ import { writeCommands } from './write_commands';
 
 // The private members of the client this file reaches by name (a rename in centrifuge.ts must change this file too):
 // _token, _refreshRequired, _transportId, _isConnecting, _isConnected, _call, _session, _node, _emitError, _disconnect,
-// _failUnauthorized, _dispatchFailed.
+// _failUnauthorized, _dispatchFailed, _reportDispatchError.
 
 /** What the `exchange` callback of tokenExchange gets. */
 export interface TokenExchangeContext {
@@ -227,7 +227,7 @@ export class TokenExchangeFlow {
     try {
       refreshToken = await this.options.load();
     } catch (err: any) {
-      this.retry(bootstrap, result, resume, 'connectToken', this.host.createError(errorCodes.clientConnectToken, err?.toString() ?? ''));
+      this.retry(bootstrap, result, resume, 'connectToken', this.connectTokenError(err));
       return;
     }
     if (!this.isCurrent(bootstrap)) {
@@ -252,13 +252,19 @@ export class TokenExchangeFlow {
         this.client['_failUnauthorized']();
         return;
       }
-      this.retry(bootstrap, result, resume, 'connectToken', this.host.createError(errorCodes.clientConnectToken, err?.toString() ?? ''));
+      this.retry(bootstrap, result, resume, 'connectToken', this.connectTokenError(err));
       return;
     }
     if (!this.isCurrent(bootstrap)) {
       return;
     }
     this.refreshConnection(bootstrap, result, resume, token);
+  }
+
+
+  // The error of a bootstrap step that could not get the access token: reported as connectToken.
+  private connectTokenError(err: any): any {
+    return this.host.createError(errorCodes.clientConnectToken, err?.toString() ?? '');
   }
 
 
