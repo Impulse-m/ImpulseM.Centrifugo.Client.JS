@@ -42,6 +42,8 @@ export interface TrackedRpc {
   resend: CallTimer | null;
   // Removes the abort listener of the call's signal, if any.
   detach: () => void;
+  // Gives back the slot of maxPendingRpc the call holds: once, when the call settles.
+  release: () => void;
   resolve: (result: RpcResult) => void;
   reject: (error: any) => void;
 }
@@ -84,7 +86,9 @@ export class MsgIdGenerator {
   /**
    * Re-syncs the generator to the corrected server time, after the server refused an id as outside its
    * window: the next id takes the time part of that second and a fresh lane. Only the server's signal
-   * calls this, since the window of the server is not known otherwise.
+   * calls this, since the window of the server is not known otherwise. A second already in use keeps its
+   * sequence. The seconds re-covered after a correction backwards may hold ids the server accepted before,
+   * so a collision there is bounded by the lane overlap, not excluded.
    */
   resync(serverTimeMs: number): void {
     const seconds: number = this.clampSeconds(serverTimeMs);
@@ -148,5 +152,10 @@ export class RpcQueue {
     const result: number[] = this.acks;
     this.acks = [];
     return result;
+  }
+
+  /** Drops the message ids to acknowledge, e.g. those of a session that ended. */
+  clearAcks(): void {
+    this.acks = [];
   }
 }

@@ -1,5 +1,5 @@
 import { Centrifuge } from './centrifuge';
-import { errorCodes } from './codes';
+import { connectingCodes, errorCodes } from './codes';
 import { Options, RpcResult, State } from './types';
 import { format } from 'util';
 import {
@@ -27,6 +27,13 @@ function isCancel(cmd: any): boolean {
 function quiet<T>(promise: Promise<T>): Promise<T> {
   promise.catch((): void => {});
   return promise;
+}
+
+// Resolves on the next event of the client of the given name: the waits of the cases use events, not polling.
+function nextEvent(c: Centrifuge, event: 'connecting' | 'connected'): Promise<void> {
+  return new Promise<void>((resolve: () => void): void => {
+    c.once(event, (): void => resolve());
+  });
 }
 
 // Makes the next write of the client's transport throw, as a broken socket does. The transport
@@ -220,6 +227,25 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     await expect(c.rpc('echo', codecCase.encode(4))).resolves.toMatchObject({ cached: false });
   });
 
+  test('a settled call frees its slot at once: a call made right after the abort is sent', async (): Promise<void> => {
+    const c: Centrifuge = create({ maxPendingRpc: 1 });
+    await connect(c);
+    holdCalls();
+    const controller: AbortController = new AbortController();
+    const first: Promise<RpcResult> = quiet(c.rpc('a', codecCase.encode(1), { signal: controller.signal }));
+    await server.waitFor(isCall);
+
+    controller.abort();
+    // Made in the same synchronous block as the abort: the slot of the aborted call is free already.
+    server.onCommand = (cmd: any): any => (isCall(cmd) && cmd.rpc.method === 'b'
+      ? { id: cmd.id, rpc: { data: codecCase.encode({}) } }
+      : undefined);
+    const second: Promise<RpcResult> = c.rpc('b', codecCase.encode(2));
+
+    await expect(first).rejects.toMatchObject({ code: errorCodes.cancelled });
+    await expect(second).resolves.toMatchObject({ cached: false });
+  });
+
   test('the calls made while disconnected are bounded at entry: the 33rd rejects at once', async (): Promise<void> => {
     const c: Centrifuge = create();
     server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
@@ -345,6 +371,20 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(calls[2].rpc.ack).toEqual([calls[1].rpc.msg_id]);
   });
 
+  test('the acknowledgements left at a terminal disconnect are not sent with the next session', async (): Promise<void> => {
+    const c: Centrifuge = create();
+    await connect(c);
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
+    // The reply is acknowledged with the next request, which never goes out in this session.
+    await c.rpc('echo', codecCase.encode(1));
+    c.disconnect();
+
+    await connect(c);
+    await c.rpc('echo', codecCase.encode(2));
+
+    expect(callCommands()[1].rpc.ack).toBeUndefined();
+  });
+
   test('a call whose deadline passes while its transport is down rejects with timeout', async (): Promise<void> => {
     const c: Centrifuge = create({ timeout: 300 });
     await connect(c);
@@ -357,6 +397,37 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
 
     await expect(call).rejects.toMatchObject({ code: errorCodes.timeout });
     expect(c.state).not.toBe(State.Connected);
+  });
+
+  test('a plain call is bounded by its deadline from the rpc() call, the wait for the connection included', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25 };
+    const c: Centrifuge = create({ timeout: 400 });
+    holdCalls();
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      let outcome: any = null;
+      const call: Promise<RpcResult> = c.rpc('x', codecCase.encode({}));
+      call.catch((error: any): void => {
+        outcome = error;
+      });
+      // The connection is made 200 ms after the call: the reply has the 200 ms left of its deadline.
+      jest.advanceTimersByTime(200);
+      const connected: Promise<void> = nextEvent(c, 'connected');
+      c.connect();
+      await connected;
+      await server.waitFor(isCall);
+
+      jest.advanceTimersByTime(199);
+      await new Promise<void>((resolve: () => void): void => {
+        setImmediate(resolve);
+      });
+      expect(outcome).toBeNull();
+
+      jest.advanceTimersByTime(2);
+      await expect(call).rejects.toMatchObject({ code: errorCodes.timeout });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('a retransmitted call keeps its original deadline', async (): Promise<void> => {
@@ -489,6 +560,34 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(server.received.filter(isCancel)).toHaveLength(1);
   });
 
+  test('the cancels sent with a connect, when their write fails, are all kept for the next connection', async (): Promise<void> => {
+    const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    holdCalls();
+    const controllers: AbortController[] = [new AbortController(), new AbortController()];
+    const calls: Promise<RpcResult>[] = controllers.map(
+      (controller: AbortController, i: number): Promise<RpcResult> => quiet(c.rpc('x', codecCase.encode(i), { signal: controller.signal }))
+    );
+    await server.waitForCount(isCall, 2);
+    const msgIds: number[] = callCommands().map((cmd: any): number => cmd.rpc.msg_id);
+
+    // Both calls are aborted while the connection is down: their cancels are kept for the next connection.
+    const connecting: Promise<void> = nextEvent(c, 'connecting');
+    server.closeConnection();
+    await connecting;
+    for (const controller of controllers) {
+      controller.abort();
+    }
+    for (const call of calls) {
+      await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
+    }
+
+    // The cancels of the connect go out in one batch, and its write fails: every cancel of the batch is kept.
+    c.once('connected', (): void => failNextWrite(c));
+    await server.waitForCount(isCancel, 2);
+    expect(server.received.filter(isCancel).map((cmd: any): number => cmd.rpc.cancel)).toEqual(msgIds);
+  });
+
   test('the acknowledgements of a command that was not written are sent with the next request', async (): Promise<void> => {
     const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
     await connect(c);
@@ -582,9 +681,12 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     }
     expect((c as any)._rpc.cancels).toEqual([]);
 
+    const reconnected: Promise<void> = nextEvent(c, 'connected');
     server.closeConnection();
     server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
-    // The reconnect carries the call only: the cancel is not sent again.
+    // The reconnect carries the call only: the cancel is not sent again. The wait for the connection is the
+    // client's own, not the call's timeout, which is short here.
+    await reconnected;
     await c.rpc('echo', codecCase.encode({}));
 
     const cancels: any[] = server.received.filter(isCancel);
@@ -627,8 +729,9 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     }
     await server.waitForCount(isCall, 32);
     // The reconnect is a minute away: the calls are aborted while the client is disconnected.
+    const connecting: Promise<void> = nextEvent(c, 'connecting');
     server.closeConnection();
-    await until((): boolean => c.state !== State.Connected);
+    await connecting;
 
     for (const controller of controllers) {
       controller.abort();
@@ -672,8 +775,9 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     }
 
     // The transport is lost once the cancel is forgotten: the cancel is not kept for the next connection.
+    const reconnected: Promise<void> = nextEvent(c, 'connected');
     server.closeConnection();
-    await until((): boolean => c.state !== State.Connected);
+    await reconnected;
     expect((c as any)._rpc.cancels).toEqual([]);
     expect(server.received.filter(isCancel)).toHaveLength(1);
   });
@@ -755,7 +859,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(server.received).toHaveLength(0);
   });
 
-  test('message ids are strictly increasing and fit 53 bits', async (): Promise<void> => {
+  test('message ids are unique and fit 53 bits', async (): Promise<void> => {
     const c: Centrifuge = create();
     await connect(c);
     server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
@@ -765,12 +869,10 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
 
     const ids: number[] = callCommands().map((cmd: any): number => cmd.rpc.msg_id);
     expect(ids).toHaveLength(5);
-    for (let i: number = 0; i < ids.length; i++) {
-      expect(Number.isSafeInteger(ids[i])).toBe(true);
-      expect(ids[i]).toBeLessThanOrEqual(Number.MAX_SAFE_INTEGER);
-      if (i > 0) {
-        expect(ids[i]).toBeGreaterThan(ids[i - 1]);
-      }
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ids) {
+      expect(Number.isSafeInteger(id)).toBe(true);
+      expect(id).toBeLessThan(2 ** 53);
     }
     // The time part is unix seconds, close to the local clock.
     const seconds: number = Math.floor(ids[0] / 2 ** 20);
@@ -901,7 +1003,6 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       }
       sends++;
       await server.waitForCount(isCall, sends);
-      await until((): boolean => queue.waiting().length === 0);
       await expect(call).rejects.toMatchObject({
         code: 100,
         metadata: { 'x-centrifugo-retry': 'later' },
@@ -997,11 +1098,14 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       await until((): boolean => queue.waiting().length === 1);
 
       // The reconnect comes before the first later delay ends: the call goes out with it and is refused again.
+      const connecting: Promise<void> = nextEvent(c, 'connecting');
+      const reconnected: Promise<void> = nextEvent(c, 'connected');
       server.closeConnection();
-      await until((): boolean => c.state !== State.Connected);
+      await connecting;
       jest.advanceTimersByTime(60);
       await server.waitForCount(isCall, 2);
-      await until((): boolean => c.state === State.Connected && queue.waiting().length === 1);
+      await reconnected;
+      await until((): boolean => queue.waiting().length === 1);
 
       controller.abort();
       const sentBeforeAbort: number = callCommands().length;
@@ -1085,6 +1189,22 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(cancel.rpc.cancel).toBe(sent.rpc.msg_id);
   });
 
+  test('a call that was never written is cancelled when the next connection is legacy', async (): Promise<void> => {
+    const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    const track: (request: any) => Promise<RpcResult> = (c as any)._rpc.track.bind((c as any)._rpc);
+    (c as any)._rpc.track = (request: any): Promise<RpcResult> => {
+      // The connection is lost before the call is written, and the next connection has no RPC options.
+      server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25 };
+      (c as any)._disconnect(connectingCodes.transportClosed, 'transport closed', true);
+      return track(request);
+    };
+
+    // Nothing reached the server, so the call is cancelled, not reported as connectionClosed.
+    await expect(c.rpc('x', codecCase.encode({}))).rejects.toMatchObject({ code: errorCodes.cancelled });
+    expect(callCommands()).toHaveLength(0);
+  });
+
   test('a signal on a legacy connection rejects with unsupported without sending the call', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25 };
     const c: Centrifuge = create();
@@ -1096,15 +1216,16 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(callCommands()).toHaveLength(0);
   });
 
-  test('an already aborted signal on a legacy connection rejects with unsupported, and nothing is sent', async (): Promise<void> => {
+  test('an already aborted signal rejects with cancelled on a legacy connection too, and nothing is sent', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25 };
     const c: Centrifuge = create();
     await connect(c);
     const controller: AbortController = new AbortController();
     controller.abort();
 
+    // Nothing reached the server, so there is nothing to cancel: the call is cancelled whatever the connection.
     await expect(c.rpc('x', codecCase.encode({}), { signal: controller.signal }))
-      .rejects.toMatchObject({ code: errorCodes.unsupported });
+      .rejects.toMatchObject({ code: errorCodes.cancelled });
     expect(callCommands()).toHaveLength(0);
   });
 

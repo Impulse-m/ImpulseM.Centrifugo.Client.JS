@@ -16,8 +16,7 @@ const maxLaterResends: number = 3;
 // The delay of the first later attempt; each further one waits twice as long.
 const laterResendBase: number = 250;
 
-/** The resend signal of a server error, see retrySignal. */
-export type RetrySignal = 'new_msg_id' | 'later' | null;
+type RetrySignal = 'new_msg_id' | 'later' | null;
 
 /**
  * The resend signal of a server error: 'new_msg_id' when the server did not run the call and refused its
@@ -55,8 +54,18 @@ export interface RpcHost {
   hasInstance(): boolean;
   /** Resolves once a call can go out: connected, and no refresh in flight. Rejects when the client is disconnected for good. */
   ready(deadline: number): Promise<void>;
-  /** Sends a plain rpc request on the connection. Resolves with the result of its reply. */
-  plainCall(command: any): Promise<any>;
+  /** Sends a plain rpc request on the connection. Resolves with the result of its reply, which is due at the deadline (local time in milliseconds). */
+  plainCall(command: any, deadline: number): Promise<any>;
+}
+
+
+// A call of the application as the tracker runs it. Release gives back the slot of maxPendingRpc the call holds.
+interface CallRequest {
+  method: string;
+  data: any;
+  opts: RpcOptions | undefined;
+  deadline: number;
+  release: () => void;
 }
 
 
@@ -92,83 +101,48 @@ export class RpcTracker {
    * Runs an rpc call. It waits for the connection and for a refresh in flight, then goes out: tracked
    * when the connection supports RPC options and the client has an instance, else as a plain request.
    * The deadline counts from the rpc() call, across the wait and the attempts. With an instance, the call
-   * takes a slot of maxPendingRpc at once, or rejects with errorCodes.limitExceeded; the slot is given back
-   * when the call settles.
+   * takes a slot of maxPendingRpc at once, or rejects with errorCodes.limitExceeded. The slot is given back
+   * as soon as the call settles, and in any case once this promise settled.
    */
   async call(method: string, data: any, opts: RpcOptions | undefined, deadline: number): Promise<RpcResult> {
     if (!this.host.hasInstance()) {
-      return this.attempt(method, data, opts, deadline);
+      return this.attempt({ method, data, opts, deadline, release: (): void => {} });
     }
     if (this.pending >= this.maxPendingRpc) {
       throw this.host.createError(errorCodes.limitExceeded, 'too many pending rpc calls');
     }
     this.pending++;
+    let held: boolean = true;
+    const release: () => void = (): void => {
+      if (held) {
+        held = false;
+        this.pending--;
+      }
+    };
     try {
-      return await this.attempt(method, data, opts, deadline);
+      return await this.attempt({ method, data, opts, deadline, release });
     } finally {
-      this.pending--;
+      release();
     }
-  }
-
-
-  /**
-   * Tracks a call: it is sent on the current connection, or on the next one if it is lost. The call
-   * rejects with a timeout at its deadline, counted from the moment of the rpc() call.
-   */
-  track(
-    method: string,
-    data: any,
-    headers: Record<string, string> | undefined,
-    signal: AbortSignal | undefined,
-    deadline: number
-  ): Promise<RpcResult> {
-    return new Promise<RpcResult>((resolve, reject) => {
-      // An abort before the call is tracked fired no listener: it is seen here.
-      if (signal?.aborted) {
-        reject(this.host.createError(errorCodes.cancelled, 'cancelled'));
-        return;
-      }
-      const call: TrackedRpc = {
-        msgId: this.msgIds.next(this.host.serverTime()),
-        method: method,
-        data: data,
-        headers: headers,
-        deadline: deadline,
-        commandId: 0,
-        sent: false,
-        timer: null,
-        settled: false,
-        newIdResends: 0,
-        laterResends: 0,
-        resend: null,
-        detach: (): void => {},
-        resolve: resolve,
-        reject: reject,
-      };
-      if (signal !== undefined) {
-        const onAbort = (): void => this.abort(call);
-        signal.addEventListener('abort', onAbort, { once: true });
-        call.detach = (): void => signal.removeEventListener('abort', onAbort);
-      }
-      this.queue.add(call);
-      call.timer = callTimer(call.deadline, (): void => this.expire(call));
-      this.send(call, false);
-    });
   }
 
 
   /**
    * Acts on a connection that confirmed the capability: sends the cancels and the calls waiting
    * for a connection, in message id order, each with its original deadline. Without the capability
-   * the waiting calls are rejected with connectionClosed: they were written on a lost connection
-   * and may have run, so they are not sent again.
+   * the waiting calls are rejected: a call that was written on a lost connection may have run, so it
+   * is rejected with connectionClosed and not sent again; a call never written is cancelled.
    */
   sendWaiting(): void {
     if (!this.host.rpcOptionsSupported()) {
       // The cancels wait for a connection that carries them.
       for (const call of this.queue.waiting()) {
         this.settle(call);
-        call.reject(this.host.createError(errorCodes.connectionClosed, 'connection closed'));
+        if (call.sent) {
+          call.reject(this.host.createError(errorCodes.connectionClosed, 'connection closed'));
+        } else {
+          call.reject(this.host.createError(errorCodes.cancelled, 'cancelled'));
+        }
       }
       return;
     }
@@ -196,6 +170,7 @@ export class RpcTracker {
   /** Rejects all tracked calls, e.g. on a disconnect that will not be followed by a reconnect. */
   rejectAll(code: number, message: string): void {
     this.cancels = [];
+    this.queue.clearAcks();
     for (const timer of this.forgets) {
       timer.clear();
     }
@@ -207,28 +182,33 @@ export class RpcTracker {
   }
 
 
-  // The attempt of a call: see call.
-  private async attempt(method: string, data: any, opts: RpcOptions | undefined, deadline: number): Promise<RpcResult> {
-    const headers: Record<string, string> | undefined = opts?.headers;
-    const signal: AbortSignal | undefined = opts?.signal;
+  // The attempt of a call: see call. The slot is released by the settle of a tracked call, by the error
+  // callbacks of the waits below, and by call once the attempt settled.
+  private async attempt(request: CallRequest): Promise<RpcResult> {
+    const headers: Record<string, string> | undefined = request.opts?.headers;
+    const signal: AbortSignal | undefined = request.opts?.signal;
     if (signal?.aborted) {
-      // A connection that cannot carry a call with a signal rejects it with unsupported, as below.
-      if (this.host.isConnected() && (!this.host.rpcOptionsSupported() || !this.host.hasInstance())) {
-        throw this.signalUnsupported();
-      }
+      // Nothing was sent, so there is nothing to tell the server: cancelled, whatever the connection.
+      request.release();
       throw this.host.createError(errorCodes.cancelled, 'cancelled');
     }
     await raceCall(
-      this.host.ready(deadline),
-      deadline,
+      this.host.ready(request.deadline),
+      request.deadline,
       signal,
-      (): any => this.host.createError(errorCodes.timeout, 'timeout'),
-      (): any => this.host.createError(errorCodes.cancelled, 'cancelled'),
+      (): any => {
+        request.release();
+        return this.host.createError(errorCodes.timeout, 'timeout');
+      },
+      (): any => {
+        request.release();
+        return this.host.createError(errorCodes.cancelled, 'cancelled');
+      },
     );
     // Checked once connected: the capability belongs to the connection the call goes out on.
     // Only a call with an instance is tracked: the server scopes the retransmit and the cancel by it.
     if (this.host.rpcOptionsSupported() && this.host.hasInstance()) {
-      return this.track(method, data, headers, signal, deadline);
+      return this.track(request);
     }
     if (!this.host.rpcOptionsSupported() && hasHeaders(headers)) {
       throw this.host.createError(errorCodes.unsupported, 'rpc headers are not supported by the server');
@@ -238,18 +218,61 @@ export class RpcTracker {
     }
     const cmd: any = {
       rpc: {
-        method,
-        data
+        method: request.method,
+        data: request.data
       }
     };
     if (this.host.rpcOptionsSupported() && hasHeaders(headers)) {
       cmd.rpc.headers = headers;
     }
-    const result: any = await this.host.plainCall(cmd);
+    const result: any = await this.host.plainCall(cmd, request.deadline);
     return {
       data: result.data,
       cached: result.cached === true
     };
+  }
+
+
+  /**
+   * Tracks a call: it is sent on the current connection, or on the next one if it is lost. The call
+   * rejects with a timeout at its deadline, counted from the moment of the rpc() call.
+   */
+  private track(request: CallRequest): Promise<RpcResult> {
+    return new Promise<RpcResult>((resolve, reject) => {
+      // An abort before the call is tracked fired no listener: it is seen here.
+      if (request.opts?.signal?.aborted) {
+        request.release();
+        reject(this.host.createError(errorCodes.cancelled, 'cancelled'));
+        return;
+      }
+      const call: TrackedRpc = {
+        msgId: this.msgIds.next(this.host.serverTime()),
+        method: request.method,
+        data: request.data,
+        headers: request.opts?.headers,
+        deadline: request.deadline,
+        commandId: 0,
+        sent: false,
+        timer: null,
+        settled: false,
+        newIdResends: 0,
+        laterResends: 0,
+        resend: null,
+        detach: (): void => {},
+        release: request.release,
+        resolve: resolve,
+        reject: reject,
+      };
+      const signal: AbortSignal | undefined = request.opts?.signal;
+      if (signal !== undefined) {
+        const onAbort = (): void => this.abort(call);
+        signal.addEventListener('abort', onAbort, { once: true });
+        call.detach = (): void => signal.removeEventListener('abort', onAbort);
+      }
+      this.queue.add(call);
+      call.timer = callTimer(call.deadline, (): void => this.expire(call));
+      this.send(call, false);
+    });
   }
 
 
@@ -512,7 +535,8 @@ export class RpcTracker {
   }
 
 
-  // Settles the call: no timer, no abort listener, not tracked anymore.
+  // Settles the call: no timer, no abort listener, not tracked anymore, and its slot of maxPendingRpc is given back
+  // before the caller sees the outcome.
   private settle(call: TrackedRpc): void {
     call.settled = true;
     if (call.timer !== null) {
@@ -524,6 +548,7 @@ export class RpcTracker {
       call.resend = null;
     }
     call.detach();
+    call.release();
     this.queue.remove(call);
   }
 }

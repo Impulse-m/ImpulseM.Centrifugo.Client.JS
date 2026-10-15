@@ -18,6 +18,7 @@ function trackedCall(msgId: number, commandId: number): TrackedRpc {
     laterResends: 0,
     resend: null,
     detach: (): void => {},
+    release: (): void => {},
     resolve: (): void => {},
     reject: (): void => {},
   };

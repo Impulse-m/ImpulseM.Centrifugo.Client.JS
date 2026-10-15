@@ -1660,10 +1660,11 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   private _callPromise<T = any>(
     cmd: any,
-    resultCB: (reply: any) => T
+    resultCB: (reply: any) => T,
+    due?: number
   ): Promise<T> {
     return new Promise((resolve, reject) => {
-      this._call(cmd, false).then(
+      this._call(cmd, false, due).then(
         (resolveCtx: { reply: any; next?: () => void }) => {
           try {
             resolve(resultCB(resolveCtx.reply));
@@ -1804,14 +1805,15 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     return p;
   }
 
-  private _call(cmd: any, skipSending: boolean): Promise<CallResolveContext> {
+  private _call(cmd: any, skipSending: boolean, due?: number): Promise<CallResolveContext> {
     return new Promise((resolve, reject) => {
       cmd.id = this._nextCommandId();
 
       this._registerCall(
         cmd.id,
         resolve as (value: CallResolveContext) => void,
-        reject as (reason: CallRejectContext) => void
+        reject as (reason: CallRejectContext) => void,
+        due
       );
 
       if (!skipSending) {
@@ -2744,13 +2746,13 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     return errObject;
   }
 
-  private _registerCall(id: number, callback: any, errback: any) {
+  private _registerCall(id: number, callback: any, errback: any, due: number = Date.now() + this._config.timeout) {
     this._callbacks[id] = {
       callback: callback,
       errback: errback,
       timeout: null
     };
-    this._callbacks[id].timeout = callTimer(Date.now() + this._config.timeout, () => {
+    this._callbacks[id].timeout = callTimer(due, () => {
       delete this._callbacks[id];
       if (isFunction(errback)) {
         errback({ error: this._createErrorObject(errorCodes.timeout, 'timeout') });
@@ -2807,7 +2809,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       createError: (code: number, message: string): any => this._createErrorObject(code, message),
       hasInstance: (): boolean => !!this._config.instance,
       ready: (deadline: number): Promise<void> => this._refreshSlot.ready(deadline),
-      plainCall: (command: any): Promise<any> => this._callPromise(command, (reply: any): any => reply.rpc),
+      plainCall: (command: any, deadline: number): Promise<any> => this._callPromise(command, (reply: any): any => reply.rpc, deadline),
       nextCommandId: (): number => this._nextCommandId(),
       addCommand: (command: any): void => this._addCommand(command),
       setCallbacks: (id: number, callbacks: RpcCallbacks) => (this._callbacks[id] = callbacks),
