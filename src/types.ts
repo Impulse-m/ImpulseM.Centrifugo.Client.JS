@@ -1,5 +1,3 @@
-import type { TokenExchange } from './token_exchange';
-
 /** EventMap */
 export type EventMap = {
   [key: string]: (...args: any[]) => void
@@ -513,6 +511,36 @@ export interface RpcResult {
   /** True when the server answered from the record of an earlier attempt of this call, e.g.
    * after a retransmit: the handler did not run again. Set by the client on every reply. */
   cached?: boolean;
+}
+
+/** What the `exchange` callback of tokenExchange gets. */
+export interface TokenExchangeContext {
+  /** The refresh token `load` returned for this exchange. */
+  refreshToken: string;
+  /** Sends a plain rpc call over the connection the exchange runs on: the one being set up, or the connected one.
+   * It does not wait for the connected state, carries no message id and is not retransmitted. Rejects with
+   * `connectionClosed` when that connection is lost, or with `transportWriteError` when the write fails. `data` is
+   * what `rpc` takes for the codec in use. */
+  rpc: (method: string, data: any) => Promise<RpcResult>;
+}
+
+/** What the `exchange` callback of tokenExchange resolves with. */
+export interface TokenExchangeResult {
+  /** The access token: the connection token from now on. */
+  token: string;
+  /** The rotated refresh token, when the issuer rotated it. Absent or equal to the one used: nothing is stored. */
+  refreshToken?: string;
+}
+
+/** Persistence and exchange of the refresh token, see the tokenExchange option. */
+export interface TokenExchange {
+  /** The refresh token the application persisted, or null/undefined/'' when there is none. Called before every exchange. */
+  load: () => string | null | undefined | Promise<string | null | undefined>;
+  /** Persists a rotated refresh token. Awaited before the access token issued with it is used. */
+  store: (refreshToken: string) => void | Promise<void>;
+  /** Exchanges the refresh token for an access token. Throw `UnauthorizedError` when the issuer refused the refresh
+   * token: the session is dead. Any other rejection is reported and retried with backoff. */
+  exchange: (ctx: TokenExchangeContext) => Promise<TokenExchangeResult>;
 }
 
 /** Options of an RPC call. */

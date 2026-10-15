@@ -1,7 +1,6 @@
 import { Centrifuge, UnauthorizedError } from './centrifuge';
 import { CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, holdReply, until } from './testing/codecs';
-import { Options, State } from './types';
-import { TokenExchange, TokenExchangeContext, TokenExchangeResult } from './token_exchange';
+import { Options, State, TokenExchange, TokenExchangeContext, TokenExchangeResult } from './types';
 
 // The token exchange of the tokenExchange option, over both codecs. The fake issuer answers the exchange rpc, and every
 // exchange rotates the refresh token: the app starts with refresh-1, and the n-th exchange issues access-n and
