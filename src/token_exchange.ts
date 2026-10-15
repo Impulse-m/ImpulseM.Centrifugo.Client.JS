@@ -1,15 +1,47 @@
-import { Centrifuge, UnauthorizedError } from './centrifuge';
+import type { Centrifuge } from './centrifuge';
+import { UnauthorizedError } from './centrifuge';
 import { errorCodes } from './codes';
 import type { ClientHost } from './client_host';
 import type { CallRejectContext, CallResolveContext } from './rpc_tracker';
 import { refreshRetries } from './refresh_slot';
-import type { RpcResult, TokenExchange, TokenExchangeResult } from './types';
+import type { RpcResult } from './types';
 import { backoff, ttlMilliseconds } from './utils';
 import { writeCommands } from './write_commands';
 
 // The private members of the client this file reaches by name (a rename in centrifuge.ts must change this file too):
 // _token, _refreshRequired, _transportId, _isConnecting, _isConnected, _call, _session, _node, _emitError, _disconnect,
 // _failUnauthorized, _dispatchFailed.
+
+/** What the `exchange` callback of tokenExchange gets. */
+export interface TokenExchangeContext {
+  /** The refresh token `load` returned for this exchange. */
+  refreshToken: string;
+  /** Sends a plain rpc call over the connection the exchange runs on: the one being set up, or the connected one.
+   * It does not wait for the connected state, carries no message id and is not retransmitted. Rejects with
+   * `connectionClosed` when that connection is lost, or with `transportWriteError` when the write fails. `data` is
+   * what `rpc` takes for the codec in use. */
+  rpc: (method: string, data: any) => Promise<RpcResult>;
+}
+
+/** What the `exchange` callback of tokenExchange resolves with. */
+export interface TokenExchangeResult {
+  /** The access token: the connection token from now on. */
+  token: string;
+  /** The rotated refresh token, when the issuer rotated it. Absent or equal to the one used: nothing is stored. */
+  refreshToken?: string;
+}
+
+/** Persistence and exchange of the refresh token, see the tokenExchange option. */
+export interface TokenExchange {
+  /** The refresh token the application persisted, or null/undefined/'' when there is none. Called before every exchange. */
+  load: () => string | null | undefined | Promise<string | null | undefined>;
+  /** Persists a rotated refresh token. Awaited before the access token issued with it is used. */
+  store: (refreshToken: string) => void | Promise<void>;
+  /** Exchanges the refresh token for an access token. Throw `UnauthorizedError` when the issuer refused the refresh
+   * token: the session is dead. Any other rejection is reported and retried with backoff. */
+  exchange: (ctx: TokenExchangeContext) => Promise<TokenExchangeResult>;
+}
+
 
 /** The session and node the commands of an exchange are written with. */
 interface Route {
@@ -20,7 +52,7 @@ interface Route {
 
 /**
  * One exchange of the flow: the connection it runs on, and whether that connection is still the one it was started for.
- * An exchange whose connection ended is abandoned: its result is neither stored nor used.
+ * An exchange whose connection ended is abandoned: its access token is not used.
  */
 interface Attempt {
   route: () => Route;
@@ -41,15 +73,8 @@ interface ExpiryRecord {
  */
 interface Bootstrap {
   transportId: number;
-  attempt: number;
   held: Map<string, any>;
   timer: ReturnType<typeof setTimeout> | null;
-}
-
-
-/** An error of the flow, as the client reports it. */
-function errorOf(code: number, err: any): any {
-  return { code: code, message: err?.toString() ?? '' };
 }
 
 
@@ -64,6 +89,8 @@ export class TokenExchangeFlow {
   private options: TokenExchange;
   private expiry: ExpiryRecord | null = null;
   private bootstrap: Bootstrap | null = null;
+  // The bootstrap steps that failed since the last bootstrap completed: the backoff of their retries.
+  private failures: number = 0;
   // Set while a connect reply is resumed: that reply is not intercepted again.
   private resuming: boolean = false;
 
@@ -98,12 +125,11 @@ export class TokenExchangeFlow {
     }
     const bootstrap: Bootstrap = {
       transportId: this.client['_transportId'],
-      attempt: 0,
       held: new Map<string, any>(),
       timer: null,
     };
     this.bootstrap = bootstrap;
-    void this.connectStep(bootstrap, result, resume);
+    this.start(bootstrap, result, resume);
     return true;
   }
 
@@ -127,10 +153,14 @@ export class TokenExchangeFlow {
 
 
   /**
-   * The token of a renewal, and of refresh() without a token: exchanged over the connected socket. Rejects with
-   * UnauthorizedError when the application holds no refresh token any more.
+   * The token of a renewal, and of refresh() without a token: exchanged over the connected socket, so a refresh()
+   * made while disconnected waits for the connection first. Rejects with UnauthorizedError when the application holds
+   * no refresh token any more.
    */
   async fetchToken(): Promise<string> {
+    if (!this.client['_isConnected']()) {
+      await this.host.waitConnected(null);
+    }
     const refreshToken: string | null | undefined = await this.options.load();
     if (!refreshToken) {
       throw new UnauthorizedError('');
@@ -178,6 +208,14 @@ export class TokenExchangeFlow {
   }
 
 
+  // Runs a step of a bootstrap. An exception an application handler throws in it is dispatched as a failure of the client.
+  private start(bootstrap: Bootstrap, result: any, resume: (result: any) => void): void {
+    this.connectStep(bootstrap, result, resume).catch((err: any): void => {
+      this.client['_dispatchFailed'](err);
+    });
+  }
+
+
   // One step of a bootstrap: loads the refresh token, exchanges it, and refreshes the anonymous connection with the
   // access token. An empty refresh token leaves the connection anonymous.
   private async connectStep(bootstrap: Bootstrap, result: any, resume: (result: any) => void): Promise<void> {
@@ -189,7 +227,7 @@ export class TokenExchangeFlow {
     try {
       refreshToken = await this.options.load();
     } catch (err: any) {
-      this.retry(bootstrap, result, resume, 'connectToken', errorOf(errorCodes.clientConnectToken, err));
+      this.retry(bootstrap, result, resume, 'connectToken', this.host.createError(errorCodes.clientConnectToken, err?.toString() ?? ''));
       return;
     }
     if (!this.isCurrent(bootstrap)) {
@@ -214,7 +252,7 @@ export class TokenExchangeFlow {
         this.client['_failUnauthorized']();
         return;
       }
-      this.retry(bootstrap, result, resume, 'connectToken', errorOf(errorCodes.clientConnectToken, err));
+      this.retry(bootstrap, result, resume, 'connectToken', this.host.createError(errorCodes.clientConnectToken, err?.toString() ?? ''));
       return;
     }
     if (!this.isCurrent(bootstrap)) {
@@ -224,7 +262,8 @@ export class TokenExchangeFlow {
   }
 
 
-  // Reports a failed step of a bootstrap, and runs the step again on the same connection after a backoff.
+  // Reports a failed step of a bootstrap, and runs the step again on the same connection after a backoff. The backoff
+  // counts the failed steps since the last bootstrap completed, so it escalates across reconnects too.
   private retry(bootstrap: Bootstrap, result: any, resume: (result: any) => void, type: string, error: any): void {
     if (!this.isCurrent(bootstrap)) {
       return;
@@ -233,46 +272,58 @@ export class TokenExchangeFlow {
       if (!this.isCurrent(bootstrap)) {
         return;
       }
-      const delay: number = backoff(bootstrap.attempt, 5000, 60000);
-      bootstrap.attempt++;
+      const delay: number = backoff(this.failures, 5000, 60000);
+      this.failures++;
       bootstrap.timer = setTimeout((): void => {
-        void this.connectStep(bootstrap, result, resume);
+        this.start(bootstrap, result, resume);
       }, delay);
     });
   }
 
 
-  // Sets the access token and refreshes the anonymous connection with it, on the connection of the attempt. The access
-  // token is dropped when the command is refused or lost.
+  // Sets the access token and refreshes the anonymous connection with it, on the connection of the attempt.
   private refreshConnection(bootstrap: Bootstrap, result: any, resume: (result: any) => void, token: string): void {
     const cmd: any = { refresh: { token: token } };
     this.client['_token'] = token;
-    this.client['_call'](cmd, true).then((ctx: CallResolveContext): void => {
+    this.plainCall(cmd, result.session, result.node).then((ctx: CallResolveContext): void => {
       try {
-        if (this.isCurrent(bootstrap)) {
-          this.finish(bootstrap, result, resume, ctx.reply.refresh ?? {});
+        if (!this.isCurrent(bootstrap)) {
+          return;
+        }
+        if (ctx.reply.refresh) {
+          this.finish(bootstrap, result, resume, ctx.reply.refresh);
+        } else {
+          this.refreshFailed(bootstrap, result, resume, token, this.host.createError(errorCodes.clientConnectToken, 'refresh reply without identity'));
         }
       } finally {
         ctx.next?.();
       }
     }, (rejectCtx: CallRejectContext): void => {
       try {
-        if (this.client['_token'] === token) {
-          this.client['_token'] = '';
-        }
-        if (this.isCurrent(bootstrap)) {
-          const err: any = rejectCtx.error;
-          if (refreshRetries(err.code, err.temporary === true)) {
-            this.retry(bootstrap, result, resume, 'connect', err);
-          } else {
-            this.client['_disconnect'](err.code, err.message, false);
-          }
-        }
+        this.refreshFailed(bootstrap, result, resume, token, rejectCtx.error);
       } finally {
         rejectCtx.next?.();
       }
+    }).catch((err: any): void => {
+      this.client['_dispatchFailed'](err);
     });
-    writeCommands(this.host, [cmd], result.session, result.node);
+  }
+
+
+  // A refresh of a bootstrap that the server refused, or that gave no identity. The access token is dropped, unless
+  // the connection has moved on. A temporary refusal is retried with a new exchange; any other ends the connection.
+  private refreshFailed(bootstrap: Bootstrap, result: any, resume: (result: any) => void, token: string, err: any): void {
+    if (this.client['_token'] === token) {
+      this.client['_token'] = '';
+    }
+    if (!this.isCurrent(bootstrap)) {
+      return;
+    }
+    if (refreshRetries(err.code, err.temporary === true)) {
+      this.retry(bootstrap, result, resume, 'connect', err);
+    } else {
+      this.client['_disconnect'](err.code, err.message, false);
+    }
   }
 
 
@@ -280,6 +331,7 @@ export class TokenExchangeFlow {
   // and with the subscriptions the bootstrap held.
   private finish(bootstrap: Bootstrap, result: any, resume: (result: any) => void, refresh: any | null): void {
     this.bootstrap = null;
+    this.failures = 0;
     let merged: any = refresh === null ? result : {
       ...result,
       expires: refresh.expires,
@@ -329,13 +381,16 @@ export class TokenExchangeFlow {
 
 
   // One exchange: the app's exchange callback, then the store of the rotated refresh token, awaited before the access
-  // token is used. Resolves with the access token. The result of an abandoned attempt is neither stored nor used, and
-  // a failing store is reported: the issuer has already consumed the pair.
+  // token is used. Resolves with the access token. The access token of an abandoned attempt is not used, but its
+  // rotated refresh token is stored (see storeRotated): the issuer has already consumed the pair.
   private async exchangeWith(refreshToken: string, attempt: Attempt): Promise<string> {
     const result: TokenExchangeResult = await this.options.exchange({
       refreshToken: refreshToken,
       rpc: (method: string, data: any): Promise<RpcResult> => this.rpc(attempt.route, method, data),
     });
+    if (result && result.refreshToken && result.refreshToken !== refreshToken) {
+      await this.storeRotated(refreshToken, result.refreshToken, attempt);
+    }
     if (!attempt.current()) {
       throw this.host.createError(errorCodes.connectionClosed, 'connection closed during the token exchange');
     }
@@ -343,35 +398,50 @@ export class TokenExchangeFlow {
     if (!result || !result.token) {
       throw new Error('token exchange returned no token');
     }
-    if (result.refreshToken && result.refreshToken !== refreshToken) {
-      try {
-        await this.options.store(result.refreshToken);
-      } catch (err: any) {
-        this.client['_emitError']({ type: 'tokenStore', error: errorOf(errorCodes.badConfiguration, err) }, (): void => {});
-      }
-    }
     return result.token;
   }
 
 
-  // A plain rpc call on the connection the route names: no message id, no retransmit, and no wait for the connected state.
+  // Stores a rotated refresh token the issuer issued. An abandoned attempt stores it only while the application still
+  // holds the token the attempt exchanged: a rotation made meanwhile by a newer exchange is kept, so the late result of
+  // an old attempt never overwrites a newer token. A failing store is reported, and the exchange goes on.
+  private async storeRotated(used: string, rotated: string, attempt: Attempt): Promise<void> {
+    try {
+      if (!attempt.current() && (await this.options.load()) !== used) {
+        return;
+      }
+      await this.options.store(rotated);
+    } catch (err: any) {
+      this.client['_emitError']({ type: 'tokenStore', error: this.host.createError(errorCodes.clientRefreshToken, err?.toString() ?? '') }, (): void => {});
+    }
+  }
+
+
+  // A plain call on the connection of a session and node: no message id, no retransmit, no wait for the connected state.
+  // Settles with the reply context, or rejects with the rejection context: the caller calls next() of the context it gets.
+  private plainCall(cmd: any, session: string, node: string): Promise<CallResolveContext> {
+    const call: Promise<CallResolveContext> = this.client['_call'](cmd, true);
+    if (!writeCommands(this.host, [cmd], session, node)) {
+      this.host.handleWriteError([cmd], false);
+    }
+    return call;
+  }
+
+
+  // The rpc call of the exchange, on the connection the route names.
   private rpc(route: () => Route, method: string, data: any): Promise<RpcResult> {
-    return new Promise<RpcResult>((resolve: (result: RpcResult) => void, reject: (err: any) => void): void => {
-      const cmd: any = { rpc: { method: method, data: data } };
-      this.client['_call'](cmd, true).then((ctx: CallResolveContext): void => {
+    const target: Route = route();
+    return this.plainCall({ rpc: { method: method, data: data } }, target.session, target.node).then(
+      (ctx: CallResolveContext): RpcResult => {
         try {
-          resolve({ data: ctx.reply.rpc?.data });
+          return { data: ctx.reply.rpc?.data };
         } finally {
           ctx.next?.();
         }
-      }, (rejectCtx: CallRejectContext): void => {
-        reject(rejectCtx.error);
+      },
+      (rejectCtx: CallRejectContext): never => {
         rejectCtx.next?.();
+        throw rejectCtx.error;
       });
-      const target: Route = route();
-      if (!writeCommands(this.host, [cmd], target.session, target.node)) {
-        reject(this.host.createError(errorCodes.connectionClosed, 'connection closed'));
-      }
-    });
   }
 }
