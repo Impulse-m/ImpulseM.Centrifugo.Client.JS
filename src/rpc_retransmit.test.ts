@@ -681,6 +681,24 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(fourthSend.rpc.retransmit).toBeUndefined();
   });
 
+  test('a call dropped from the batch before its write is sent on the reconnect as a first send', async (): Promise<void> => {
+    const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
+    await connect(c);
+    server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: codecCase.encode({}) } } : undefined);
+    // The call is collected for the batch of the write, and the connection ends before the batch is written.
+    (c as any)._batching = true;
+    const call: Promise<RpcResult> = quiet(c.rpc('echo', codecCase.encode({})));
+    await until((): boolean => (c as any)._commands.length === 1);
+    (c as any)._disconnect(connectingCodes.transportClosed, 'transport closed', true);
+
+    const result: RpcResult = await call;
+
+    expect(codecCase.decode(result.data)).toEqual({});
+    expect(callCommands()).toHaveLength(1);
+    // The batch was never written: the server has not seen the message id, so the call is not a retransmit.
+    expect(callCommands()[0].rpc.retransmit).toBeUndefined();
+  });
+
   test('a write error on the calls sent with a reconnect sends all of them again on the next connection', async (): Promise<void> => {
     const c: Centrifuge = create({ timeout: 2000, minReconnectDelay: 50, maxReconnectDelay: 50 });
     await connect(c);
