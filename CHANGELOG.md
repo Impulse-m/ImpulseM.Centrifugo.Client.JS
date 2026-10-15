@@ -1,3 +1,10 @@
+Unreleased
+==========
+
+* Add the `tokenExchange` option: the application persists a refresh token, and the client obtains and renews its connection token itself, over the connection, with `load`, `store` and `exchange` callbacks. A rotated refresh token is stored before the access token it came with is used. Exclusive with `getToken`: setting both throws when the client is created. Default `null`.
+* With `tokenExchange`, the renewal of the connection token runs at a random moment between 0.7 and 0.9 of its ttl, so clients that connected together spread their renewals. Without the option the renewal stays at the ttl, as before.
+* Add the `tokenStore` error type: the `store` callback of `tokenExchange` threw or rejected, and the exchange went on with its access token.
+
 1.2.0
 =====
 
@@ -26,9 +33,6 @@
 * A command that the codec refuses is never acknowledged as received: its call rejects, and the acknowledgements the refused command carried go with the next command.
 * Default behaviour change from upstream: an rpc call waits for a refresh command in flight before it goes out, also on a client without an `instance`. Upstream sends it at once. The wait is bounded by the deadline of the call.
 * A call made in the gap between the connection being ready and its tracking waits for the next connection when the connection drops there. A call whose write fails and whose app handler throws during the reconnect settles once with that exception, and is not sent again.
-* Add the `tokenExchange` option: the application persists a refresh token, and the client obtains and renews its connection token itself, over the connection, with `load`, `store` and `exchange` callbacks. A rotated refresh token is stored before the access token it came with is used. Exclusive with `getToken`: setting both throws when the client is created. Default `null`.
-* With `tokenExchange`, the renewal of the connection token runs at a random moment between 0.7 and 0.9 of its ttl, so clients that connected together spread their renewals. Without the option the renewal stays at the ttl, as before.
-* Add the `tokenStore` error type: the `store` callback of `tokenExchange` threw or rejected, and the exchange went on with its access token.
 
 5.0.2 and higher
 ================
