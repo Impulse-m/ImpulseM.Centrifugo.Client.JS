@@ -4,11 +4,11 @@ import { Options, RpcResult, State } from './types';
 import { format } from 'util';
 import {
   CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, holdReply, rpcOptionsWireFlag, until,
-} from './test_codecs';
+} from './testing/codecs';
 
 // Tracked RPC calls: message ids, the retransmit of calls that lost their transport, the queue
 // bound, acknowledgements, deadlines, cancels, legacy connections and the instance option. Every
-// case runs over both codecs (see test_codecs.ts).
+// case runs over both codecs (see testing/codecs.ts).
 
 // A call of the application: an rpc command that is not a cancel.
 function isCall(cmd: any): boolean {

@@ -2,10 +2,10 @@ import { Centrifuge } from './centrifuge';
 import { errorCodes } from './codes';
 import { maxRefreshCalls } from './refresh_slot';
 import { AuthContext, Options, State } from './types';
-import { CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, holdReply, until } from './test_codecs';
+import { CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, holdReply, until } from './testing/codecs';
 
 // The identity of a connection: the user and auth class of the connect and refresh replies,
-// the 'auth' event and the refresh() call. Every case runs over both codecs (see test_codecs.ts).
+// the 'auth' event and the refresh() call. Every case runs over both codecs (see testing/codecs.ts).
 
 describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): void => {
   let server: WaitableFakeServer;

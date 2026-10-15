@@ -1,7 +1,7 @@
-import { Centrifuge } from './centrifuge';
-import { Centrifuge as ProtobufCentrifuge } from './protobuf';
-import { FakeCentrifugoServer, FakeCodec } from './fakeServer';
-import { Options, TransportName } from './types';
+import { Centrifuge } from '../centrifuge';
+import { Centrifuge as ProtobufCentrifuge } from '../protobuf';
+import { FakeCentrifugoServer, FakeCodec } from '../fakeServer';
+import { Options, TransportName } from '../types';
 import WebSocket, { WebSocketServer } from 'ws';
 
 // The codec cases and the connect and cleanup helpers the suites over both codecs share.

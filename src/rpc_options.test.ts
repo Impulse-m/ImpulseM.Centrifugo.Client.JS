@@ -2,10 +2,10 @@ import { Centrifuge } from './centrifuge';
 import { FakeCentrifugoServer } from './fakeServer';
 import { errorCodes } from './codes';
 import { State } from './types';
-import { CodecCase, codecCases, rpcOptionsWireFlag } from './test_codecs';
+import { CodecCase, codecCases, rpcOptionsWireFlag } from './testing/codecs';
 
 // RPC options (per-call headers), the rpc capability, server error fields and server
-// time. Every case runs over both codecs (see test_codecs.ts).
+// time. Every case runs over both codecs (see testing/codecs.ts).
 
 describe.each(codecCases)('RPC options over $name', (codecCase: CodecCase) => {
   let server: FakeCentrifugoServer;
