@@ -1,3 +1,9 @@
+Unreleased
+==========
+
+* Document publish debouncing (the window of `client_publish_debounce_interval`, per key on map subscriptions, pending data dropped on unsubscribe and disconnect), channel compaction, and delta without positioning when the server keeps the latest publication.
+* Add fake-server tests for publish debouncing: coalescing inside the window, a publish after an idle window, independent map key windows, remove of a pending key and unsubscribe with a pending value.
+
 1.2.0
 =====
 

@@ -799,6 +799,19 @@ sub.publish({"input": "hello world"}).then(function() {
 
 *Note, that in order publish to work in Centrifugo corresponding option must be enabled in server channel configuration or client should have capability to publish*.
 
+#### Publish debouncing
+
+When the server sets a publish debounce interval for the channel (Centrifugo option `client_publish_debounce_interval`, returned to the client in the subscribe reply), the SDK coalesces rapid publishes:
+
+* the first publish goes out at once and opens a window of that interval;
+* publishes inside the window replace the pending data, and their promises resolve immediately; when the window closes, the latest data is sent and a new window opens;
+* a publish after an idle window goes out at once again;
+* on a map subscription each key has its own window;
+* pending data is dropped on `unsubscribe()`, on disconnect and on `remove(key)` of that key, and nothing more is sent for it;
+* an error of a publish sent when a window closes is not reported, since no caller awaits it.
+
+Debouncing is meant for fire-and-forget data such as cursor positions. Use it only when intermediate values may be dropped: a publish that is replaced inside the window is never delivered.
+
 #### unsubscribe method of subscription
 
 You can call `unsubscribe` method to unsubscribe from a channel:
@@ -939,11 +952,17 @@ Max delay between resubscribe attempts in milliseconds. Default is `20000`.
 
 Delta format to be used for differential updates. Currently only `'fossil'` is supported. Cannot be used together with `tagsFilter`.
 
+Delta also works without positioning (no `since`, no recovery) when the server keeps the latest publication of the channel (`keep_latest_publication`): the first publication after subscribe is full; later publications are deltas when the publisher sets `delta` on publish (or the namespace has `delta_publish`). The base is kept per node, so this is at most once; map subscriptions are not covered.
+
 ```javascript
 const sub = centrifuge.newSubscription("news", {
     delta: 'fossil'
 });
 ```
+
+#### Channel compaction
+
+When the server allows channel compaction (`allow_channel_compaction`), the SDK negotiates a numeric channel id on subscribe automatically, and the server then sends the id instead of the channel name in publication, join and leave pushes. Nothing needs to be configured on the client. Server-side subscriptions (for example those from the connection token) are not compacted.
 
 #### tagsFilter
 
