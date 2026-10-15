@@ -188,11 +188,11 @@ export class RpcTracker {
 
   /**
    * Rejects all tracked calls, e.g. on a disconnect that will not be followed by a reconnect. A call that
-   * was written rejects with the code given; a call never written rejects with cancelled, whatever the
+   * was written rejects with the code given, and its cancel is kept for the next connection that carries
+   * cancels: the server may have run it. A call never written rejects with cancelled, whatever the
    * connection state: nothing reached the server.
    */
   rejectAll(code: number, message: string): void {
-    this.cancels = [];
     this.queue.clearAcks();
     for (const timer of this.forgets) {
       timer.clear();
@@ -201,6 +201,7 @@ export class RpcTracker {
     for (const call of this.queue.clear()) {
       this.settle(call);
       if (call.sent) {
+        this.keepCancel(call.msgId);
         call.reject(this.host.createError(code, message));
       } else {
         call.reject(this.host.createError(errorCodes.cancelled, 'cancelled'));

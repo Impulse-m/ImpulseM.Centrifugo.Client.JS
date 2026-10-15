@@ -555,6 +555,22 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       .toBe(false);
   });
 
+  test('a sent call rejected at a terminal disconnect gets its cancel with the next connect', async (): Promise<void> => {
+    const c: Centrifuge = create();
+    await connect(c);
+    holdCalls();
+    const call: Promise<RpcResult> = quiet(c.rpc('x', codecCase.encode({})));
+    const sent: any = await server.waitFor(isCall);
+
+    c.disconnect();
+    await expect(call).rejects.toMatchObject({ code: errorCodes.connectionClosed });
+    // The server may have run the call: the cancel waits for the next connection, which carries it.
+    await connect(c);
+
+    const cancel: any = await server.waitFor(isCancel);
+    expect(cancel.rpc.cancel).toBe(sent.rpc.msg_id);
+  });
+
   test('a cancel whose write fails is sent again with the next connection', async (): Promise<void> => {
     const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
     await connect(c);
