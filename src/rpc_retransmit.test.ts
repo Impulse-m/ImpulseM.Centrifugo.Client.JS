@@ -1236,15 +1236,18 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
     await connect(c);
     const track: (request: any) => Promise<RpcResult> = (c as any)._rpc.track.bind((c as any)._rpc);
-    let tracked: number = 0;
+    let markTracked: () => void = (): void => {};
+    const tracked: Promise<void> = new Promise<void>((resolve: () => void): void => {
+      markTracked = resolve;
+    });
     (c as any)._rpc.track = (request: any): Promise<RpcResult> => {
       // The connection is lost before the call is written: the call is tracked and waits for a connection.
-      tracked++;
+      markTracked();
       (c as any)._disconnect(connectingCodes.transportClosed, 'transport closed', true);
       return track(request);
     };
     const unsent: Promise<RpcResult> = quiet(c.rpc('x', codecCase.encode({})));
-    await until((): boolean => tracked === 1);
+    await tracked;
     // The second call waits in ready(), for a connection that does not come.
     const waiting: Promise<RpcResult> = quiet(c.rpc('y', codecCase.encode({})));
 
