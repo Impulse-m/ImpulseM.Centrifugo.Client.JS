@@ -268,6 +268,40 @@ describe('RpcTracker', () => {
     await expect(call).resolves.toMatchObject({ data: 'done' });
   });
 
+  test('the callbacks of a cancel are dropped one call timeout after it is sent, and its timer is cleared at a terminal disconnect', async (): Promise<void> => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] });
+    try {
+      const host: StubHost = new StubHost();
+      const tracker: RpcTracker = new RpcTracker(host, 32, 30000);
+      const controller: AbortController = new AbortController();
+      const call: Promise<RpcResult> = tracker.call('m', {}, { signal: controller.signal }, Date.now() + 60000);
+      await settleMicrotasks();
+      controller.abort();
+      await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
+      const cancelId: number = host.commands[1].id;
+
+      jest.advanceTimersByTime(29999);
+      expect(host.callbacks.has(cancelId)).toBe(true);
+      // The call timer runs its callback one more timer tick after the due time.
+      jest.advanceTimersByTime(2);
+      expect(host.callbacks.has(cancelId)).toBe(false);
+
+      // A terminal disconnect clears the timer of a cancel still waiting for its reply: its callbacks stay.
+      const secondController: AbortController = new AbortController();
+      const second: Promise<RpcResult> = tracker.call('n', {}, { signal: secondController.signal }, Date.now() + 60000);
+      await settleMicrotasks();
+      secondController.abort();
+      await expect(second).rejects.toMatchObject({ code: errorCodes.cancelled });
+      const laterCancelId: number = host.commands[host.commands.length - 1].id;
+      tracker.rejectAll(errorCodes.connectionClosed, 'connection closed');
+
+      jest.advanceTimersByTime(60000);
+      expect(host.callbacks.has(laterCancelId)).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a cancel the codec refuses is not kept for the next connection', async (): Promise<void> => {
     const host: StubHost = new StubHost();
     const tracker: RpcTracker = new RpcTracker(host, 32, 30000);

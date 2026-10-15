@@ -25,6 +25,11 @@ const laterResendBase: number = 250;
 
 type RetrySignal = 'new_msg_id' | 'later' | null;
 
+// The result of an rpc reply: cached is true when the server answered from the record of an earlier attempt.
+function rpcResult(rpc: any): RpcResult {
+  return { data: rpc.data, cached: rpc.cached === true };
+}
+
 /**
  * The resend signal of a server error: 'new_msg_id' when the server did not run the call and refused its
  * message id, 'later' when it did not run the call and the message id is still good, null otherwise.
@@ -256,10 +261,7 @@ export class RpcTracker {
       cmd.rpc.headers = headers;
     }
     const result: any = await this.host.plainCall(cmd, request.deadline);
-    return {
-      data: result.data,
-      cached: result.cached === true
-    };
+    return rpcResult(result);
   }
 
 
@@ -402,23 +404,27 @@ export class RpcTracker {
   // sent again.
   private cancel(msgId: number): void {
     const rpc: any = { cancel: msgId };
-    this.dispatch(rpc, (id: number, acks: number[]): RpcCallbacks => ({
-      callback: (ctx: CallResolveContext): void => ctx.next?.(),
-      errback: (ctx: CallRejectContext): void => {
-        if (ctx.refused === true) {
-          // A cancel the codec refuses is not kept: it would be refused again with every connection.
+    this.dispatch(rpc, (id: number, acks: number[]): RpcCallbacks => {
+      // Its callbacks live one call timeout, like those of a settled call: see forgetCommand.
+      this.forgetCommand(id);
+      return {
+        callback: (ctx: CallResolveContext): void => ctx.next?.(),
+        errback: (ctx: CallRejectContext): void => {
+          if (ctx.refused === true) {
+            // A cancel the codec refuses is not kept: it would be refused again with every connection.
+            this.restoreAcks(acks);
+            return;
+          }
+          if (ctx.next !== undefined) {
+            ctx.next();
+            return;
+          }
+          this.keepCancel(msgId);
           this.restoreAcks(acks);
-          return;
-        }
-        if (ctx.next !== undefined) {
-          ctx.next();
-          return;
-        }
-        this.keepCancel(msgId);
-        this.restoreAcks(acks);
-      },
-      timeout: callTimer(Date.now() + this.callTimeout, (): void => this.host.deleteCallbacks(id)),
-    }));
+        },
+        timeout: null,
+      };
+    });
   }
 
 
@@ -448,11 +454,7 @@ export class RpcTracker {
   // before (aborted or expired).
   private replied(call: TrackedRpc, ctx: CallResolveContext): void {
     this.answered(call, ctx, (): void => {
-      const result: any = ctx.reply.rpc || {};
-      call.resolve({
-        data: result.data,
-        cached: result.cached === true,
-      });
+      call.resolve(rpcResult(ctx.reply.rpc || {}));
     });
   }
 
