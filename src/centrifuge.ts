@@ -24,12 +24,11 @@ import {
 } from './utils';
 
 import {
-  rpcOptionsFlag, hasFlag, serverErrorFields, serverTimeOffsetFrom, normaliseRpcOptions, loggedConfig,
-  defaultMaxPendingRpc,
+  rpcOptionsFlag, hasFlag, serverErrorFields, serverTimeOffsetFrom, normaliseRpcOptions, loggedConfig, defaultMaxPendingRpc,
 } from './extensions';
 
 import { CallTimer, callTimer } from './call_timer';
-import { RpcHost, RpcTracker } from './rpc_tracker';
+import { CallRejectContext, CallResolveContext, RpcHost, RpcTracker } from './rpc_tracker';
 import { createClientHost } from './client_host';
 import { RefreshSlot, RefreshSlotHost, refreshKeepsConnection, refreshRetries } from './refresh_slot';
 import { ConnectionIdentity } from './identity';
@@ -104,9 +103,6 @@ interface serverSubscription {
   // Its subscribed event was emitted and no subscribing event since.
   subscribed?: boolean;
 }
-
-export type CallResolveContext = { reply: any; next?: () => void };
-export type CallRejectContext = { error: any; next?: () => void };
 
 export class UnauthorizedError extends Error {
   constructor(message: any) {
@@ -921,7 +917,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
   }
 
-  private _handleWriteError(commands: any[]) {
+  private _handleWriteError(commands: any[], refused: boolean = false) {
     for (const command of commands) {
       const id = command.id;
       if (!(id in this._callbacks)) {
@@ -931,7 +927,10 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       this._callbacks[id].timeout?.clear();
       delete this._callbacks[id];
       const errback = callbacks.errback;
-      errback({ error: this._createErrorObject(errorCodes.transportWriteError, 'transport write error') });
+      errback({
+        error: this._createErrorObject(errorCodes.transportWriteError, 'transport write error'),
+        next: refused ? (): void => {} : undefined,
+      });
     }
   }
 
@@ -942,8 +941,15 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     if (!this._transport) {
       return false
     }
+    let data: any;
     try {
-      this._transport.send(this._codec.encodeCommands(commands), this._session, this._node);
+      data = this._codec.encodeCommands(commands);
+    } catch (e) {
+      this._handleWriteError(commands, true);
+      return false;
+    }
+    try {
+      this._transport.send(data, this._session, this._node);
     } catch (e) {
       this._debug('error writing commands', e);
       this._handleWriteError(commands);
@@ -2017,7 +2023,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     const self = this;
     // See _startReconnecting.
     let tokenResolved = false;
-    // A refresh() call started, or a token accepted, while the token is fetched supersedes it (see sendTimer).
+    // A refresh() call or an accepted token while the token is fetched supersedes it (see sendTimer).
     const generation: number = this._refreshSlot.currentGeneration();
     this._getToken().then(function (token) {
       tokenResolved = true;
@@ -2035,7 +2041,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
       self._refreshSlot.sendTimer(token, generation).then(resolveCtx => {
         if (resolveCtx === null) {
-          self._refresh();
           return;
         }
         try {
@@ -2094,10 +2099,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         this._refreshTimeout = setTimeout(() => this._refresh(), this._getRefreshRetryDelay());
       });
     } else if (refreshKeepsConnection(err.code)) {
-      this.emit('error', {
-        type: 'refresh',
-        error: err
-      });
+      this._emitError({ type: 'refresh', error: err }, () => {});
     } else {
       this._disconnect(err.code, err.message, false);
     }
@@ -2105,25 +2107,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   private _getRefreshRetryDelay() {
     return backoff(0, 5000, 10000);
-  }
-
-  /** @internal Read by the host of the refresh slot (client_host.ts), which applies the refresh replies it accepts. */
-  _refreshResponse(result: any) {
-    if (this._refreshTimeout) {
-      clearTimeout(this._refreshTimeout);
-      this._refreshTimeout = null;
-    }
-    if (result.expires) {
-      // The client id of the connection only changes if the reply carries one — and
-      // Centrifugo never sets that field of a refresh reply. Taking an absent one
-      // leaves the client without an id, and the checks comparing against it stop
-      // recognising a token fetch, or a reply, of a connection that is gone.
-      if (result.client) {
-        this._client = result.client;
-      }
-      this._refreshTimeout = setTimeout(() => this._refresh(), ttlMilliseconds(result.ttl));
-    }
-    this._identity.applyRefresh(result);
   }
 
   // A new subscription of the channel waits for the unsubscribe of a removed one, and

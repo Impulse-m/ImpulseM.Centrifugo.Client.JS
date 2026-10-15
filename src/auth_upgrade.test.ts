@@ -44,6 +44,15 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
     return server.received.filter((cmd: any): boolean => cmd.refresh !== undefined);
   }
 
+  // Lets the pending callbacks and replies run: a few turns of the event loop, no wait for a time.
+  async function flushTimers(): Promise<void> {
+    for (let i: number = 0; i < 10; i++) {
+      await new Promise<void>((resolve: () => void): void => {
+        setImmediate(resolve);
+      });
+    }
+  }
+
   test('connected context carries the user and auth class of the connect reply', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated' };
     const c: Centrifuge = create();
@@ -435,12 +444,12 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
     inFlight.shift();
     await explicit;
 
-    const timerCommand: any = await server.waitFor((cmd: any): boolean => cmd.refresh !== undefined && cmd.refresh.token === 'timer-token');
-    server.send({ id: timerCommand.id, refresh: {} });
-    inFlight.shift();
+    // The timer token was fetched while the explicit refresh was in flight, and the explicit token is accepted
+    // since: the timer token is superseded, and not sent. Its getToken is not called again.
+    await flushTimers();
 
     expect(overlapped).toBe(false);
-    expect(refreshCommands().map((cmd: any): string => cmd.refresh.token)).toEqual(['explicit-token', 'timer-token']);
+    expect(refreshCommands().map((cmd: any): string => cmd.refresh.token)).toEqual(['explicit-token']);
   });
 
   test('the token of the next connect is the last accepted refresh, a timer refresh queued behind an explicit one included', async (): Promise<void> => {
@@ -470,7 +479,7 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
     const anonCommand: any = await server.waitFor((cmd: any): boolean => cmd.refresh !== undefined && cmd.refresh.token === 'anon-token');
     server.send({ id: anonCommand.id, refresh: {} });
     await anon;
-    await server.waitFor((cmd: any): boolean => cmd.refresh !== undefined && cmd.refresh.token === 'timer-token');
+    await flushTimers();
 
     const reconnected: Promise<void> = new Promise<void>((resolve: () => void): void => {
       c.once('connected', (): void => resolve());
@@ -478,7 +487,7 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
     server.closeConnection();
     await reconnected;
 
-    expect(connectCommands()[1].connect.token).toBe('timer-token');
+    expect(connectCommands()[1].connect.token).toBe('anon-token');
   });
 
   test('an rpc waiting for a refresh ends at its deadline, also when the refresh waits for a reconnect', async (): Promise<void> => {
@@ -603,15 +612,64 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
       await new Promise<void>((resolve: () => void): void => {
         setImmediate(resolve);
       });
-      // The superseded token is not sent: the timer is due again, and fetches a token once more.
-      jest.advanceTimersByTime(0);
+      // The superseded token is not sent, and the token is not fetched again: the explicit token of the connection
+      // is accepted, and the timer is not armed for a token without expiry.
+      jest.advanceTimersByTime(60000);
+      await flushTimers();
+      expect(fetches).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+
+    expect(refreshCommands().map((cmd: any): string => cmd.refresh.token)).toEqual(['t2']);
+    expect(authEvents[authEvents.length - 1]).toMatchObject({ user: 'bob', authClass: 'bot' });
+  });
+
+  test('a timer refresh superseded by a refused refresh() is retried by the timer, which the refusal left unarmed', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated', expires: true, ttl: 1 };
+    server.onCommand = (cmd: any): any => {
+      if (cmd.refresh === undefined) {
+        return undefined;
+      }
+      return cmd.refresh.token === 't2'
+        ? { id: cmd.id, error: { code: 103, message: 'transition not allowed' } }
+        : { id: cmd.id, refresh: { expires: true, ttl: 60 } };
+    };
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      let fetches: number = 0;
+      let answerFirst: (token: string) => void = (): void => {};
+      const getToken: () => Promise<string> = (): Promise<string> => {
+        fetches++;
+        if (fetches === 1) {
+          return new Promise<string>((resolve: (token: string) => void): void => {
+            answerFirst = resolve;
+          });
+        }
+        return Promise.resolve('t3');
+      };
+      const c: Centrifuge = create({ token: 't0', getToken: getToken });
+      await connect(c);
+
+      jest.advanceTimersByTime(1000);
+      await until((): boolean => fetches === 1);
+      const refused: Promise<AuthContext> = c.refresh('t2');
+      await expect(refused).rejects.toMatchObject({ code: 103 });
+
+      // The timer token is superseded by the refused refresh(): it is not sent. The refusal left the timer unarmed,
+      // so the superseded timer arms it, and the connection refreshes again when that retry is due.
+      answerFirst('t1');
+      await flushTimers();
+      expect(refreshCommands().map((cmd: any): string => cmd.refresh.token)).toEqual(['t2']);
+
+      jest.advanceTimersByTime(20000);
+      await until((): boolean => fetches === 2);
       await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 2);
     } finally {
       jest.useRealTimers();
     }
 
-    expect(refreshCommands().map((cmd: any): string => cmd.refresh.token)).toEqual(['t2', 't2']);
-    expect(authEvents[authEvents.length - 1]).toMatchObject({ user: 'bob', authClass: 'bot' });
+    expect(refreshCommands().map((cmd: any): string => cmd.refresh.token)).toEqual(['t2', 't3']);
   });
 
   test('an auth handler that throws on a refresh does not fail the refresh, whose token is accepted', async (): Promise<void> => {

@@ -2,8 +2,12 @@ import { errorCodes } from './codes';
 import { CallTimer, callTimer, raceCall } from './call_timer';
 import { hasHeaders } from './extensions';
 import { MsgIdGenerator, RpcQueue, TrackedRpc } from './rpc_queue';
-import type { CallRejectContext, CallResolveContext } from './centrifuge';
 import { RpcOptions, RpcResult } from './types';
+
+/** The reply of a command, and next() to acknowledge it. */
+export type CallResolveContext = { reply: any; next?: () => void };
+/** The rejection of a command: next() is absent when the connection ended before a reply. */
+export type CallRejectContext = { error: any; next?: () => void };
 
 // The metadata key the server sets on its own rpc errors, and its two values, see retrySignal. Error
 // metadata of the server cannot carry this key itself.
@@ -23,7 +27,7 @@ type RetrySignal = 'new_msg_id' | 'later' | null;
  * message id, 'later' when it did not run the call and the message id is still good, null otherwise.
  * @internal
  */
-export function retrySignal(error: any): RetrySignal {
+function retrySignal(error: any): RetrySignal {
   const value: any = error?.metadata?.[rpcRetryMetadataKey];
   if (value === rpcRetryNewMsgId || value === rpcRetryLater) {
     return value;

@@ -10,6 +10,7 @@ function trackedCall(msgId: number, commandId: number): TrackedRpc {
     data: null,
     headers: undefined,
     deadline: 0,
+    request: { method: 'x', data: null, opts: undefined, deadline: 0, release: (): void => {} },
     commandId: commandId,
     sent: commandId > 0,
     timer: null,

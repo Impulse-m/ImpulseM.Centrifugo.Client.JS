@@ -1,6 +1,5 @@
 import { errorCodes } from './codes';
-import { RpcCallbacks, RpcHost, RpcTracker } from './rpc_tracker';
-import { CallResolveContext } from './centrifuge';
+import { CallResolveContext, RpcCallbacks, RpcHost, RpcTracker } from './rpc_tracker';
 import { RpcResult } from './types';
 
 // The tracker against a host that records what it writes, without a client or a socket.

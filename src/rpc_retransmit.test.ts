@@ -1210,6 +1210,28 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(callCommands()[0].rpc.msg_id).toBeUndefined();
   });
 
+  test('a call that cannot be encoded rejects with transportWriteError, without a reconnect, and the next call still succeeds', async (): Promise<void> => {
+    const c: Centrifuge = create();
+    await connect(c);
+    server.onCommand = (cmd: any): any => (isCall(cmd)
+      ? { id: cmd.id, rpc: { data: codecCase.encode({ n: 2 }) } }
+      : undefined);
+    let connecting: number = 0;
+    c.on('connecting', (): void => {
+      connecting++;
+    });
+
+    // A method that is not a string cannot be encoded, by either codec: the call is refused by the write, not lost
+    // with the connection, so the connection stays and the other calls on it go on.
+    await expect(c.rpc(BigInt(1) as any, codecCase.encode({}))).rejects.toMatchObject({ code: errorCodes.transportWriteError });
+    const result: RpcResult = await c.rpc('echo', codecCase.encode({}));
+
+    expect(codecCase.decode(result.data)).toEqual({ n: 2 });
+    expect(callCommands()).toHaveLength(1);
+    expect(connecting).toBe(0);
+    expect(c.state).toBe(State.Connected);
+  });
+
   test('a terminal disconnect rejects a call never written with cancelled, and a call still waiting for a connection with clientDisconnected', async (): Promise<void> => {
     const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
     await connect(c);

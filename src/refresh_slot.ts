@@ -1,5 +1,5 @@
 import { errorCodes } from './codes';
-import type { CallResolveContext } from './centrifuge';
+import type { CallResolveContext } from './rpc_tracker';
 import type { ConnectionIdentity } from './identity';
 import { AuthContext } from './types';
 
@@ -40,6 +40,8 @@ export interface RefreshSlotHost {
   debug(message: string): void;
   /** Applies the reply of a refresh command to the identity of the connection. */
   applyReply(result: any): void;
+  /** Arms the refresh timer, when none is armed, to retry the refresh of a connection whose token expires. */
+  armRefreshRetry(): void;
   identity(): ConnectionIdentity;
   /** Reports an error raised while a refresh was taken, e.g. by an 'auth' handler. */
   dispatchFailed(err: any): void;
@@ -62,6 +64,8 @@ export class RefreshSlot {
   private calls: number = 0;
   // Moves on with each refresh() call started and each token accepted, see sendTimer.
   private generationCount: number = 0;
+  // The generation of the last token accepted.
+  private acceptedGeneration: number = 0;
 
 
   constructor(host: RefreshSlotHost) {
@@ -164,6 +168,7 @@ export class RefreshSlot {
    */
   accepted(token: string, result: any): void {
     this.generationCount++;
+    this.acceptedGeneration = this.generationCount;
     this.host.setToken(token);
     this.host.debug('connection token refreshed');
     this.host.applyReply(result);
@@ -189,12 +194,17 @@ export class RefreshSlot {
   /**
    * Sends the token of a timer refresh, read at the given generation, once the command slot is free. It is
    * not sent when a refresh() call started or a token was accepted since: then it is superseded, and
-   * resolves with null. A refresh() call made while the token was fetched is never overwritten by it.
+   * resolves with null, and the token it fetched is not fetched again. A refresh() call made while the token
+   * was fetched is never overwritten by it. When no token was accepted since, the call may have been refused,
+   * and the refresh timer is armed to retry: a token accepted since has armed the timer itself.
    */
   async sendTimer(token: string, generation: number): Promise<CallResolveContext | null> {
     const release: () => void = await this.claimCommand();
     try {
       if (this.generationCount !== generation) {
+        if (this.acceptedGeneration <= generation) {
+          this.host.armRefreshRetry();
+        }
         return null;
       }
       return await this.host.sendCommand({ refresh: { token: token } });
@@ -217,17 +227,6 @@ export class RefreshSlot {
   }
 
 
-  // Takes the slot of a refresh command. A client disconnected for good first rejects with the error alone,
-  // and the command was never sent.
-  private async claimCommand(): Promise<() => void> {
-    try {
-      return await this.claim();
-    } catch (error) {
-      throw { error: error, unsent: true };
-    }
-  }
-
-
   /**
    * Resolves once the client is connected and no refresh is in flight, so an rpc call can go out. Rejects with
    * a timeout at the deadline (local time in milliseconds), or when the client is disconnected for good.
@@ -240,11 +239,22 @@ export class RefreshSlot {
   }
 
 
+  // Takes the slot of a refresh command. A client disconnected for good first rejects with the error alone,
+  // and the command was never sent.
+  private async claimCommand(): Promise<() => void> {
+    try {
+      return await this.claim();
+    } catch (error) {
+      throw { error: error, unsent: true };
+    }
+  }
+
+
   /**
    * Resolves once no refresh is in flight, the timer-driven ones included. A refresh that failed is
    * reported to its caller, not here.
    */
-  async settled(): Promise<void> {
+  private async settled(): Promise<void> {
     const pending: Promise<unknown> | null = this.callInFlight ?? this.commandInFlight;
     if (pending === null) {
       return;
@@ -263,7 +273,7 @@ export class RefreshSlot {
    * command is in flight. The returned function gives the slot back, once the command settled.
    * Rejects when the client is disconnected for good before the slot is free.
    */
-  async claim(): Promise<() => void> {
+  private async claim(): Promise<() => void> {
     while (this.commandInFlight !== null || !this.host.isConnected()) {
       if (this.commandInFlight !== null) {
         await this.commandInFlight;

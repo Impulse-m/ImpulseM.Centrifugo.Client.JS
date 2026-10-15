@@ -65,7 +65,7 @@ const instancePattern: RegExp = /^[A-Za-z0-9_-]{22,64}$/;
  * Whether a client instance identifier has the form the server accepts.
  * @internal
  */
-export function isValidInstance(instance: string): boolean {
+function isValidInstance(instance: string): boolean {
   return instancePattern.test(instance);
 }
 
