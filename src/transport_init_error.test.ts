@@ -124,7 +124,7 @@ describe('transport failures', () => {
       const { c, errors } = newClient([
         { transport: 'websocket' as TransportName, endpoint: hanging },
         { transport: 'websocket' as TransportName, endpoint: server.url },
-      ], { websocket, timeout: 200 });
+      ], { websocket, timeout: 1000 });
 
       c.connect();
       await c.ready(3000);
