@@ -42,9 +42,8 @@ export function callTimer(due: number, onDue: () => void): CallTimer {
  * onDue at the due time (local time in milliseconds, none when due is null), or onAbort when the signal aborts,
  * whichever comes first, and only once. Either call removes the timer and the abort listener first. A signal
  * that is aborted already calls onAbort at once and arms nothing. The returned timer clears the wait without a call.
- * @internal
  */
-export function armWait(
+function armWait(
   due: number | null,
   signal: AbortSignal | undefined,
   onDue: () => void,
