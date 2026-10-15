@@ -315,7 +315,7 @@ export class RpcTracker {
       };
       const signal: AbortSignal | undefined = request.opts?.signal;
       if (signal !== undefined) {
-        const onAbort = (): void => this.abort(call);
+        const onAbort: () => void = (): void => this.abort(call);
         signal.addEventListener('abort', onAbort, { once: true });
         call.detach = (): void => signal.removeEventListener('abort', onAbort);
       }
@@ -554,8 +554,9 @@ export class RpcTracker {
   }
 
 
-  // The connection was lost before the reply: the call waits for the next connection. The
-  // acknowledgements of the command that carried it were not delivered, so they are sent again.
+  // The connection was lost before the reply: the call waits for the next connection. The acknowledgements
+  // of the command that carried it may not have been delivered, so they are sent again: the server accepts
+  // a repeated ack.
   private lost(call: TrackedRpc, acks: number[]): void {
     call.commandId = 0;
     this.restoreAcks(acks);

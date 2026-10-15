@@ -100,7 +100,7 @@ export class RefreshSlot {
       : pending.then((): Promise<AuthContext> => this.run(token), (): Promise<AuthContext> => this.run(token));
     this.callInFlight = refresh;
     this.callToken = token;
-    const settled = (): void => {
+    const settled: () => void = (): void => {
       this.calls--;
       if (this.callInFlight === refresh) {
         this.callInFlight = null;
