@@ -101,6 +101,7 @@ export class FakeCentrifugoServer {
   /** Customize the subscribe result per channel (default: empty result). */
   onSubscribe: SubscribeHandler | null = null;
 
+  // Protected for WaitableFakeServer (test_codecs.ts), which extends it.
   protected constructor(wss: WebSocketServer, codec: FakeCodec) {
     this.wss = wss;
     this.codec = codec;
