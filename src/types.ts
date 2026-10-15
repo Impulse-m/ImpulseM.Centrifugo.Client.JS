@@ -515,8 +515,8 @@ export interface RpcOptions {
    * when it does not, rpc() rejects with error code `errorCodes.unsupported`. */
   headers?: Record<string, string>;
   /** Cancels the call when aborted: a cancel is sent to the server, and rpc() rejects with
-   * error code `errorCodes.cancelled`. Needs a server that supports RPC options, otherwise
-   * rpc() rejects with `errorCodes.unsupported` without sending the call. */
+   * error code `errorCodes.cancelled`. Needs a server that supports RPC options and an `instance`
+   * option; otherwise rpc() rejects with `errorCodes.unsupported` without sending the call. */
   signal?: AbortSignal;
 }
 

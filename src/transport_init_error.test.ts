@@ -118,35 +118,16 @@ describe('transport failures', () => {
       const counter = { calls: 0, closes: 0 };
       const hanging = 'ws://hanging.invalid/connection/websocket';
       const stub = stubWebSocket(counter, 'noop');
-      let nextStarted = false;
       const websocket = function (this: any, url: string) {
-        if (url === hanging) {
-          return new stub();
-        }
-        nextStarted = true;
-        return new WebSocket(url);
+        return url === hanging ? new stub() : new WebSocket(url);
       } as any;
       const { c, errors } = newClient([
         { transport: 'websocket' as TransportName, endpoint: hanging },
         { transport: 'websocket' as TransportName, endpoint: server.url },
       ], { websocket, timeout: 200 });
 
-      // The fake clock runs the connect timeout of the hanging transport and the reconnect that starts the next one,
-      // so the wall clock does not time out that socket under load. Its own connect timeout stays on the fake clock
-      // and never fires: the test ends once it is connected.
-      jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
-      try {
-        c.connect();
-        for (let i = 0; i < 100 && counter.calls < 1; i++) {
-          await new Promise<void>(r => setImmediate(r));
-        }
-        for (let i = 0; i < 10000 && !nextStarted; i++) {
-          jest.advanceTimersByTime(1);
-        }
-        await c.ready(3000);
-      } finally {
-        jest.useRealTimers();
-      }
+      c.connect();
+      await c.ready(3000);
 
       expect(counter.calls).toBe(1);
       expect(errors).toEqual(['transport:connect timeout']);
