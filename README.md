@@ -397,6 +397,7 @@ The client reports these errors itself, for calls it did not send or could not f
 | 15 | `unsupported` | the call was not sent: the connection cannot carry what it asks for (headers, a signal or a cancel) |
 | 16 | `limitExceeded` | the call was not sent: `maxPendingRpc` or the refresh bound |
 | 17 | `cancelled` | the call was cancelled by its signal |
+| 18 | `redirectFailed` | a redirect of an RPC pool call could not be fetched, see [RPC pool for large payloads](#rpc-pool-for-large-payloads) |
 
 Codes 15 to 19 are reserved for client-local errors of the fork SDKs; a server never sends them.
 
@@ -658,6 +659,70 @@ console.log('now connected as', identity.user);
 While the client is disconnected, the refresh is sent on the next connect, however long the reconnect takes: the call timeout does not apply to the refresh itself. At most 32 refresh calls can be in progress at once; beyond that `refresh` rejects with `errorCodes.limitExceeded`. Calls with the same token, or without one, made while a refresh is pending share its promise. A refresh with another token is sent after the one in flight, and each caller gets the identity of its own token. The explicit refresh and the timer-driven refresh never have two refresh commands in flight, and the reconnects use the token of the last refresh the server accepted. `rpc` calls wait for a refresh in flight, so they go out under the identity it confirms; such a wait ends at the call's own timeout, and rejects with `errorCodes.cancelled` when the call's signal aborts. When the server refuses the token, the promise rejects with the server error, the connection keeps its identity, and the reconnects keep the previous token. A timer-driven refresh that the server refuses is handled by the code of the error. A temporary error, or a client error with a code below 100, emits an `error` event with type `refresh` and is retried with backoff, with a token from `getToken`. A refusal with 109 (token expired) is handled the same way, and the retry uses a fresh token from `getToken`. A refusal with 103 (permission denied) emits the `error` event and keeps the connection with its identity; it is not retried, since the same token would be refused again. The server ends the connection at the expiry of the token, and the reconnect uses `getToken`. Any other error disconnects the client with its code. The retries of 109 and the keeping of the connection on 103 differ from the upstream client, which disconnects on both. Whether the server accepts a change of user is decided by the server configuration.
 
 Deploy the server before the clients that use the identity fields: a server that does not send `user` and `auth_class` in its refresh replies makes each refresh read as an anonymous connection.
+
+## RPC pool for large payloads
+
+`RpcPool` carries calls with large payloads (chunks of a few hundred KiB to a few MiB) over several connections, so that one transfer does not hold up the others. It is an ordinary client on a server configured for large frames: see the server's large-payload fleet. The pool speaks protobuf only, and it is exported from both entry points.
+
+```javascript
+const pool = new RpcPool({
+    // An endpoint key is whatever the server answered the application, e.g. a cluster or a region.
+    endpoints: (endpointKey) => endpointsOf(endpointKey),
+    connection: {token: "...", getToken: fetchToken, websocket: WebSocket},
+    affinityHeader: "x-affinity",
+    maxConnectionsPerEndpoint: 2,
+    maxInflightPerConnection: 2,
+    reroute: (error) => error.metadata?.["x-relocate"],
+    redirect: (reply, error) => redirectOf(reply, error),
+});
+
+const result = await pool.rpc("part.write", chunk, {endpointKey: "eu-2", affinity: hint});
+```
+
+### Options
+
+| Option | Default | Meaning |
+|---|---|---|
+| `endpoints(key)` | required | the endpoint or endpoints of a key; `''` is the key of a call without one. May return a promise. Resolved once per key, until `close()` |
+| `connection` | none | the options of each connection: `token`, `getToken`, `headers`, `name`, `version`, `timeout`, `websocket`, `minReconnectDelay`, `maxReconnectDelay`, `maxServerPingDelay`, `debug`. Any other option, `instance` in particular, throws `badConfiguration` |
+| `affinityHeader` | none | the header that carries a call's `affinity`. Required to pass one, and it must be allow-listed for the method on the server |
+| `maxConnectionsPerEndpoint` | `2` | connections opened per endpoint at most |
+| `maxInflightPerConnection` | `1` | calls in flight per connection. A window above `1` needs `client.concurrency >= window + 1` on the server |
+| `maxQueued` | `64` | calls waiting for a slot, over all endpoints. Beyond it `rpc()` rejects with `limitExceeded` |
+| `idleTimeout` | `60000` | a connection without calls closes after this many milliseconds; `0` keeps it open |
+| `retries` | `3` | resends of a call lost with its connection, refused with the `later` signal, or moved by `reroute`, counted together |
+| `reroute(error)` | none | returns the endpoint key a server error moves the call to, or `undefined` |
+| `redirect(reply, error)` | none | returns `{url, headers?, maxBytes?}` when the bytes of the call are served elsewhere, or `undefined` |
+| `maxRedirectsInflight` | `4` | redirect fetches in flight over the pool |
+| `fetch` | `globalThis.fetch` | the fetch function of redirects |
+
+`rpc(method, data, {endpointKey, affinity, headers, signal, timeout})` resolves with `{data, cached}` like `Centrifuge.rpc`. `timeout` defaults to the connection's `timeout` and covers the resends and the redirect fetch of the call. Each attempt is also bounded by the connection's own reply timeout.
+
+### Plain calls
+
+The calls are plain requests: they carry no message id and no instance, so the server never retransmits them and never runs a second copy of one. A call is sent again only where the contract allows it, and its method must be idempotent:
+
+- after its connection was lost before the reply, on a connection of its key;
+- when the server refuses it with the `later` signal, after the delay of the client's retry rule (uniform in `[0, 250 ms * 2^n]` for the `n`-th resend);
+- when `reroute` moves it to another key.
+
+A call never goes out again after its timeout or its cancel, and a connection the server closes for message size (close code 1009) settles its calls with `connectionClosed` without a resend: the chunk is over the frame limit of the server, and every attempt would fail the same way. The pool then emits `error` with the disconnect, and the next call opens a new connection.
+
+### Affinity and moves
+
+The `affinity` is a hint the backend issues when a transfer begins. The pool sends it as the `affinityHeader` on every call of the transfer. The server hashes it to a replica of the target; it does not parse it. A header of the call with the same name, or an affinity without `affinityHeader`, rejects with `badConfiguration`.
+
+A move is an error the server answers, with the trailers the method lists in `error_metadata`. The `reroute` hook returns the new endpoint key, and the call is sent there at once. The hook runs on server errors only, and only while the call has resends left. The application updates its own map of keys outside the pool.
+
+### Redirects
+
+A redirect is a reply or an error the application recognises in `redirect`. The pool fetches the bytes within the call's deadline and at most `maxRedirectsInflight` at a time, and the promise resolves with `{data}` the way a socket reply does. The URL must be `https:`, or `http:` on a `ws:` endpoint. A non-2xx status, a network failure or a body over `maxBytes` (16 MiB by default) rejects with `redirectFailed` (18). The pool does not fetch a redirect twice, because a presigned URL may be single-use. The hook is called with the outcome the server or the connection gave, not with the pool's own timeout or cancel.
+
+### Lifetime and state
+
+Connections open when a call needs one, and a connection opens only after the previous connect of its endpoint has completed. An idle connection is closed after `idleTimeout`; `idleTimeout: 0` starts no idle timer at all. A call without a redirect starts no fetch, and the redirect gate holds no timer. `stats()` returns `{connections, inflight, queued, redirects}` for the application's own pacing. `close()` disconnects every connection; waiting calls reject with `cancelled`, calls in flight with `connectionClosed`, and calls made after it with `clientClosed`.
+
+`pool.on("error", ({endpoint, error}) => ...)` reports a connection that ended for good with a code other than the one `close()` gives, such as a message size close or an unauthorized token.
 
 ## Subscription API
 

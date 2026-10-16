@@ -1,6 +1,9 @@
 Unreleased
 ==========
 
+* Add `RpcPool` for calls with large payloads: several connections per endpoint with a window of calls in flight each, a bounded wait queue, endpoint keys resolved by the application, a per-call affinity header, a `reroute` hook for server moves, a `redirect` hook whose bytes the pool fetches within the call's deadline, and a `stats()` view. Its calls are plain requests, retried after a lost connection, on a `later` refusal and on a move, within one `retries` count. A connection closed for message size settles its calls without a resend. Documented in the README section "RPC pool for large payloads".
+* Add error code `18` (`redirectFailed`): a redirect of a pool call could not be fetched. Codes 15 to 19 are still reserved for client-local errors.
+* The retry signal, the count of later attempts and the later delay of the rpc tracker are exported for the pool, with no change of behaviour.
 * Document publish debouncing (the window of `client_publish_debounce_interval`, per key on map subscriptions, pending data dropped on unsubscribe and disconnect), channel compaction, and delta without positioning when the server keeps the latest publication.
 * Add fake-server tests for publish debouncing: coalescing inside the window, a publish after an idle window, independent map key windows, remove of a pending key and unsubscribe with a pending value.
 * The later attempts of a refused rpc call (the `later` retry signal) wait a random delay, drawn uniformly from zero up to 250 ms, 500 ms and 1000 ms (full jitter), instead of exactly those delays. The attempts stay three, and the call's deadline still bounds them.
