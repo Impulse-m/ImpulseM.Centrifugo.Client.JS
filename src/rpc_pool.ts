@@ -12,9 +12,9 @@ import type { Options, RpcOptions, RpcResult } from './types';
 export interface RpcPoolOptions {
   /**
    * Endpoints of an endpoint key. '' is the key of a call without one. The key is whatever the server answered the
-   * application (a cluster, a region); the pool does not interpret it. Resolved once per key, until close(). Each key
-   * keeps its connections and its state for the life of the pool, so keys should be a bounded set (clusters, regions),
-   * not one per object.
+   * application (a cluster, a region); the pool does not interpret it. Resolved once per key, until close(); a resolution
+   * which fails is resolved again by the next call. Each key keeps its connections and its state for the life of the
+   * pool, so keys should be a bounded set (clusters, regions), not one per object.
    */
   endpoints: (endpointKey: string) => string | string[] | Promise<string | string[]>;
   /**
@@ -111,6 +111,8 @@ interface PendingCall {
   deadline: number;
   // Resends made so far, across the three causes: see failed and retry.
   resends: number;
+  // Later refusals retried so far: the exponent of their delay, as the main client counts them.
+  laterResends: number;
   settled: boolean;
   // True while the call holds a slot of a connection: from its send until its reply or its error.
   sent: boolean;
@@ -229,6 +231,7 @@ export class RpcPool {
         key: opts?.endpointKey ?? '',
         deadline: Date.now() + timeout,
         resends: 0,
+        laterResends: 0,
         settled: false,
         sent: false,
         timer: null,
@@ -432,7 +435,6 @@ export class RpcPool {
       closeCode: null,
       idle: null,
     };
-    group.add(conn);
     client.on('connected', (): void => {
       conn.connecting = false;
       this.dispatch();
@@ -440,7 +442,9 @@ export class RpcPool {
     client.on('disconnected', (ctx: any): void => {
       this.lost(conn, ctx);
     });
+    // The connection joins its group after connect() returned: a connect which throws leaves no connection behind.
     client.connect();
+    group.add(conn);
     return conn;
   }
 
@@ -532,14 +536,16 @@ export class RpcPool {
           this.fail(call, e);
           return;
         }
-        if (key !== undefined) {
+        if (key !== undefined && key !== null) {
           call.key = key;
           this.retry(call, conn.url, error, 0);
           return;
         }
       }
       if (retrySignal(error) === 'later') {
-        this.retry(call, conn.url, error, laterResendDelay(call.resends));
+        const delay: number = laterResendDelay(call.laterResends);
+        call.laterResends++;
+        this.retry(call, conn.url, error, delay);
         return;
       }
     }
@@ -576,7 +582,7 @@ export class RpcPool {
         return;
       }
     }
-    if (redirect !== undefined) {
+    if (redirect !== undefined && redirect !== null) {
       this.fetchInto(call, endpoint, redirect);
       return;
     }

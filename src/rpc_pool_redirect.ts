@@ -101,7 +101,8 @@ export async function fetchRedirect(
   }
   let response: any;
   try {
-    response = await fetchFunction(url, { headers: redirect.headers, signal: signal });
+    // A redirect of the server is not followed: its target would be fetched without the check of its scheme.
+    response = await fetchFunction(url, { headers: redirect.headers, signal: signal, redirect: 'manual' });
   } catch (e) {
     throw redirectFailure('redirect fetch failed');
   }
@@ -109,9 +110,10 @@ export async function fetchRedirect(
     discardBody(response);
     throw redirectFailure('redirect fetch status ' + response.status);
   }
-  // fetch follows the redirects of the server: the URL the body came from is checked as the hook's URL was.
-  if (typeof response.url === 'string' && response.url !== '') {
-    redirectUrl(endpoint, response.url);
+  // A runtime which followed a redirect anyway (it ignores 'manual') is refused before its body is read.
+  if (typeof response.url === 'string' && response.url !== '' && response.url !== url) {
+    discardBody(response);
+    throw redirectFailure('redirect followed by the runtime');
   }
   try {
     return await readBounded(response, maxBytes);
@@ -147,6 +149,7 @@ function redirectUrl(endpoint: string, target: string): string {
 // only once the body is in memory.
 async function readBounded(response: any, maxBytes: number): Promise<Uint8Array> {
   if (declaredLength(response) > maxBytes) {
+    discardBody(response);
     throw redirectFailure('redirect body over the limit');
   }
   const source: ChunkSource | null = chunkSource(response.body);

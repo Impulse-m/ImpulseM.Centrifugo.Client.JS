@@ -683,7 +683,7 @@ const result = await pool.rpc("part.write", chunk, {endpointKey: "eu-2", affinit
 
 | Option | Default | Meaning |
 |---|---|---|
-| `endpoints(key)` | required | the endpoint or endpoints of a key; `''` is the key of a call without one. May return a promise. Resolved once per key, until `close()`. Keys are kept for the life of the pool, so use a bounded set (clusters, regions), not one key per object |
+| `endpoints(key)` | required | the endpoint or endpoints of a key; `''` is the key of a call without one. May return a promise. Resolved once per key, until `close()`; a failed resolution is resolved again by the next call. Keys are kept for the life of the pool, so use a bounded set (clusters, regions), not one key per object |
 | `connection` | none | the options of each connection: `token`, `getToken`, `headers`, `name`, `version`, `timeout`, `websocket`, `minReconnectDelay`, `maxReconnectDelay`, `maxServerPingDelay`, `debug`. Any other option, `instance` in particular, throws `badConfiguration` |
 | `affinityHeader` | none | the header that carries a call's `affinity`. Required to pass one, and it must be allow-listed for the method on the server |
 | `maxConnectionsPerEndpoint` | `2` | connections opened per endpoint at most |
@@ -716,7 +716,7 @@ A move is an error the server answers, with the trailers the method lists in `er
 
 ### Redirects
 
-A redirect is a reply or an error the application recognises in `redirect`. The pool fetches the bytes within the call's deadline and at most `maxRedirectsInflight` at a time, and the promise resolves with `{data}` the way a socket reply does. The URL must be `https:`, or `http:` on a `ws:` endpoint. A non-2xx status, a network failure or a body over `maxBytes` (16 MiB by default) rejects with `redirectFailed` (18). The pool does not fetch a redirect twice, because a presigned URL may be single-use. The hook is called with the outcome the server or the connection gave, not with the pool's own timeout or cancel.
+A redirect is a reply or an error the application recognises in `redirect`. The pool fetches the bytes within the call's deadline and at most `maxRedirectsInflight` at a time, and the promise resolves with `{data}` the way a socket reply does. The URL must be `https:`, or `http:` on a `ws:` endpoint. The URL is fetched as given, with no check of its host, so the application must validate the host of any URL it builds from request data. A redirect of the URL itself is not followed: a 3xx status rejects. A non-2xx status, a network failure or a body over `maxBytes` (16 MiB by default) rejects with `redirectFailed` (18). The pool does not fetch a redirect twice, because a presigned URL may be single-use. The hook is called with the outcome the server or the connection gave, not with the pool's own timeout or cancel.
 
 ### Lifetime and state
 

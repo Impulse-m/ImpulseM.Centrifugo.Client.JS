@@ -1,6 +1,7 @@
 import { Readable } from 'stream';
 import WebSocket from 'ws';
 import { errorCodes, disconnectedCodes } from './codes';
+import { ProtobufCentrifuge } from './protobuf';
 import { RpcPool, RpcPoolOptions } from './rpc_pool';
 import { fetchRedirect } from './rpc_pool_redirect';
 import { RpcResult } from './types';
@@ -198,6 +199,19 @@ describe('RpcPool', () => {
       await sleep(150);
       expect(pool.stats().connections).toBe(1);
       expect(connectsOf(server).length).toBe(1);
+    });
+
+    test('a connect which throws leaves no connection in its group, and the next call opens a new one', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = echo;
+      jest.spyOn(ProtobufCentrifuge.prototype, 'connect').mockImplementationOnce((): void => {
+        throw new Error('connect refused');
+      });
+      const pool: RpcPool = createPool((): string => server.url);
+      await expect(pool.rpc('work', bytes({ n: 1 }))).rejects.toThrow('connect refused');
+      expect(pool.stats().connections).toBe(0);
+      expect(fromBytes((await pool.rpc('work', bytes({ n: 2 }))).data)).toEqual({ n: 2 });
+      expect(pool.stats().connections).toBe(1);
     });
   });
 
@@ -411,6 +425,32 @@ describe('RpcPool', () => {
       expect(sent).toBe(2);
     });
 
+    test('a later refusal after a lost connection waits the delay of its first later attempt', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      const times: number[] = [];
+      server.onCommand = (cmd: any): any => {
+        if (!isCall(cmd)) {
+          return undefined;
+        }
+        times.push(Date.now());
+        if (times.length === 1) {
+          closeSocket(server, 1000);
+          return holdReply;
+        }
+        if (times.length === 2) {
+          return { id: cmd.id, error: laterError() };
+        }
+        return echo(cmd);
+      };
+      // A random source at the top of its range takes the bound of the delay: 250 ms for the first later attempt.
+      jest.spyOn(Math, 'random').mockReturnValue(0.9999999);
+      const pool: RpcPool = createPool((): string => server.url);
+      expect(fromBytes((await pool.rpc('work', bytes({ n: 1 }))).data)).toEqual({ n: 1 });
+      expect(times.length).toBe(3);
+      // The lost connection is not counted in the exponent of the later delay: 500 ms would be the bound of attempt 1.
+      expect(times[2] - times[1]).toBeLessThan(400);
+    });
+
     test('a lost connection, a later refusal and a move count against the one retries', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
       const reroute: jest.Mock = jest.fn((error: any): string | undefined => error.metadata?.['x-moved']);
@@ -564,7 +604,7 @@ describe('RpcPool', () => {
       });
       const result: RpcResult = await pool.rpc('work', bytes({ n: 1 }));
       expect(Array.from(result.data)).toEqual([1, 2, 3]);
-      expect(fetchFunction).toHaveBeenCalledWith('https://cdn.example/chunk', expect.anything());
+      expect(fetchFunction).toHaveBeenCalledWith('https://cdn.example/chunk', expect.objectContaining({ redirect: 'manual' }));
     });
 
     test('maxRedirectsInflight bounds the fetches in flight over the pool', async (): Promise<void> => {
@@ -595,6 +635,18 @@ describe('RpcPool', () => {
       }
       expect(peak).toBe(1);
       expect(fetchFunction).toHaveBeenCalledTimes(3);
+    });
+
+    test('a hook which returns null, as undefined does, is not a redirect', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = echo;
+      const fetchFunction: jest.Mock = fetchReturning(new Uint8Array([1]), 200);
+      const pool: RpcPool = createPool((): string => server.url, {
+        fetch: fetchFunction as any,
+        redirect: (): any => null,
+      });
+      expect(fromBytes((await pool.rpc('work', bytes({ n: 3 }))).data)).toEqual({ n: 3 });
+      expect(fetchFunction).not.toHaveBeenCalled();
     });
 
     test('a non-2xx status rejects with redirectFailed', async (): Promise<void> => {
@@ -700,11 +752,31 @@ describe('RpcPool', () => {
       expect(arrayBuffer).not.toHaveBeenCalled();
     });
 
-    test('a redirect followed to an https URL on a wss endpoint is accepted', async (): Promise<void> => {
+    test('a redirect of the server is not followed: its status is refused, its body is cancelled and its target is not fetched', async (): Promise<void> => {
+      const cancel: jest.Mock = jest.fn();
+      const body: ReadableStream<Uint8Array> = new ReadableStream<Uint8Array>({
+        pull(controller: ReadableStreamDefaultController<Uint8Array>): void {
+          controller.enqueue(new Uint8Array([1]));
+        },
+        cancel: cancel,
+      });
+      const fetchFunction: jest.Mock = jest.fn(async (): Promise<any> => new Response(body, {
+        status: 302,
+        headers: { location: 'http://edge.example/part/1' },
+      }));
+      await expect(fetchRedirect(fetchFunction as any, 'wss://edge.example/connection/websocket', {
+        url: 'https://cdn.example/part/1',
+      }, new AbortController().signal)).rejects.toMatchObject({ code: errorCodes.redirectFailed });
+      expect(fetchFunction).toHaveBeenCalledTimes(1);
+      expect(fetchFunction).toHaveBeenCalledWith('https://cdn.example/part/1', expect.objectContaining({ redirect: 'manual' }));
+      expect(cancel).toHaveBeenCalledTimes(1);
+    });
+
+    test('a response for the requested URL is read on a wss endpoint', async (): Promise<void> => {
       const fetchFunction: jest.Mock = jest.fn(async (): Promise<any> => ({
         ok: true,
         status: 200,
-        url: 'https://edge.example/part/2',
+        url: 'https://cdn.example/part/1',
         headers: new Headers(),
         body: null,
         arrayBuffer: async (): Promise<ArrayBuffer> => new Uint8Array([5]).buffer,
