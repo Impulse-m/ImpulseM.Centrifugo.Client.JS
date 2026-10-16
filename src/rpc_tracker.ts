@@ -22,11 +22,22 @@ const rpcRetryNewMsgId: string = 'new_msg_id';
 const rpcRetryLater: string = 'later';
 // Most sends of a call refused with a new message id, and most later attempts, after its first send.
 const maxNewIdResends: number = 2;
-const maxLaterResends: number = 3;
+/** Most later attempts of a call refused with the later signal, see laterResendDelay. @internal */
+export const maxLaterResends: number = 3;
 // The bound of the delay of a later attempt: attempt n waits a uniform delay in [0, 250 ms * 2^n] (full jitter).
 const laterResendBase: number = 250;
 
-type RetrySignal = 'new_msg_id' | 'later' | null;
+/** The retry signal of a server error, see retrySignal. @internal */
+export type RetrySignal = 'new_msg_id' | 'later' | null;
+
+/**
+ * The delay of a later attempt, n being the resends the call made before it: drawn uniformly from [0, 250 ms * 2^n]
+ * (full jitter), so refused calls do not return as a wave.
+ * @internal
+ */
+export function laterResendDelay(n: number): number {
+  return randomInt(0, laterResendBase * 2 ** n);
+}
 
 // The result of an rpc reply: cached is true when the server answered from the record of an earlier attempt.
 // A reply without an rpc part gives an empty result.
@@ -40,7 +51,7 @@ function rpcResult(rpc: any): RpcResult {
  * message id, 'later' when it did not run the call and the message id is still good, null otherwise.
  * @internal
  */
-function retrySignal(error: any): RetrySignal {
+export function retrySignal(error: any): RetrySignal {
   const value: any = error?.metadata?.[rpcRetryMetadataKey];
   if (value === rpcRetryNewMsgId || value === rpcRetryLater) {
     return value;
@@ -517,7 +528,7 @@ export class RpcTracker {
       if (call.deadline <= Date.now()) {
         return false;
       }
-      const delay: number = randomInt(0, laterResendBase * 2 ** call.laterResends);
+      const delay: number = laterResendDelay(call.laterResends);
       call.laterResends++;
       // Waits as a waiting call: a connection lost meanwhile sends it with the reconnect.
       call.commandId = 0;
