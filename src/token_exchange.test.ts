@@ -1077,6 +1077,38 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
+  test('the debug output and the error events keep neither token through a refusal and its verdict', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    const spy: jest.SpyInstance = jest.spyOn(console, 'debug').mockImplementation((): void => {});
+    try {
+      const c: Centrifuge = create({
+        grace: 10,
+        exchange: async (): Promise<TokenExchangeResult> => {
+          throw new UnauthorizedError('refused');
+        },
+      }, { debug: true });
+      const errors: string[] = [];
+      c.on('error', (ctx: any): void => {
+        errors.push(JSON.stringify(ctx));
+      });
+      c.connect();
+      await advanceUntil((): boolean => c.state === State.Disconnected);
+
+      const logged: string = JSON.stringify(spy.mock.calls) + errors.join('');
+      expect(logged).toContain('refresh token refused, retrying within the grace');
+      expect(logged).not.toContain('refresh-1');
+      expect(logged).not.toContain('access-');
+      const flow: any = c['_tokenExchange'];
+      expect(JSON.stringify(Object.entries(flow))).not.toContain('refresh-');
+      expect(flow.refusedSince).toBeNull();
+      disconnectAll(clients);
+    } finally {
+      jest.useRealTimers();
+      spy.mockRestore();
+    }
+  });
+
   test('a bootstrap exchange that stalls past the client timeout closes the connection, and the reconnect bootstraps again', async (): Promise<void> => {
     serve();
     useFakeClock();
