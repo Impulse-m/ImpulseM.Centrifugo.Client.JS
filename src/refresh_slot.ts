@@ -65,6 +65,8 @@ export class RefreshSlot {
   private calls: number = 0;
   // Moves on with each refresh() call started and each token accepted, see sendTimer.
   private generationCount: number = 0;
+  // Moves on with each refresh() call that brings a token, see currentTokenGeneration.
+  private tokenGenerationCount: number = 0;
   // The generation of the last token accepted.
   private acceptedGeneration: number = 0;
 
@@ -77,6 +79,15 @@ export class RefreshSlot {
   /** The generation of the refreshes: it moves on with each refresh() call started and each token accepted. */
   currentGeneration(): number {
     return this.generationCount;
+  }
+
+
+  /**
+   * The generation of the refresh() calls that bring a token: it moves on with those only, so a refresh() that fetches
+   * its token does not supersede a token exchange in progress.
+   */
+  currentTokenGeneration(): number {
+    return this.tokenGenerationCount;
   }
 
 
@@ -95,6 +106,9 @@ export class RefreshSlot {
     }
     this.calls++;
     this.generationCount++;
+    if (token !== undefined) {
+      this.tokenGenerationCount++;
+    }
     const refresh: Promise<AuthContext> = pending === null
       ? this.run(token)
       : pending.then((): Promise<AuthContext> => this.run(token), (): Promise<AuthContext> => this.run(token));
