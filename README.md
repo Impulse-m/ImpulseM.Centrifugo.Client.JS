@@ -688,12 +688,16 @@ The flow: on connect the client sends a connect command without a token. When th
 
 Several tabs or processes of one installation can share the refresh token through the same storage without a lock. The SDK reads `load` right before each exchange and stores the rotated token right after it. A client that is refused because another one rotated the token meanwhile reads `load` again and retries once with the new value, with no event; the refresh token is terminal only when the value is the same. An exchange that was abandoned is stored the same way, and so is one that a `refresh(token)` call overtook: its rotation is stored only while `load` still returns the refresh token it exchanged. An abandoned exchange is one whose connection ended, or whose `exchange` did not settle within the client `timeout`; a result that arrives after the timeout is stored in that way, so the issuer's rotation is not lost. The check and the store are two steps, so a rotation another tab stores between them can be overwritten by that late result; take a lock inside `exchange` (for example the Web Locks API) where that matters. The SDK bounds only `exchange` by the timeout: a `load` or `store` that never settles blocks the token fetch, as a `getToken` that never settles does, and the application must make its storage settle.
 
+An exchange holds the queue of the client for up to twice the client `timeout`: the next exchange, which loads the refresh token again, starts once the exchange settles or that long after it started, whichever comes first. The result of an exchange which settles later than that can lose its rotation to the next exchange, so keep `exchange` well under the client `timeout`. An exchange that runs past the `timeout` closes the connection after a backoff that grows with each failed bootstrap, so a stalled exchange cannot make the client reconnect in a loop.
+
+Without a rotation grace on the issuer, a client can still be refused by a token another client consumed a moment earlier: when that client's `store` is still pending, the re-read returns the old value and the session is declared dead. Keep a grace on the issuer, or take a lock inside `exchange`, where that matters.
+
 The events an application sees:
 
 | Event | When |
 |---|---|
 | `connected` | with an empty `user` when `load` returns nothing at connect: the connection is anonymous |
-| `error`, type `connectToken` | `load` or `exchange` failed at connect, other than `UnauthorizedError`; retried on the same connection with backoff. An exchange that runs past the client `timeout` closes the connection instead, and the reconnect bootstraps again |
+| `error`, type `connectToken` | `load` or `exchange` failed at connect, other than `UnauthorizedError`; retried on the same connection with backoff. An exchange that runs past the client `timeout` closes the connection instead, after a backoff, and the reconnect bootstraps again |
 | `error`, type `refreshToken` | the renewal failed; retried with backoff |
 | `error`, type `tokenStore`, code `6` (`clientRefreshToken`) | `store` threw or rejected; the exchange went on with its access token |
 | `disconnected`, code `1` (`unauthorized`) | the session is dead: `exchange` threw `UnauthorizedError` and the refresh token is still the same, or `load` returned nothing at renewal. The client does not reconnect |
