@@ -57,13 +57,15 @@ interface Route {
 
 /**
  * One exchange of the flow: the connection it runs on, and whether that connection is still the one it was started for.
- * An exchange whose connection ended, or that ran past the client timeout, is abandoned: its access token is not used,
- * and its rotated refresh token is stored only while the application still holds the token it exchanged.
+ * An exchange whose connection ended, or that ran past the client timeout, is abandoned: its access token is not used.
+ * A rotated refresh token of an abandoned exchange, or of one a refresh(token) call superseded, is stored only while
+ * the application still holds the token it exchanged.
  */
 interface Attempt {
   route: () => Route;
   current: () => boolean;
   expire: () => void;
+  superseded: () => boolean;
 }
 
 
@@ -268,34 +270,45 @@ export class TokenExchangeFlow {
   }
 
 
-  // An attempt that is current while alive() holds and it has not been expired by its timeout.
+  // An attempt that is current while alive() holds and it has not been expired by its timeout. It is superseded once a
+  // refresh(token) call starts, which moves the generation of the refresh slot on.
   private attempt(route: () => Route, alive: () => boolean): Attempt {
     let expired: boolean = false;
+    const generation: number = this.client['_refreshSlot'].currentGeneration();
     return {
       route: route,
       current: (): boolean => !expired && alive(),
       expire: (): void => {
         expired = true;
       },
+      superseded: (): boolean => this.client['_refreshSlot'].currentGeneration() !== generation,
     };
   }
 
 
   // Rejects with a timeout error when the call does not settle within the client timeout. The attempt is expired then,
-  // so the late result of the call is not used.
-  private bounded<T>(call: Promise<T>, attempt: Attempt): Promise<T> {
+  // so the result of the call is not used. A result that settles later is passed to onLate, which stores its rotation.
+  private bounded<T>(call: Promise<T>, attempt: Attempt, onLate: (value: T) => void): Promise<T> {
     return new Promise<T>((resolve: (value: T) => void, reject: (err: any) => void): void => {
+      let expired: boolean = false;
       const timeout: number = this.client['_config'].timeout as number;
       const timer: ReturnType<typeof setTimeout> = setTimeout((): void => {
+        expired = true;
         attempt.expire();
         reject(this.host.createError(errorCodes.timeout, 'timeout'));
       }, timeout);
       call.then((value: T): void => {
         clearTimeout(timer);
-        resolve(value);
+        if (expired) {
+          onLate(value);
+        } else {
+          resolve(value);
+        }
       }, (err: any): void => {
         clearTimeout(timer);
-        reject(err);
+        if (!expired) {
+          reject(err);
+        }
       });
     });
   }
@@ -500,6 +513,12 @@ export class TokenExchangeFlow {
   }
 
 
+  // The rotated refresh token of an exchange result, or null when the issuer did not rotate it.
+  private rotated(used: string, result: TokenExchangeResult | undefined): string | null {
+    return result && result.refreshToken && result.refreshToken !== used ? result.refreshToken : null;
+  }
+
+
   // One exchange: the app's exchange callback, then the store of the rotated refresh token, awaited before the access
   // token is used. Resolves with the access token. The access token of an abandoned attempt is not used, but its
   // rotated refresh token is stored (see storeRotated): the issuer has already consumed the pair.
@@ -507,9 +526,12 @@ export class TokenExchangeFlow {
     const result: TokenExchangeResult = await this.bounded(this.options.exchange({
       refreshToken: refreshToken,
       rpc: (method: string, data: any): Promise<RpcResult> => this.rpc(attempt, method, data),
-    }), attempt);
-    if (result && result.refreshToken && result.refreshToken !== refreshToken) {
-      await this.storeRotated(refreshToken, result.refreshToken, attempt);
+    }), attempt, (late: TokenExchangeResult): void => {
+      this.storeLate(refreshToken, late, attempt);
+    });
+    const rotation: string | null = this.rotated(refreshToken, result);
+    if (rotation !== null) {
+      await this.storeRotated(refreshToken, rotation, attempt);
     }
     if (!attempt.current()) {
       throw this.host.createError(errorCodes.connectionClosed, 'connection closed');
@@ -522,12 +544,24 @@ export class TokenExchangeFlow {
   }
 
 
-  // Stores a rotated refresh token the issuer issued. An abandoned attempt stores it only while the application still
-  // holds the token the attempt exchanged: a rotation made meanwhile by a newer exchange is kept, so the late result of
-  // an old attempt never overwrites a newer token. A failing store is reported, and the exchange goes on.
+  // Stores the rotation of an exchange that settled after its timeout. Its access token is not used.
+  private storeLate(used: string, late: TokenExchangeResult, attempt: Attempt): void {
+    const rotation: string | null = this.rotated(used, late);
+    if (rotation !== null) {
+      this.storeRotated(used, rotation, attempt).catch((err: any): void => {
+        this.client['_dispatchFailed'](err);
+      });
+    }
+  }
+
+
+  // Stores a rotated refresh token the issuer issued. An abandoned attempt, or one a refresh(token) call superseded,
+  // stores it only while the application still holds the token the attempt exchanged: a rotation made meanwhile by a
+  // newer exchange or by the application is kept, so the late result of an old attempt never overwrites a newer token.
+  // A failing store is reported, and the exchange goes on.
   private async storeRotated(used: string, rotated: string, attempt: Attempt): Promise<void> {
     try {
-      if (!attempt.current() && (await this.options.load()) !== used) {
+      if ((!attempt.current() || attempt.superseded()) && (await this.options.load()) !== used) {
         return;
       }
       await this.options.store(rotated);
@@ -551,8 +585,9 @@ export class TokenExchangeFlow {
   // Unlike the upstream plainCall of the rpc host, it does not wait for the connected state, and it writes on the route given.
   private sendOnRoute(cmd: any, session: string, node: string): Promise<CallResolveContext> {
     const call: Promise<CallResolveContext> = this.client['_call'](cmd, true);
-    // Without a transport nothing is written, and writeCommands settles nothing: the call is settled here. Otherwise
-    // writeCommands settles the commands it refused or could not write.
+    // Without a transport nothing is written, and writeCommands settles nothing: the call is settled here. This is the
+    // no-transport rule of writeCommands (write_commands.ts:82). Otherwise writeCommands settles the commands it refused
+    // or could not write.
     if (!this.host.hasTransport()) {
       this.host.handleWriteError([cmd], false);
     }

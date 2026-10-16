@@ -783,6 +783,97 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
+  test('a bootstrap exchange whose result comes after the client timeout stores its rotation, while the storage holds the used token', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      let release: (result: TokenExchangeResult) => void = (): void => {};
+      const c: Centrifuge = create({
+        exchange: (): Promise<TokenExchangeResult> => {
+          calls++;
+          return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+            release = resolve;
+          });
+        },
+      });
+      const events: string[] = record(c);
+      c.connect();
+      await until((): boolean => calls === 1);
+
+      jest.advanceTimersByTime(5000);
+      await until((): boolean => events.includes('error:connectToken'));
+      release({ token: 'late-access', refreshToken: 'refresh-2' });
+      await flush();
+
+      expect(order).toEqual(['connect', 'store:refresh-2']);
+      expect(stored).toBe('refresh-2');
+      expect(commands('refresh')).toHaveLength(0);
+      expect(events).not.toContain('connected');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a late rotation after the client timeout is not stored when the application has stored another refresh token', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      let release: (result: TokenExchangeResult) => void = (): void => {};
+      const c: Centrifuge = create({
+        exchange: (): Promise<TokenExchangeResult> => {
+          calls++;
+          return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+            release = resolve;
+          });
+        },
+      });
+      const events: string[] = record(c);
+      c.connect();
+      await until((): boolean => calls === 1);
+
+      jest.advanceTimersByTime(5000);
+      await until((): boolean => events.includes('error:connectToken'));
+      stored = 'refresh-other';
+      release({ token: 'late-access', refreshToken: 'refresh-2' });
+      await flush();
+
+      expect(order).toEqual(['connect']);
+      expect(stored).toBe('refresh-other');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a refresh(token) during a renewal exchange keeps the refresh token the application stored: the late rotation is not stored', async (): Promise<void> => {
+    serve({ ttl: 2 });
+    let calls: number = 0;
+    let release: (result: TokenExchangeResult) => void = (): void => {};
+    const c: Centrifuge = create({
+      exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+        calls++;
+        if (calls === 2) {
+          return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+            release = resolve;
+          });
+        }
+        return issue(ctx);
+      },
+    });
+    await connectClient(c);
+    await poll((): boolean => calls === 2);
+
+    stored = 'refresh-b';
+    await c.refresh('access-b');
+    release({ token: 'access-late', refreshToken: 'refresh-3' });
+    await flush();
+
+    expect(order.filter((entry: string): boolean => entry === 'store:refresh-3')).toHaveLength(0);
+    expect(stored).toBe('refresh-b');
+    expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).not.toContain('access-late');
+  });
+
   test('a bootstrap refresh that times out closes the connection with a connect error, and the reconnect bootstraps again', async (): Promise<void> => {
     let refreshes: number = 0;
     serve({
