@@ -3,6 +3,7 @@ Unreleased
 
 * Document publish debouncing (the window of `client_publish_debounce_interval`, per key on map subscriptions, pending data dropped on unsubscribe and disconnect), channel compaction, and delta without positioning when the server keeps the latest publication.
 * Add fake-server tests for publish debouncing: coalescing inside the window, a publish after an idle window, independent map key windows, remove of a pending key and unsubscribe with a pending value.
+* The later attempts of a refused rpc call (the `later` retry signal) wait a random delay, drawn uniformly from zero up to 250 ms, 500 ms and 1000 ms (full jitter), instead of exactly those delays. The attempts stay three, and the call's deadline still bounds them.
 
 1.2.0
 =====
