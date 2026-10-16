@@ -104,6 +104,8 @@ interface PendingCall {
   // Resends made so far, across the three causes: see failed and retry.
   resends: number;
   settled: boolean;
+  // True while the call holds a slot of a connection: from its send until its reply or its error.
+  sent: boolean;
   timer: CallTimer | null;
   resend: CallTimer | null;
   // Removes the abort listener of the signal, if the call has one.
@@ -217,6 +219,7 @@ export class RpcPool {
         deadline: Date.now() + (opts?.timeout ?? this.timeout),
         resends: 0,
         settled: false,
+        sent: false,
         timer: null,
         resend: null,
         detach: noop,
@@ -264,7 +267,7 @@ export class RpcPool {
       }
     }
     for (const call of Array.from(this.calls)) {
-      if (this.queue.indexOf(call) >= 0) {
+      if (!call.sent) {
         this.fail(call, poolError(errorCodes.cancelled, 'cancelled'));
       } else {
         this.fail(call, poolError(errorCodes.connectionClosed, 'connection closed'));
@@ -380,6 +383,7 @@ export class RpcPool {
   // Sends the call on a connection: the slot is taken until the reply or the error arrives.
   private send(call: PendingCall, conn: PoolConnection): void {
     conn.inflight++;
+    call.sent = true;
     conn.idle?.clear();
     conn.idle = null;
     const options: RpcOptions | undefined = call.headers === undefined ? undefined : { headers: call.headers };
@@ -435,6 +439,7 @@ export class RpcPool {
   // A reply of the server: the slot is free, and the outcome settles the call unless the call settled before.
   private replied(call: PendingCall, conn: PoolConnection, reply: RpcResult): void {
     conn.inflight--;
+    call.sent = false;
     if (!call.settled) {
       this.finish(call, conn.url, null, reply);
     }
@@ -445,6 +450,7 @@ export class RpcPool {
   // An error of the connection or of the server: the slot is free, then the error is retried or surfaced.
   private errored(call: PendingCall, conn: PoolConnection, error: any): void {
     conn.inflight--;
+    call.sent = false;
     if (!call.settled) {
       this.failed(call, conn, error);
     }

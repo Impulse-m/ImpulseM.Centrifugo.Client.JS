@@ -381,6 +381,19 @@ describe('RpcPool', () => {
       expect(times[3] - times[2]).toBeGreaterThanOrEqual(990);
     });
 
+    test('close cancels a call waiting out its later delay, which holds no slot', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, error: laterError() } : undefined);
+      jest.spyOn(Math, 'random').mockReturnValue(0.9999999);
+      const pool: RpcPool = createPool((): string => server.url);
+      const call: Promise<RpcResult> = pool.rpc('work', bytes({ n: 1 }));
+      expect(await until((): boolean => pool.stats().inflight === 0 && callsOf(server).length === 1)).toBe(true);
+      pool.close();
+      await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
+      await sleep(300);
+      expect(callsOf(server).length).toBe(1);
+    });
+
     test('a later refusal with a zero draw is sent again at once', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
       let sent: number = 0;
