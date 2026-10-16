@@ -1,6 +1,6 @@
 import type { Centrifuge } from './centrifuge';
 import { UnauthorizedError } from './centrifuge';
-import { errorCodes } from './codes';
+import { connectingCodes, errorCodes } from './codes';
 import type { ClientHost } from './client_host';
 import type { CallRejectContext, CallResolveContext } from './rpc_tracker';
 import { refreshRetries } from './refresh_slot';
@@ -57,11 +57,13 @@ interface Route {
 
 /**
  * One exchange of the flow: the connection it runs on, and whether that connection is still the one it was started for.
- * An exchange whose connection ended is abandoned: its access token is not used.
+ * An exchange whose connection ended, or that ran past the client timeout, is abandoned: its access token is not used,
+ * and its rotated refresh token is stored only while the application still holds the token it exchanged.
  */
 interface Attempt {
   route: () => Route;
   current: () => boolean;
+  expire: () => void;
 }
 
 
@@ -171,10 +173,10 @@ export class TokenExchangeFlow {
       throw new UnauthorizedError('');
     }
     const transportId: number = this.client['_transportId'];
-    const attempt: Attempt = {
-      route: (): Route => ({ session: this.client['_session'], node: this.client['_node'] }),
-      current: (): boolean => this.client['_isConnected']() && this.client['_transportId'] === transportId,
-    };
+    const attempt: Attempt = this.attempt(
+      (): Route => ({ session: this.client['_session'], node: this.client['_node'] }),
+      (): boolean => this.client['_isConnected']() && this.client['_transportId'] === transportId,
+    );
     return this.exchangeRefresh(refreshToken, attempt, false);
   }
 
@@ -210,6 +212,55 @@ export class TokenExchangeFlow {
     return this.bootstrap === bootstrap
       && this.client['_transportId'] === bootstrap.transportId
       && this.client['_isConnecting']();
+  }
+
+
+  // An attempt that is current while alive() holds and it has not been expired by its timeout.
+  private attempt(route: () => Route, alive: () => boolean): Attempt {
+    let expired: boolean = false;
+    return {
+      route: route,
+      current: (): boolean => !expired && alive(),
+      expire: (): void => {
+        expired = true;
+      },
+    };
+  }
+
+
+  // Rejects with a timeout error when the call does not settle within the client timeout. The attempt is expired then,
+  // so the late result of the call is not used.
+  private bounded<T>(call: Promise<T>, attempt: Attempt): Promise<T> {
+    return new Promise<T>((resolve: (value: T) => void, reject: (err: any) => void): void => {
+      const timeout: number = this.client['_config'].timeout as number;
+      const timer: ReturnType<typeof setTimeout> = setTimeout((): void => {
+        attempt.expire();
+        reject(this.host.createError(errorCodes.timeout, 'timeout'));
+      }, timeout);
+      call.then((value: T): void => {
+        clearTimeout(timer);
+        resolve(value);
+      }, (err: any): void => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
+
+  // Ends a bootstrap whose exchange stalled, or whose refresh outcome is unknown: the error is reported, then the
+  // connection is closed, so the reconnect bootstraps again. A stalled exchange is not retried in place.
+  private abandon(bootstrap: Bootstrap, type: string, error: any): void {
+    if (!this.isCurrent(bootstrap)) {
+      return;
+    }
+    this.client['_token'] = '';
+    this.client['_emitError']({ type: type, error: error }, (): void => {
+      if (!this.isCurrent(bootstrap)) {
+        return;
+      }
+      this.client['_disconnect'](connectingCodes.transportClosed, 'token exchange abandoned', true);
+    });
   }
 
 
@@ -249,10 +300,10 @@ export class TokenExchangeFlow {
       this.finish(bootstrap, result, resume, null);
       return;
     }
-    const attempt: Attempt = {
-      route: (): Route => ({ session: result.session, node: result.node }),
-      current: (): boolean => this.isCurrent(bootstrap),
-    };
+    const attempt: Attempt = this.attempt(
+      (): Route => ({ session: result.session, node: result.node }),
+      (): boolean => this.isCurrent(bootstrap),
+    );
     let token: string;
     try {
       token = await this.exchangeRefresh(refreshToken, attempt, false);
@@ -262,6 +313,10 @@ export class TokenExchangeFlow {
       }
       if (err instanceof UnauthorizedError) {
         this.client['_failUnauthorized']();
+        return;
+      }
+      if (err?.code === errorCodes.timeout) {
+        this.abandon(bootstrap, 'connectToken', this.host.createError(errorCodes.clientConnectToken, 'token exchange timed out'));
         return;
       }
       this.retry(bootstrap, result, resume, 'connectToken', this.connectTokenError(err));
@@ -329,15 +384,25 @@ export class TokenExchangeFlow {
 
 
   // A refresh of a bootstrap that the server refused, or that gave no identity. The access token is dropped, unless
-  // the connection has moved on. A temporary refusal is retried with a new exchange; any other ends the connection.
-  private refreshFailed(bootstrap: Bootstrap, result: any, resume: (result: any) => void, token: string, err: any): void {
+  // the connection has moved on. A refresh that timed out or failed to write has an unknown outcome: the connection is
+  // closed and the reconnect bootstraps again. A temporary refusal is retried with a new exchange; any other ends the
+  // connection.
+  private refreshFailed(
+    bootstrap: Bootstrap,
+    result: any,
+    resume: (result: any) => void,
+    token: string,
+    err: any,
+  ): void {
     if (this.client['_token'] === token) {
       this.client['_token'] = '';
     }
     if (!this.isCurrent(bootstrap)) {
       return;
     }
-    if (refreshRetries(err.code, err.temporary === true)) {
+    if (err.code === errorCodes.timeout || err.code === errorCodes.transportWriteError) {
+      this.abandon(bootstrap, 'connect', err);
+    } else if (refreshRetries(err.code, err.temporary === true)) {
       this.retry(bootstrap, result, resume, 'connect', err);
     } else {
       this.client['_disconnect'](err.code, err.message, false);
@@ -402,10 +467,10 @@ export class TokenExchangeFlow {
   // token is used. Resolves with the access token. The access token of an abandoned attempt is not used, but its
   // rotated refresh token is stored (see storeRotated): the issuer has already consumed the pair.
   private async exchangeWith(refreshToken: string, attempt: Attempt): Promise<string> {
-    const result: TokenExchangeResult = await this.options.exchange({
+    const result: TokenExchangeResult = await this.bounded(this.options.exchange({
       refreshToken: refreshToken,
       rpc: (method: string, data: any): Promise<RpcResult> => this.rpc(attempt.route, method, data),
-    });
+    }), attempt);
     if (result && result.refreshToken && result.refreshToken !== refreshToken) {
       await this.storeRotated(refreshToken, result.refreshToken, attempt);
     }

@@ -17,6 +17,22 @@ function commandKind(cmd: any): string {
   return Object.keys(cmd).find((key: string): boolean => key !== 'id' && cmd[key] !== null && cmd[key] !== undefined) ?? '';
 }
 
+/**
+ * Advances the fake clock in steps of half a second until the condition holds. Between the steps the socket gets its
+ * real turns, so a reconnect opens within the connect timeout of the fake clock.
+ */
+async function advanceUntil(condition: () => boolean): Promise<void> {
+  for (let step: number = 0; step < 200 && !condition(); step++) {
+    jest.advanceTimersByTime(500);
+    for (let turn: number = 0; turn < 200 && !condition(); turn++) {
+      await new Promise<void>((resolve: () => void): void => {
+        setImmediate(resolve);
+      });
+    }
+  }
+  expect(condition()).toBe(true);
+}
+
 /** Records the events of a client as strings: the kind, and the type, channel or code the event carries. */
 function record(c: Centrifuge): string[] {
   const events: string[] = [];
@@ -683,6 +699,131 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       disconnectAll(clients);
     } finally {
       spy.mockRestore();
+    }
+  });
+
+  test('a bootstrap exchange that stalls past the client timeout closes the connection, and the reconnect bootstraps again', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      const c: Centrifuge = create({
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 1) {
+            return new Promise<TokenExchangeResult>((): void => {});
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      const connected: Promise<void> = nextConnected(c);
+      c.connect();
+      await until((): boolean => calls === 1);
+
+      jest.advanceTimersByTime(5000);
+      await until((): boolean => events.includes('error:connectToken'));
+      await advanceUntil((): boolean => events.includes('connected'));
+      await connected;
+
+      expect(order).toEqual(['connect', 'connect', 'rpc:exchange', 'store:refresh-2', 'refresh']);
+      expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1']);
+      expect(events).toEqual(['error:connectToken', 'connected', 'auth']);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a renewal exchange that stalls past the client timeout fails with the refresh retry, which exchanges again', async (): Promise<void> => {
+    serve({ ttl: 10 });
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      const c: Centrifuge = create({
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 2) {
+            return new Promise<TokenExchangeResult>((): void => {});
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+
+      // The renewal runs at 7 to 9 seconds; its exchange then stalls for the client timeout.
+      jest.advanceTimersByTime(9000);
+      await until((): boolean => calls === 2);
+      jest.advanceTimersByTime(5000);
+      await until((): boolean => events.includes('error:refreshToken'));
+      expect(c.state).toBe(State.Connected);
+
+      // The retry runs after the refresh backoff, with a new exchange over the same connection.
+      jest.advanceTimersByTime(10000);
+      await until((): boolean => commands('refresh').length === 2);
+      expect(calls).toBe(3);
+      expect(commands('connect')).toHaveLength(1);
+      expect(stored).toBe('refresh-3');
+      expect(c.state).toBe(State.Connected);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a bootstrap refresh that times out closes the connection with a connect error, and the reconnect bootstraps again', async (): Promise<void> => {
+    let refreshes: number = 0;
+    serve({
+      refresh: (cmd: any): any => {
+        refreshes++;
+        return refreshes === 1 ? holdReply : refreshReply(cmd, 900);
+      },
+    });
+    useFakeClock();
+    try {
+      const c: Centrifuge = create();
+      const events: string[] = record(c);
+      const connected: Promise<void> = nextConnected(c);
+      c.connect();
+      await until((): boolean => commands('refresh').length === 1);
+
+      await advanceUntil((): boolean => events.includes('error:connect'));
+      await advanceUntil((): boolean => events.includes('connected'));
+      await connected;
+
+      expect(commands('connect').map((cmd: any): string => cmd.connect.token ?? '')).toEqual(['', '']);
+      expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1', 'access-2']);
+      expect(events).toEqual(['error:connect', 'connected', 'auth']);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('an exchange that resolves without a token is retried in place at bootstrap, as a failed exchange', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      const c: Centrifuge = create({
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 1) {
+            return Promise.resolve({ token: '' });
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      const connected: Promise<void> = nextConnected(c);
+      c.connect();
+      await until((): boolean => events.includes('error:connectToken'));
+      await advanceUntil((): boolean => events.includes('connected'));
+      await connected;
+
+      expect(commands('connect')).toHaveLength(1);
+      expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1']);
+      expect(events).toEqual(['error:connectToken', 'connected', 'auth']);
+    } finally {
+      jest.useRealTimers();
     }
   });
 
