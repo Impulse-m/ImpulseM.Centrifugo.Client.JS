@@ -9,8 +9,8 @@ import { backoff, ttlMilliseconds } from './utils';
 import { writeCommands } from './write_commands';
 
 // The private members of the client this file reaches by name (a rename in centrifuge.ts must change this file too):
-// _token, _refreshRequired, _transportId, _isConnecting, _isConnected, _call, _session, _node, _emitError, _disconnect,
-// _failUnauthorized, _dispatchFailed, _reportDispatchError.
+// _token, _refreshRequired, _transportId, _isConnecting, _isConnected, _call, _config, _session, _node, _emitError,
+// _disconnect, _failUnauthorized, _dispatchFailed, _reportDispatchError.
 
 
 /** What the `exchange` callback of tokenExchange gets. */
@@ -308,7 +308,8 @@ export class TokenExchangeFlow {
       return;
     }
     this.client['_token'] = '';
-    this.client['_emitError']({ type: type, error: error }, (): void => {
+    const ctx: any = { type: type, error: error };
+    this.client['_emitError'](ctx, (): void => {
       if (!this.isCurrent(bootstrap)) {
         return;
       }
@@ -377,7 +378,8 @@ export class TokenExchangeFlow {
     if (!this.isCurrent(bootstrap)) {
       return;
     }
-    this.client['_emitError']({ type: type, error: error }, (): void => {
+    const ctx: any = { type: type, error: error };
+    this.client['_emitError'](ctx, (): void => {
       if (!this.isCurrent(bootstrap)) {
         return;
       }
@@ -394,7 +396,7 @@ export class TokenExchangeFlow {
   private refreshConnection(bootstrap: Bootstrap, result: any, resume: (result: any) => void, token: string): void {
     const cmd: any = { refresh: { token: token } };
     this.client['_token'] = token;
-    this.plainCall(cmd, result.session, result.node).then((ctx: CallResolveContext): void => {
+    this.sendOnRoute(cmd, result.session, result.node).then((ctx: CallResolveContext): void => {
       try {
         if (!this.isCurrent(bootstrap)) {
           return;
@@ -532,7 +534,11 @@ export class TokenExchangeFlow {
       await this.options.store(rotated);
     } catch (err: any) {
       try {
-        this.client['_emitError']({ type: 'tokenStore', error: this.host.createError(errorCodes.clientRefreshToken, err?.toString() ?? '') }, (): void => {});
+        const ctx: any = {
+          type: 'tokenStore',
+          error: this.host.createError(errorCodes.clientRefreshToken, err?.toString() ?? ''),
+        };
+        this.client['_emitError'](ctx, (): void => {});
       } catch (handlerErr: any) {
         // Thrown by an error handler: reported, so the exchange still goes on with its access token.
         this.client['_reportDispatchError'](handlerErr);
@@ -543,7 +549,8 @@ export class TokenExchangeFlow {
 
   // A plain call on the connection of a session and node: no message id, no retransmit, no wait for the connected state.
   // Settles with the reply context, or rejects with the rejection context: the caller calls next() of the context it gets.
-  private plainCall(cmd: any, session: string, node: string): Promise<CallResolveContext> {
+  // Unlike the upstream plainCall of the rpc host, it does not wait for the connected state, and it writes on the route given.
+  private sendOnRoute(cmd: any, session: string, node: string): Promise<CallResolveContext> {
     const call: Promise<CallResolveContext> = this.client['_call'](cmd, true);
     // Without a transport nothing is written, and writeCommands settles nothing: the call is settled here. Otherwise
     // writeCommands settles the commands it refused or could not write.
@@ -555,14 +562,13 @@ export class TokenExchangeFlow {
   }
 
 
-  // The rpc call of the exchange, on the connection the route names.
-  // Nothing is written once the connection of the attempt is gone: the call rejects with connectionClosed instead.
+  // The rpc call of the exchange, on the connection of the attempt. Nothing is written once the connection of the attempt is gone: the call rejects with connectionClosed instead.
   private rpc(attempt: Attempt, method: string, data: any): Promise<RpcResult> {
     if (!attempt.current()) {
       return Promise.reject(this.host.createError(errorCodes.connectionClosed, 'connection closed'));
     }
     const target: Route = attempt.route();
-    return this.plainCall({ rpc: { method: method, data: data } }, target.session, target.node).then(
+    return this.sendOnRoute({ rpc: { method: method, data: data } }, target.session, target.node).then(
       (ctx: CallResolveContext): RpcResult => {
         try {
           return { data: ctx.reply.rpc?.data };
