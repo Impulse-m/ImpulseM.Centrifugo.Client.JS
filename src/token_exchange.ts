@@ -1,17 +1,19 @@
 import { raceCall } from './call_timer';
-import type { Centrifuge } from './centrifuge';
-import { UnauthorizedError } from './centrifuge';
 import { connectingCodes, errorCodes } from './codes';
 import type { ClientHost } from './client_host';
 import type { CallRejectContext, CallResolveContext } from './rpc_tracker';
 import { refreshRetries } from './refresh_slot';
-import type { Options, RpcResult } from './types';
+import type { Error as ServerError, Options, RpcResult, ServerErrorFields } from './types';
+import { UnauthorizedError } from './unauthorized_error';
 import { backoff, ttlMilliseconds } from './utils';
 import { writeCommands } from './write_commands';
 
-// The private members of the client this file reaches by name (a rename in centrifuge.ts must change this file too):
-// _token, _refreshRequired, _transportId, _isConnecting, _isConnected, _call, _config, _session, _node, _emitError,
-// _disconnect, _failUnauthorized, _dispatchFailed, _reportDispatchError, _refreshSlot.
+// The grace of a refusal run when neither the issuer nor the option sets one, in seconds.
+const defaultGrace: number = 30;
+// The longest grace a refusal run honours, in seconds: a misconfigured issuer cannot make a dead client poll for long.
+const maxGrace: number = 300;
+// The message of a refusal inside the grace horizon: it names the cause, and never a token.
+const refusedMessage: string = 'refresh token refused, retrying within the grace';
 
 /** What the `exchange` callback of tokenExchange gets. */
 export interface TokenExchangeContext {
@@ -19,8 +21,9 @@ export interface TokenExchangeContext {
   refreshToken: string;
   /** Sends a plain rpc call over the connection the exchange runs on: the one being set up, or the connected one.
    * It does not wait for the connected state, carries no message id and is not retransmitted. Rejects with
-   * `connectionClosed` when that connection is lost, or with `transportWriteError` when the write fails. `data` is
-   * what `rpc` takes for the codec in use. */
+   * `connectionClosed` when that connection is lost, with `transportWriteError` when the write fails, and with
+   * `TokenExchangeRefusedError` when the server error's `appType` is in `refusalTypes`. `data` is what `rpc` takes
+   * for the codec in use. */
   rpc: (method: string, data: any) => Promise<RpcResult>;
 }
 
@@ -29,8 +32,13 @@ export interface TokenExchangeContext {
 export interface TokenExchangeResult {
   /** The access token: the connection token from now on. */
   token: string;
-  /** The rotated refresh token, when the issuer rotated it. Absent or equal to the one used: nothing is stored. */
+  /** The rotated refresh token, when the issuer rotated it. Absent or equal to the one used: nothing is stored. An
+   * `exchange` that persisted the rotation itself, under its own lock (see the README), returns none. */
   refreshToken?: string;
+  /** How long, in seconds, the issuer keeps accepting the refresh token this exchange consumed. Kept in memory for the
+   * next refusal run. Absent: the option's `grace`, else 30. Negative or not finite: ignored, the grace in use stays.
+   * Above 300: 300. */
+  grace?: number;
 }
 
 
@@ -42,13 +50,48 @@ export interface TokenExchange {
   /** Persists a rotated refresh token. Awaited before the access token issued with it is used. A rejection is reported
    * as a `tokenStore` error, and the exchange goes on. */
   store: (refreshToken: string) => void | Promise<void>;
-  /** Exchanges the refresh token for an access token. Throw `UnauthorizedError` when the issuer refused the refresh
-   * token: the session is dead. Any other rejection is reported and retried with backoff. */
+  /** Exchanges the refresh token for an access token. Throw `UnauthorizedError` (or rethrow the
+   * `TokenExchangeRefusedError` of `ctx.rpc`) when the issuer refused the refresh token: the SDK presents the token the
+   * storage holds again, with backoff, until the grace horizon has passed, and only then ends the session. Any other
+   * rejection is reported and retried with backoff. */
   exchange: (ctx: TokenExchangeContext) => Promise<TokenExchangeResult>;
+  /** Server error names (`appType`) that mean the issuer refused the refresh token. A `ctx.rpc` rejected with one of them
+   * rejects with `TokenExchangeRefusedError`. Exact string match; codes are never consulted. Default: none. */
+  refusalTypes?: string[];
+  /** The grace, in seconds, used until the issuer publishes one in a result. Default 30. 0: a refusal of an unchanged
+   * refresh token is terminal at once. Clamped to 300. */
+  grace?: number;
 }
 
 
-/** The session and node the commands of an exchange are written with. */
+/** The rejection of `ctx.rpc` for a server error named in `refusalTypes`. An `UnauthorizedError`. */
+export class TokenExchangeRefusedError extends UnauthorizedError {
+  /** The server error as `rpc()` would reject with it: code, message, temporary, appCode, appType, metadata. */
+  error: ServerError & ServerErrorFields;
+
+  constructor(error: ServerError & ServerErrorFields) {
+    super('the issuer refused the refresh token');
+    this.error = error;
+  }
+}
+
+
+/**
+ * A refusal of the issuer that the refusal run decides on, thrown by the exchange of a refresh token. The session is over
+ * (`terminal`) when the storage holds no refresh token any more, or when the grace horizon has passed. Otherwise the
+ * attempt is retried.
+ */
+class Refusal extends UnauthorizedError {
+  terminal: boolean;
+
+  constructor(terminal: boolean) {
+    super('refresh token refused');
+    this.terminal = terminal;
+  }
+}
+
+
+/** The route the commands of an exchange are written with: the session and node of its connection. */
 interface Route {
   session: string;
   node: string;
@@ -111,9 +154,17 @@ interface Turn<T> {
  * hooks check for that.
  */
 export class TokenExchangeFlow {
-  private client: Centrifuge;
   private host: ClientHost;
   private options: TokenExchange;
+  private refusalTypes: Set<string>;
+  // The grace of the option, or the default: the grace of a refusal run when the latest accepted result publishes none.
+  private optionGrace: number;
+  // The grace in use: the one the latest accepted result published, else optionGrace. Seconds.
+  private grace: number;
+  // The monotonic time (performance.now, milliseconds) of the first refusal of the open refusal run; null without one.
+  private refusedSince: number | null = null;
+  // The bootstrap retries of the open refusal run: the backoff of their delays.
+  private refusals: number = 0;
   private expiry: ExpiryRecord | null = null;
   private bootstrap: Bootstrap | null = null;
   // The exchanges started so far, settled or not: the next one waits for them (see serialised).
@@ -126,21 +177,23 @@ export class TokenExchangeFlow {
   private resuming: boolean = false;
 
 
-  constructor(client: Centrifuge, host: ClientHost, options: TokenExchange) {
-    this.client = client;
+  constructor(host: ClientHost, options: TokenExchange) {
     this.host = host;
     this.options = options;
+    this.refusalTypes = new Set<string>(options.refusalTypes ?? []);
+    this.optionGrace = options.grace === undefined ? defaultGrace : Math.min(options.grace, maxGrace);
+    this.grace = this.optionGrace;
   }
 
 
   /** Called at the start of every connect attempt: an access token that is expired, or refused, is cleared. */
   beforeConnect(): void {
-    const token: string = this.client['_token'];
+    const token: string = this.host.token();
     const expired: boolean = token !== '' && this.expiry !== null && this.expiry.token === token
       && Date.now() >= this.expiry.expiresAt;
-    if (this.client['_refreshRequired'] || expired) {
-      this.client['_token'] = '';
-      this.client['_refreshRequired'] = false;
+    if (this.host.refreshRequired() || expired) {
+      this.host.setToken('');
+      this.host.clearRefreshRequired();
     }
   }
 
@@ -151,11 +204,11 @@ export class TokenExchangeFlow {
    * that already carries a user, a resumed reply).
    */
   intercept(result: any, resume: (result: any) => void): boolean {
-    if (this.resuming || this.client['_token'] !== '' || !!result.user) {
+    if (this.resuming || this.host.token() !== '' || !!result.user) {
       return false;
     }
     const bootstrap: Bootstrap = {
-      transportId: this.client['_transportId'],
+      transportId: this.host.transportId(),
       held: new Map<string, any>(),
       timer: null,
     };
@@ -185,22 +238,21 @@ export class TokenExchangeFlow {
 
   /**
    * The token of a renewal, and of refresh() without a token: exchanged over the connected socket, so a refresh()
-   * made while disconnected waits for the connection first. Rejects with UnauthorizedError when the application holds
-   * no refresh token any more.
+   * made while disconnected waits for the connection first. Rejects with UnauthorizedError when the session is over.
    */
   async fetchToken(): Promise<string> {
-    if (!this.client['_isConnected']()) {
+    if (!this.host.isConnected()) {
       await this.host.waitConnected(null);
     }
-    const transportId: number = this.client['_transportId'];
+    const transportId: number = this.host.transportId();
     const running: Fetch | null = this.fetching;
     if (running !== null && running.transportId === transportId) {
       return running.token;
     }
     const token: Promise<string> = this.serialised((): Turn<string> => {
       const attempt: Attempt = this.attempt(
-        (): Route => ({ session: this.client['_session'], node: this.client['_node'] }),
-        (): boolean => this.client['_isConnected']() && this.client['_transportId'] === transportId,
+        (): Route => this.host.route(),
+        (): boolean => this.host.isConnected() && this.host.transportId() === transportId,
       );
       return this.bounded(this.renewalToken(attempt), attempt);
     });
@@ -218,21 +270,27 @@ export class TokenExchangeFlow {
    * timer in milliseconds, a random moment between 0.7 and 0.9 of the ttl.
    */
   expiryDelay(ttl: number): number {
-    this.expiry = { token: this.client['_token'], expiresAt: Date.now() + ttl * 1000 };
+    this.expiry = { token: this.host.token(), expiresAt: Date.now() + ttl * 1000 };
     return ttlMilliseconds(ttl * (0.7 + 0.2 * Math.random()));
   }
 
 
-  /** Ends a bootstrap in progress, and its retry timer: called when the connection ends. */
-  reset(): void {
+  /**
+   * Ends a bootstrap in progress, and its retry timer: called when the connection ends. A client-initiated end (the
+   * application called disconnect) also closes the refusal run; a transport loss keeps it, so a client that reconnects
+   * repeatedly still ends its session at the horizon.
+   */
+  reset(clientInitiated: boolean): void {
     const bootstrap: Bootstrap | null = this.bootstrap;
-    if (bootstrap === null) {
-      return;
+    if (bootstrap !== null) {
+      this.bootstrap = null;
+      if (bootstrap.timer !== null) {
+        clearTimeout(bootstrap.timer);
+        bootstrap.timer = null;
+      }
     }
-    this.bootstrap = null;
-    if (bootstrap.timer !== null) {
-      clearTimeout(bootstrap.timer);
-      bootstrap.timer = null;
+    if (clientInitiated) {
+      this.closeRun();
     }
   }
 
@@ -245,11 +303,30 @@ export class TokenExchangeFlow {
   }
 
 
-  // The token of a renewal on the connected transport it was requested for: a refresh token that is no longer held
-  // is a dead session.
+  // The token of a renewal on the connected transport it was requested for. A refresh token the application no longer
+  // holds ends the session; a refusal inside the grace horizon fails the fetch, which the refresh timer retries.
   private async renewalToken(attempt: Attempt): Promise<string> {
-    const token: string | null = await this.loadAndExchange(attempt);
+    let token: string | null = null;
+    let failure: any = null;
+    let failed: boolean = false;
+    try {
+      token = await this.loadAndExchange(attempt);
+    } catch (err: any) {
+      failure = err;
+      failed = true;
+    }
+    if (failed) {
+      if (!(failure instanceof UnauthorizedError) || !attempt.current()) {
+        throw failure;
+      }
+      if (failure instanceof Refusal && !failure.terminal) {
+        throw new Error(refusedMessage);
+      }
+      this.closeRun();
+      throw new UnauthorizedError('');
+    }
     if (token === null) {
+      this.closeRun();
       throw new UnauthorizedError('');
     }
     return token;
@@ -270,7 +347,7 @@ export class TokenExchangeFlow {
   // exchange loads the refresh token only after a late rotation of this one is stored. A second client timeout bounds
   // that wait, so a callback which never settles cannot hold the queue.
   private bounded<T>(work: Promise<T>, attempt: Attempt): Turn<T> {
-    const timeout: number = this.client['_config'].timeout as number;
+    const timeout: number = this.host.timeout();
     const start: number = Date.now();
     const outcome: Promise<T> = raceCall(work, start + timeout, undefined, (): any => {
       attempt.expire();
@@ -287,8 +364,8 @@ export class TokenExchangeFlow {
   // Whether a continuation of a bootstrap still belongs to the connection attempt it runs for.
   private isCurrent(bootstrap: Bootstrap): boolean {
     return this.bootstrap === bootstrap
-      && this.client['_transportId'] === bootstrap.transportId
-      && this.client['_isConnecting']();
+      && this.host.transportId() === bootstrap.transportId
+      && this.host.isConnecting();
   }
 
 
@@ -310,7 +387,7 @@ export class TokenExchangeFlow {
   // refresh(token) call starts, which moves the token generation of the refresh slot on.
   private attempt(route: () => Route, alive: () => boolean): Attempt {
     let timedOut: boolean = false;
-    const generation: number = this.client['_refreshSlot'].currentTokenGeneration();
+    const generation: number = this.host.tokenGeneration();
     return {
       route: route,
       current: (): boolean => !timedOut && alive(),
@@ -318,7 +395,7 @@ export class TokenExchangeFlow {
         timedOut = true;
       },
       expired: (): boolean => timedOut,
-      superseded: (): boolean => this.client['_refreshSlot'].currentTokenGeneration() !== generation,
+      superseded: (): boolean => this.host.tokenGeneration() !== generation,
     };
   }
 
@@ -331,13 +408,13 @@ export class TokenExchangeFlow {
       return;
     }
     const ctx: any = { type: type, error: error };
-    this.client['_emitError'](ctx, (): void => {
+    this.host.emitError(ctx, (): void => {
       if (!this.isCurrent(bootstrap)) {
         return;
       }
       this.backedOff(bootstrap, (): void => {
         if (this.isCurrent(bootstrap)) {
-          this.client['_disconnect'](connectingCodes.transportClosed, 'exchange abandoned', true);
+          this.host.disconnect(connectingCodes.transportClosed, 'exchange abandoned', true);
         }
       });
     });
@@ -359,13 +436,14 @@ export class TokenExchangeFlow {
   // Runs a step of a bootstrap. An exception an application handler throws in it is dispatched as a failure of the client.
   private start(bootstrap: Bootstrap, result: any, resume: (result: any) => void): void {
     this.connectStep(bootstrap, result, resume).catch((err: any): void => {
-      this.client['_dispatchFailed'](err);
+      this.host.dispatchFailed(err);
     });
   }
 
 
   // One step of a bootstrap: loads the refresh token, exchanges it, and refreshes the anonymous connection with the
-  // access token. An empty refresh token leaves the connection anonymous.
+  // access token. An empty refresh token leaves the connection anonymous, unless a refusal run is open: then the
+  // application removed the token meanwhile, and the session is over.
   private async connectStep(bootstrap: Bootstrap, result: any, resume: (result: any) => void): Promise<void> {
     bootstrap.timer = null;
     if (!this.isCurrent(bootstrap)) {
@@ -387,8 +465,12 @@ export class TokenExchangeFlow {
         this.abandon(bootstrap, 'connectToken', this.host.createError(errorCodes.clientConnectToken, 'timeout'));
         return;
       }
+      if (err instanceof Refusal && !err.terminal) {
+        this.refused(bootstrap, result, resume);
+        return;
+      }
       if (err instanceof UnauthorizedError) {
-        this.client['_failUnauthorized']();
+        this.endSession();
         return;
       }
       this.retry(bootstrap, result, resume, 'connectToken', this.connectTokenError(err));
@@ -398,6 +480,10 @@ export class TokenExchangeFlow {
       return;
     }
     if (token === null) {
+      if (this.refusedSince !== null) {
+        this.endSession();
+        return;
+      }
       this.finish(bootstrap, result, resume, null);
       return;
     }
@@ -411,13 +497,39 @@ export class TokenExchangeFlow {
   }
 
 
+  // Reports a refusal inside the grace horizon, and runs the bootstrap again on the same connection after a backoff that
+  // ends no later than the horizon. The horizon is checked again once the report is handled: a session that ends meanwhile
+  // is ended, not retried.
+  private refused(bootstrap: Bootstrap, result: any, resume: (result: any) => void): void {
+    if (!this.isCurrent(bootstrap)) {
+      return;
+    }
+    const ctx: any = { type: 'connectToken', error: this.host.createError(errorCodes.clientConnectToken, refusedMessage) };
+    this.host.emitError(ctx, (): void => {
+      if (!this.isCurrent(bootstrap)) {
+        return;
+      }
+      if (this.horizonPassed()) {
+        this.endSession();
+        return;
+      }
+      const delay: number = Math.min(backoff(this.refusals, 1000, 8000), this.horizon() - performance.now());
+      this.refusals++;
+      bootstrap.timer = setTimeout((): void => {
+        bootstrap.timer = null;
+        this.start(bootstrap, result, resume);
+      }, delay);
+    });
+  }
+
+
   // Reports a failed step of a bootstrap, and runs the step again on the same connection after a backoff.
   private retry(bootstrap: Bootstrap, result: any, resume: (result: any) => void, type: string, error: any): void {
     if (!this.isCurrent(bootstrap)) {
       return;
     }
     const ctx: any = { type: type, error: error };
-    this.client['_emitError'](ctx, (): void => {
+    this.host.emitError(ctx, (): void => {
       if (!this.isCurrent(bootstrap)) {
         return;
       }
@@ -431,7 +543,7 @@ export class TokenExchangeFlow {
   // Sets the access token and refreshes the anonymous connection with it, on the connection of the attempt.
   private refreshConnection(bootstrap: Bootstrap, result: any, resume: (result: any) => void, token: string): void {
     const cmd: any = { refresh: { token: token } };
-    this.client['_token'] = token;
+    this.host.setToken(token);
     this.sendOnRoute(cmd, result.session, result.node).then((ctx: CallResolveContext): void => {
       try {
         if (!this.isCurrent(bootstrap)) {
@@ -452,7 +564,7 @@ export class TokenExchangeFlow {
         rejectCtx.next?.();
       }
     }).catch((err: any): void => {
-      this.client['_dispatchFailed'](err);
+      this.host.dispatchFailed(err);
     });
   }
 
@@ -468,8 +580,8 @@ export class TokenExchangeFlow {
     token: string,
     err: any,
   ): void {
-    if (this.client['_token'] === token) {
-      this.client['_token'] = '';
+    if (this.host.token() === token) {
+      this.host.setToken('');
     }
     if (!this.isCurrent(bootstrap)) {
       return;
@@ -479,7 +591,7 @@ export class TokenExchangeFlow {
     } else if (refreshRetries(err.code, err.temporary === true)) {
       this.retry(bootstrap, result, resume, 'connect', err);
     } else {
-      this.client['_disconnect'](err.code, err.message, false);
+      this.host.disconnect(err.code, err.message, false);
     }
   }
 
@@ -511,28 +623,38 @@ export class TokenExchangeFlow {
     try {
       resume(merged);
     } catch (err: any) {
-      this.client['_dispatchFailed'](err);
+      this.host.dispatchFailed(err);
     } finally {
       this.resuming = false;
     }
   }
 
 
-  // Exchanges a refresh token. The issuer refusing it is retried once with the token the application holds by then,
-  // when that one is another: another client of the installation rotated it meanwhile. The same token, or none, is
-  // terminal, and so is a refusal of the retry.
+  // Exchanges a refresh token. The first refusal opens the refusal run, which starts the clock of the grace horizon. The
+  // storage is read again at once: a different token is presented in the same attempt, once (another client of the
+  // installation rotated it meanwhile), and an empty storage ends the session. Any other refusal is thrown as a Refusal,
+  // which tells the caller whether the session is over: the horizon has passed, or the refusal came after the retry.
   private async exchangeRefresh(refreshToken: string, attempt: Attempt, retried: boolean): Promise<string> {
     try {
       return await this.exchangeWith(refreshToken, attempt);
     } catch (err: any) {
-      if (!(err instanceof UnauthorizedError) || retried || !attempt.current()) {
+      if (!(err instanceof UnauthorizedError) || !attempt.current()) {
         throw err;
       }
-      const current: string | null | undefined = await this.options.load();
-      if (!current || current === refreshToken) {
-        throw err;
+      this.openRun();
+      if (!retried) {
+        const current: string | null | undefined = await this.options.load();
+        if (!attempt.current()) {
+          throw this.closedError();
+        }
+        if (!current) {
+          throw new Refusal(true);
+        }
+        if (current !== refreshToken) {
+          return this.exchangeRefresh(current, attempt, true);
+        }
       }
-      return this.exchangeRefresh(current, attempt, true);
+      throw new Refusal(this.horizonPassed());
     }
   }
 
@@ -546,23 +668,40 @@ export class TokenExchangeFlow {
   // One exchange: the app's exchange callback, then the store of the rotated refresh token, awaited before the access
   // token is used. Resolves with the access token. The access token of an attempt that timed out, or was abandoned, is
   // not used, but its rotated refresh token is stored (see storeRotated): the issuer has already consumed the pair.
+  // An accepted exchange closes the refusal run, whatever attempt it ran for.
   private async exchangeWith(refreshToken: string, attempt: Attempt): Promise<string> {
     const result: TokenExchangeResult = await this.options.exchange({
       refreshToken: refreshToken,
       rpc: (method: string, data: any): Promise<RpcResult> => this.rpc(attempt, method, data),
     });
+    this.recordGrace(result ? result.grace : undefined);
     const rotation: string | null = this.rotated(refreshToken, result);
     if (rotation !== null) {
       await this.storeRotated(refreshToken, rotation, attempt);
     }
-    if (!attempt.current()) {
-      throw this.closedError();
-    }
     if (!result || !result.token) {
       throw new Error('token exchange returned no token');
     }
+    this.closeRun();
+    if (!attempt.current()) {
+      throw this.closedError();
+    }
     this.host.debug('connection token exchanged');
     return result.token;
+  }
+
+
+  // Keeps the grace the issuer published with an accepted exchange, for the next refusal run. An exchange that publishes
+  // none leaves the option's grace in use; a value that is not a number of seconds from 0 up is ignored, and the grace in
+  // use stays; a value above the maximum is clamped to it.
+  private recordGrace(published: number | undefined): void {
+    if (published === undefined) {
+      this.grace = this.optionGrace;
+      return;
+    }
+    if (Number.isFinite(published) && published >= 0) {
+      this.grace = Math.min(published, maxGrace);
+    }
   }
 
 
@@ -582,12 +721,47 @@ export class TokenExchangeFlow {
           type: 'tokenStore',
           error: this.host.createError(errorCodes.clientRefreshToken, err?.toString() ?? ''),
         };
-        this.client['_emitError'](ctx, (): void => {});
+        this.host.emitError(ctx, (): void => {});
       } catch (handlerErr: any) {
         // Thrown by an error handler: reported, so the exchange still goes on with its access token.
-        this.client['_reportDispatchError'](handlerErr);
+        this.host.reportDispatchError(handlerErr);
       }
     }
+  }
+
+
+  // Opens the refusal run at its first refusal: the clock of the grace horizon starts, and the retries count from zero.
+  private openRun(): void {
+    if (this.refusedSince === null) {
+      this.refusedSince = performance.now();
+      this.refusals = 0;
+    }
+  }
+
+
+  // Closes the refusal run: an accepted exchange, a verdict, or a disconnect of the application.
+  private closeRun(): void {
+    this.refusedSince = null;
+    this.refusals = 0;
+  }
+
+
+  // The monotonic time at which the open refusal run reaches its grace horizon, in milliseconds (performance.now).
+  private horizon(): number {
+    return (this.refusedSince ?? 0) + this.grace * 1000;
+  }
+
+
+  // Whether the grace horizon of the open refusal run has passed: a refusal from then on ends the session.
+  private horizonPassed(): boolean {
+    return performance.now() >= this.horizon();
+  }
+
+
+  // Ends the session: the refusal run is closed, and the client is disconnected as unauthorized, without a reconnect.
+  private endSession(): void {
+    this.closeRun();
+    this.host.failUnauthorized();
   }
 
 
@@ -601,7 +775,7 @@ export class TokenExchangeFlow {
   // Settles with the reply context, or rejects with the rejection context: the caller calls next() of the context it gets.
   // Unlike the upstream plainCall of the rpc host, it does not wait for the connected state, and it writes on the route given.
   private sendOnRoute(cmd: any, session: string, node: string): Promise<CallResolveContext> {
-    const call: Promise<CallResolveContext> = this.client['_call'](cmd, true);
+    const call: Promise<CallResolveContext> = this.host.sendPlainCommand(cmd);
     // Without a transport nothing is written, and writeCommands settles nothing: the call is settled here. This is the
     // no-transport rule of writeCommands (write_commands.ts:82). Otherwise writeCommands settles the commands it refused
     // or could not write.
@@ -614,6 +788,7 @@ export class TokenExchangeFlow {
 
 
   // The rpc call of the exchange, on the connection of the attempt. Nothing is written once the connection of the attempt is gone: the call rejects with connectionClosed instead.
+  // A server error named in refusalTypes rejects with TokenExchangeRefusedError; every other rejection is passed on as it is.
   private rpc(attempt: Attempt, method: string, data: any): Promise<RpcResult> {
     if (!attempt.current()) {
       return Promise.reject(this.closedError());
@@ -629,22 +804,43 @@ export class TokenExchangeFlow {
       },
       (rejectCtx: CallRejectContext): never => {
         rejectCtx.next?.();
-        throw rejectCtx.error;
+        throw this.classify(rejectCtx.error);
       });
+  }
+
+
+  // The rejection an rpc of the exchange settles with: a refusal by name becomes TokenExchangeRefusedError, nothing else
+  // is classified (codes are never consulted).
+  private classify(error: any): any {
+    if (typeof error?.appType === 'string' && this.refusalTypes.has(error.appType)) {
+      return new TokenExchangeRefusedError(error);
+    }
+    return error;
   }
 }
 
 
 /**
  * The flow of the tokenExchange option of a client, or null without the option. The option is exclusive with getToken:
- * setting both throws.
+ * setting both throws, and so does a refusal name that is not a non-empty string, or a grace that is not a finite
+ * number of seconds from 0 up.
  */
-export function createTokenExchangeFlow(client: Centrifuge, host: ClientHost, options: Options): TokenExchangeFlow | null {
-  if (!options.tokenExchange) {
+export function createTokenExchangeFlow(host: ClientHost, options: Options): TokenExchangeFlow | null {
+  const tokenExchange: TokenExchange | null | undefined = options.tokenExchange;
+  if (!tokenExchange) {
     return null;
   }
   if (options.getToken) {
     throw new Error('tokenExchange and getToken are exclusive');
   }
-  return new TokenExchangeFlow(client, host, options.tokenExchange);
+  const refusalTypes: string[] | undefined = tokenExchange.refusalTypes;
+  if (refusalTypes !== undefined && (!Array.isArray(refusalTypes)
+    || !refusalTypes.every((name: string): boolean => typeof name === 'string' && name !== ''))) {
+    throw new Error('tokenExchange.refusalTypes: entries must be non-empty strings');
+  }
+  const grace: number | undefined = tokenExchange.grace;
+  if (grace !== undefined && (typeof grace !== 'number' || !Number.isFinite(grace) || grace < 0)) {
+    throw new Error('tokenExchange.grace: must be a finite number of seconds, 0 or more');
+  }
+  return new TokenExchangeFlow(host, tokenExchange);
 }

@@ -35,6 +35,7 @@ import { writeCommands } from './write_commands';
 import { RefreshSlot, refreshKeepsConnection, refreshRetries } from './refresh_slot';
 import { ConnectionIdentity } from './identity';
 import { TokenExchangeFlow, createTokenExchangeFlow } from './token_exchange';
+import { UnauthorizedError } from './unauthorized_error';
 
 import {
   State, Options, SubscriptionState, ClientEvents, AuthContext,
@@ -107,12 +108,7 @@ interface serverSubscription {
   subscribed?: boolean;
 }
 
-export class UnauthorizedError extends Error {
-  constructor(message: any) {
-    super(message);
-    this.name = this.constructor.name;
-  }
-}
+export { UnauthorizedError };
 
 /** Centrifuge is a Centrifuge/Centrifugo bidirectional client. */
 export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<ClientEvents>) {
@@ -718,7 +714,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
     this._codec = new JsonCodec();
     this._formatOverride();
-    this._tokenExchange = createTokenExchangeFlow(this, this._host, this._config);
+    this._tokenExchange = createTokenExchangeFlow(this._host, this._config);
 
     if (this._config.debug === true || localStorageItem('centrifuge.debug')) {
       this._debugEnabled = true;
@@ -1886,7 +1882,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       this._deviceWentOffline = false;
     }
 
-    this._tokenExchange?.reset();
+    this._tokenExchange?.reset(code === disconnectedCodes.disconnectCalled);
     const ctx = {
       code: code,
       reason: reason
