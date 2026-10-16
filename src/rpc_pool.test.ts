@@ -759,6 +759,20 @@ describe('RpcPool', () => {
       expect(pool.stats().redirects).toBe(0);
     });
 
+    test('close rejects a call whose redirect fetch is in progress with connectionClosed, as the server served it', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = echo;
+      const fetchFunction: jest.Mock = hangingFetch();
+      const pool: RpcPool = createPool((): string => server.url, {
+        fetch: fetchFunction as any,
+        redirect: (): any => ({ url: 'https://cdn.example/slow' }),
+      });
+      const call: Promise<RpcResult> = pool.rpc('work', bytes({ n: 1 }));
+      expect(await until((): boolean => fetchFunction.mock.calls.length === 1)).toBe(true);
+      pool.close();
+      await expect(call).rejects.toMatchObject({ code: errorCodes.connectionClosed });
+    });
+
     test('the deadline of the call covers the redirect fetch', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
       server.onCommand = echo;

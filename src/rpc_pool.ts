@@ -273,7 +273,8 @@ export class RpcPool {
       }
     }
     for (const call of Array.from(this.calls)) {
-      if (!call.sent) {
+      // A call whose reply carried a redirect was served already: it is in flight until its fetch ends.
+      if (!call.sent && call.controller === null) {
         this.fail(call, poolError(errorCodes.cancelled, 'cancelled'));
       } else {
         this.fail(call, poolError(errorCodes.connectionClosed, 'connection closed'));
