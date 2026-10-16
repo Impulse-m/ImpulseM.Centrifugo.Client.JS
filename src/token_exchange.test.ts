@@ -734,8 +734,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       c.connect();
       await until((): boolean => calls === 1);
 
-      jest.advanceTimersByTime(5000);
-      await until((): boolean => events.includes('error:connectToken'));
+      await advanceUntil((): boolean => events.includes('error:connectToken'));
       await advanceUntil((): boolean => events.includes('connected'));
       await connected;
 
@@ -767,8 +766,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       // The renewal runs at 7 to 9 seconds; its exchange then stalls for the client timeout.
       jest.advanceTimersByTime(9000);
       await until((): boolean => calls === 2);
-      jest.advanceTimersByTime(5000);
-      await until((): boolean => events.includes('error:refreshToken'));
+      await advanceUntil((): boolean => events.includes('error:refreshToken'));
       expect(c.state).toBe(State.Connected);
 
       // The retry runs after the refresh backoff, with a new exchange over the same connection.
@@ -801,8 +799,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       c.connect();
       await until((): boolean => calls === 1);
 
-      jest.advanceTimersByTime(5000);
-      await until((): boolean => events.includes('error:connectToken'));
+      await advanceUntil((): boolean => events.includes('error:connectToken'));
       release({ token: 'late-access', refreshToken: 'refresh-2' });
       await flush();
 
@@ -833,8 +830,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       c.connect();
       await until((): boolean => calls === 1);
 
-      jest.advanceTimersByTime(5000);
-      await until((): boolean => events.includes('error:connectToken'));
+      await advanceUntil((): boolean => events.includes('error:connectToken'));
       stored = 'refresh-other';
       release({ token: 'late-access', refreshToken: 'refresh-2' });
       await flush();
@@ -1063,6 +1059,168 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       await connectClient(c);
       // The refresh timer of the ttl, as upstream arms it: nothing else.
       expect(jest.getTimerCount() - before).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a bootstrap whose exchange rethrows a timeout error is retried in place, without a reconnect', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      const c: Centrifuge = create({
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 1) {
+            const timedOut: any = new Error('rpc timeout');
+            timedOut.code = errorCodes.timeout;
+            return Promise.reject(timedOut);
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      const connected: Promise<void> = nextConnected(c);
+      c.connect();
+      await advanceUntil((): boolean => events.includes('error:connectToken'));
+      await advanceUntil((): boolean => events.includes('connected'));
+      await connected;
+
+      expect(commands('connect')).toHaveLength(1);
+      expect(order).toEqual(['connect', 'rpc:exchange', 'store:refresh-2', 'refresh']);
+      expect(events).toEqual(['error:connectToken', 'connected', 'auth']);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a refresh() after a renewal timed out waits for the late rotation, and exchanges the rotated token', async (): Promise<void> => {
+    serve({ ttl: 10 });
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      let release: (result: TokenExchangeResult) => void = (): void => {};
+      const c: Centrifuge = create({
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 2) {
+            return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+              release = resolve;
+            });
+          }
+          if (calls === 3) {
+            // Only the rotation of the late renewal (refresh-3) is accepted: the stale refresh-2 is refused.
+            if (ctx.refreshToken !== 'refresh-3') {
+              return Promise.reject(new UnauthorizedError(''));
+            }
+            return Promise.resolve({ token: 'access-3', refreshToken: 'refresh-4' });
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+
+      // The renewal runs at 7 to 9 seconds with refresh-2; its exchange then stalls past the client timeout.
+      await advanceUntil((): boolean => events.includes('error:refreshToken'));
+      // The refresh() asks for a token while the late rotation is still pending: it is stored before the next exchange
+      // loads the refresh token.
+      const refreshed: Promise<any> = c.refresh();
+      await flush();
+      release({ token: 'access-late', refreshToken: 'refresh-3' });
+      await refreshed;
+
+      expect(c.state).toBe(State.Connected);
+      expect(events).not.toContain('disconnected');
+      expect(stored).toBe('refresh-4');
+      expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1', 'access-3']);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('bootstraps that stall on every connect come further apart, as the abandon backoff grows', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    // A random draw at its middle makes each backoff step exact, so the reconnect gaps can be compared.
+    const random: jest.SpyInstance = jest.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      const starts: number[] = [];
+      const c: Centrifuge = create({
+        exchange: (): Promise<TokenExchangeResult> => {
+          starts.push(Date.now());
+          return new Promise<TokenExchangeResult>((): void => {});
+        },
+      });
+      c.connect();
+      await advanceUntil((): boolean => starts.length === 4);
+
+      const gaps: number[] = starts.slice(1).map((start: number, index: number): number => start - starts[index]);
+      expect(gaps[1]).toBeGreaterThan(gaps[0]);
+      expect(gaps[2]).toBeGreaterThan(gaps[1]);
+      expect(commands('connect')).toHaveLength(4);
+    } finally {
+      random.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  test('refreshTokenDuringBootstrapIsAppliedAfterTheBootstrap', async (): Promise<void> => {
+    serve();
+    let open: () => void = (): void => {};
+    const gate: Promise<void> = new Promise<void>((resolve: () => void): void => {
+      open = resolve;
+    });
+    let calls: number = 0;
+    const c: Centrifuge = create({
+      exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+        calls++;
+        return gate.then((): Promise<TokenExchangeResult> => issue(ctx));
+      },
+    });
+    const events: string[] = record(c);
+    c.connect();
+    await until((): boolean => calls === 1);
+
+    // The app's token arrives while the bootstrap exchange runs: it is sent once the bootstrap has connected.
+    const applied: Promise<any> = c.refresh('app-token');
+    open();
+    await applied;
+
+    expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1', 'app-token']);
+    expect(order).toEqual(['connect', 'rpc:exchange', 'store:refresh-2', 'refresh', 'refresh']);
+    expect(events).toEqual(['connected', 'auth']);
+  });
+
+  test('a plain refresh() during a renewal exchange does not supersede its rotation', async (): Promise<void> => {
+    serve({ ttl: 10 });
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      let release: (result: TokenExchangeResult) => void = (): void => {};
+      const c: Centrifuge = create({
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 2) {
+            return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+              release = resolve;
+            });
+          }
+          return issue(ctx);
+        },
+      });
+      await connectClient(c);
+      await advanceUntil((): boolean => calls === 2);
+
+      // Another tab stored its own token meanwhile. Only refresh(token) supersedes an exchange, so the rotation is stored.
+      stored = 'refresh-other';
+      const refreshed: Promise<any> = c.refresh();
+      await flush();
+      release({ token: 'access-late', refreshToken: 'refresh-3' });
+      await refreshed;
+
+      expect(stored).toBe('refresh-3');
     } finally {
       jest.useRealTimers();
     }
