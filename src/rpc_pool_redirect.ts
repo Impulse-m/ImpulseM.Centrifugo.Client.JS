@@ -106,6 +106,7 @@ export async function fetchRedirect(
     throw redirectFailure('redirect fetch failed');
   }
   if (!response.ok) {
+    discardBody(response);
     throw redirectFailure('redirect fetch status ' + response.status);
   }
   // fetch follows the redirects of the server: the URL the body came from is checked as the hook's URL was.
@@ -226,6 +227,18 @@ function declaredLength(response: any): number {
   }
   const length: number = Number(value);
   return Number.isFinite(length) ? length : 0;
+}
+
+
+// Cancels the body of a response the pool does not read, so that its connection is released now and not at garbage
+// collection. A runtime without a cancel on the body leaves nothing to release here.
+function discardBody(response: any): void {
+  try {
+    const pending: any = response.body?.cancel?.();
+    pending?.catch?.((): void => {});
+  } catch (e) {
+    // The body is already gone, or it cannot be cancelled: the runtime releases it.
+  }
 }
 
 

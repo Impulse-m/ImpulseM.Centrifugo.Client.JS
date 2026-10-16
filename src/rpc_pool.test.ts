@@ -607,6 +607,23 @@ describe('RpcPool', () => {
       await expect(pool.rpc('work', bytes({ n: 1 }))).rejects.toMatchObject({ code: errorCodes.redirectFailed });
     });
 
+    test('a non-2xx body is cancelled, so that its connection is released', async (): Promise<void> => {
+      const cancel: jest.Mock = jest.fn();
+      const body: ReadableStream<Uint8Array> = new ReadableStream<Uint8Array>({
+        pull(controller: ReadableStreamDefaultController<Uint8Array>): void {
+          controller.enqueue(new Uint8Array([1]));
+        },
+        cancel: cancel,
+      });
+      await expect(fetchRedirect(
+        jest.fn(async (): Promise<any> => new Response(body, { status: 404 })) as any,
+        'wss://edge.example/connection/websocket',
+        { url: 'https://cdn.example/missing' },
+        new AbortController().signal
+      )).rejects.toMatchObject({ code: errorCodes.redirectFailed });
+      expect(cancel).toHaveBeenCalledTimes(1);
+    });
+
     test('a body over maxBytes rejects with redirectFailed', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
       server.onCommand = echo;
