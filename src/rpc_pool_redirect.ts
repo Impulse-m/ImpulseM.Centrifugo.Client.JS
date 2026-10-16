@@ -108,7 +108,18 @@ export async function fetchRedirect(
   if (!response.ok) {
     throw redirectFailure('redirect fetch status ' + response.status);
   }
-  return readBounded(response, maxBytes);
+  // fetch follows the redirects of the server: the URL the body came from is checked as the hook's URL was.
+  if (typeof response.url === 'string' && response.url !== '') {
+    redirectUrl(endpoint, response.url);
+  }
+  try {
+    return await readBounded(response, maxBytes);
+  } catch (e: any) {
+    if (e?.code === errorCodes.redirectFailed) {
+      throw e;
+    }
+    throw redirectFailure('redirect body read failed');
+  }
 }
 
 

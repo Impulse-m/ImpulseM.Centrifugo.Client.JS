@@ -667,6 +667,54 @@ describe('RpcPool', () => {
       expect(fetchFunction).not.toHaveBeenCalled();
     });
 
+    test('a redirect followed to an http URL on a wss endpoint is refused, and its body is not read', async (): Promise<void> => {
+      const arrayBuffer: jest.Mock = jest.fn(async (): Promise<ArrayBuffer> => new ArrayBuffer(1));
+      const fetchFunction: jest.Mock = jest.fn(async (): Promise<any> => ({
+        ok: true,
+        status: 200,
+        url: 'http://edge.example/part/1',
+        headers: new Headers(),
+        body: null,
+        arrayBuffer: arrayBuffer,
+      }));
+      await expect(fetchRedirect(fetchFunction as any, 'wss://edge.example/connection/websocket', {
+        url: 'https://cdn.example/part/1',
+      }, new AbortController().signal)).rejects.toMatchObject({ code: errorCodes.redirectFailed });
+      expect(arrayBuffer).not.toHaveBeenCalled();
+    });
+
+    test('a redirect followed to an https URL on a wss endpoint is accepted', async (): Promise<void> => {
+      const fetchFunction: jest.Mock = jest.fn(async (): Promise<any> => ({
+        ok: true,
+        status: 200,
+        url: 'https://edge.example/part/2',
+        headers: new Headers(),
+        body: null,
+        arrayBuffer: async (): Promise<ArrayBuffer> => new Uint8Array([5]).buffer,
+      }));
+      const body: Uint8Array = await fetchRedirect(fetchFunction as any, 'wss://edge.example/connection/websocket', {
+        url: 'https://cdn.example/part/1',
+      }, new AbortController().signal);
+      expect(Array.from(body)).toEqual([5]);
+    });
+
+    test('a network failure while the body is read rejects with redirectFailed', async (): Promise<void> => {
+      const body: ReadableStream<Uint8Array> = new ReadableStream<Uint8Array>({
+        start(controller: ReadableStreamDefaultController<Uint8Array>): void {
+          controller.enqueue(new Uint8Array([1, 2]));
+        },
+        pull(controller: ReadableStreamDefaultController<Uint8Array>): void {
+          controller.error(new TypeError('terminated'));
+        },
+      });
+      await expect(fetchRedirect(
+        jest.fn(async (): Promise<any> => new Response(body, { status: 200 })) as any,
+        'wss://edge.example/connection/websocket',
+        { url: 'https://cdn.example/broken' },
+        new AbortController().signal
+      )).rejects.toMatchObject({ code: errorCodes.redirectFailed });
+    });
+
     test('an http URL is fetched on a ws endpoint, and never on wss', async (): Promise<void> => {
       const fetchFunction: jest.Mock = fetchReturning(new Uint8Array([4]), 200);
       const body: Uint8Array = await fetchRedirect(fetchFunction as any, 'ws://localhost/connection/websocket', {
