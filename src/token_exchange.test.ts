@@ -686,6 +686,22 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
+  test('a connect reply that already carries a user is not bootstrapped: no exchange, connected with that user', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 0, user: 'proxy-user' };
+    serve();
+    const c: Centrifuge = create();
+    const users: string[] = [];
+    c.on('connected', (ctx: any): void => {
+      users.push(ctx.user);
+    });
+    await connectClient(c);
+
+    expect(users).toEqual(['proxy-user']);
+    expect(commands('rpc')).toHaveLength(0);
+    expect(commands('refresh')).toHaveLength(0);
+    expect(stored).toBe('refresh-1');
+  });
+
   test('without the option the client holds no flow, and a connect creates no extra timer', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 0, expires: true, ttl: 10 };
     useFakeClock();

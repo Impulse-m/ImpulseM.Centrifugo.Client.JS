@@ -121,11 +121,11 @@ export class TokenExchangeFlow {
 
   /**
    * Called with a connect reply before the connected state. Returns true when it took over the connect and will
-   * resume it with the merged reply later, false when the connect goes on at once (a connect with a token, a resumed
-   * reply).
+   * resume it with the merged reply later, false when the connect goes on at once (a connect with a token, a reply
+   * that already carries a user, a resumed reply).
    */
   intercept(result: any, resume: (result: any) => void): boolean {
-    if (this.resuming || this.client['_token'] !== '') {
+    if (this.resuming || this.client['_token'] !== '' || !!result.user) {
       return false;
     }
     const bootstrap: Bootstrap = {
