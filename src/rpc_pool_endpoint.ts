@@ -1,6 +1,11 @@
 import type { Centrifuge } from './centrifuge';
 import type { CallTimer } from './call_timer';
 
+/** The error of the pool, of the same shape as the errors of Centrifuge.rpc(): a code and a message. */
+export function poolError(code: number, message: string): any {
+  return { code: code, message: message };
+}
+
 /** A connection of an rpc pool: its client, the calls it carries and whether its connect is still in flight. */
 export interface PoolConnection {
   /** The endpoint the client connects to. */

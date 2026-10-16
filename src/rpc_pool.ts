@@ -3,7 +3,7 @@ import { disconnectedCodes, errorCodes } from './codes';
 import { callTimer } from './call_timer';
 import type { CallTimer } from './call_timer';
 import { laterResendDelay, maxLaterResends, retrySignal } from './rpc_tracker';
-import { RpcPoolEndpoint } from './rpc_pool_endpoint';
+import { poolError, RpcPoolEndpoint } from './rpc_pool_endpoint';
 import type { PoolConnection } from './rpc_pool_endpoint';
 import { fetchRedirect, RedirectGate } from './rpc_pool_redirect';
 import type { Options, RpcOptions, RpcResult } from './types';
@@ -121,7 +121,7 @@ const connectionOptionNames: string[] = [
   'token', 'getToken', 'headers', 'name', 'version', 'timeout', 'websocket',
   'minReconnectDelay', 'maxReconnectDelay', 'maxServerPingDelay', 'debug',
 ];
-// The reply timeout of a client when none is set: the default of the client options.
+// The reply timeout of a client when none is set. Keep it equal to the default timeout of centrifuge.ts (config).
 const defaultTimeout: number = 5000;
 const defaultMaxConnectionsPerEndpoint: number = 2;
 const defaultMaxInflightPerConnection: number = 1;
@@ -205,8 +205,10 @@ export class RpcPool {
         return;
       }
       let headers: Record<string, string> | undefined;
+      let timeout: number;
       try {
         headers = this.headersOf(opts);
+        timeout = this.timeoutOf(opts);
       } catch (e) {
         reject(e);
         return;
@@ -216,7 +218,7 @@ export class RpcPool {
         data: data,
         headers: headers,
         key: opts?.endpointKey ?? '',
-        deadline: Date.now() + (opts?.timeout ?? this.timeout),
+        deadline: Date.now() + timeout,
         resends: 0,
         settled: false,
         sent: false,
@@ -307,6 +309,16 @@ export class RpcPool {
       return headers;
     }
     return { ...headers, [name]: affinity };
+  }
+
+
+  // The deadline span of a call in milliseconds: a positive finite number, the connection timeout when unset.
+  private timeoutOf(opts?: RpcPoolCallOptions): number {
+    const timeout: number = opts?.timeout ?? this.timeout;
+    if (!Number.isFinite(timeout) || timeout <= 0) {
+      throw poolError(errorCodes.badConfiguration, 'timeout must be a positive number of milliseconds');
+    }
+    return timeout;
   }
 
 
@@ -713,9 +725,4 @@ function endpointList(value: string | string[] | undefined | null): string[] {
 function hasHeader(headers: Record<string, string>, name: string): boolean {
   const lower: string = name.toLowerCase();
   return Object.keys(headers).some((key: string): boolean => key.toLowerCase() === lower);
-}
-
-
-function poolError(code: number, message: string): any {
-  return { code: code, message: message };
 }

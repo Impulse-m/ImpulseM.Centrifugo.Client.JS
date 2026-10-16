@@ -1,5 +1,6 @@
 import { errorCodes } from './codes';
 import type { RpcPoolRedirect } from './rpc_pool';
+import { poolError } from './rpc_pool_endpoint';
 
 /** The default body limit of a redirect fetch, in bytes. */
 export const defaultRedirectMaxBytes: number = 16 * 1024 * 1024;
@@ -35,7 +36,7 @@ export class RedirectGate {
   acquire(signal: AbortSignal): Promise<() => void> {
     return new Promise<() => void>((resolve: (release: () => void) => void, reject: (error: any) => void): void => {
       if (signal.aborted) {
-        reject({ code: errorCodes.cancelled, message: 'cancelled' });
+        reject(poolError(errorCodes.cancelled, 'cancelled'));
         return;
       }
       const waiter: RedirectWaiter = {
@@ -47,7 +48,7 @@ export class RedirectGate {
       };
       const onAbort: () => void = (): void => {
         this.waiters = this.waiters.filter((other: RedirectWaiter): boolean => other !== waiter);
-        reject({ code: errorCodes.cancelled, message: 'cancelled' });
+        reject(poolError(errorCodes.cancelled, 'cancelled'));
       };
       signal.addEventListener('abort', onAbort, { once: true });
       this.waiters.push(waiter);
@@ -91,6 +92,10 @@ export async function fetchRedirect(
   signal: AbortSignal
 ): Promise<Uint8Array> {
   const url: string = redirectUrl(endpoint, redirect.url);
+  const maxBytes: number = redirect.maxBytes ?? defaultRedirectMaxBytes;
+  if (!Number.isInteger(maxBytes) || maxBytes < 0) {
+    throw poolError(errorCodes.badConfiguration, 'maxBytes must be an integer of at least 0');
+  }
   if (fetchFunction === undefined) {
     throw redirectFailure('no fetch function for the redirect');
   }
@@ -103,7 +108,7 @@ export async function fetchRedirect(
   if (!response.ok) {
     throw redirectFailure('redirect fetch status ' + response.status);
   }
-  return readBounded(response, redirect.maxBytes ?? defaultRedirectMaxBytes);
+  return readBounded(response, maxBytes);
 }
 
 
@@ -161,5 +166,5 @@ async function readBounded(response: any, maxBytes: number): Promise<Uint8Array>
 
 
 function redirectFailure(message: string): any {
-  return { code: errorCodes.redirectFailed, message: message };
+  return poolError(errorCodes.redirectFailed, message);
 }

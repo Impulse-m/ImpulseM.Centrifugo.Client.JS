@@ -497,6 +497,19 @@ describe('RpcPool', () => {
       expect(server.received.some((cmd: any): boolean => cmd.rpc?.cancel !== undefined)).toBe(false);
     });
 
+    test('a call timeout which is not a positive number rejects with badConfiguration before anything is sent', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = echo;
+      const pool: RpcPool = createPool((): string => server.url);
+      await expect(pool.rpc('work', bytes({ n: 1 }), { timeout: Number.NaN })).rejects.toMatchObject({
+        code: errorCodes.badConfiguration,
+      });
+      await expect(pool.rpc('work', bytes({ n: 1 }), { timeout: 0 })).rejects.toMatchObject({
+        code: errorCodes.badConfiguration,
+      });
+      expect(callsOf(server).length).toBe(0);
+    });
+
     test('an aborted signal rejects before anything is sent', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
       server.onCommand = echo;
@@ -588,6 +601,18 @@ describe('RpcPool', () => {
         redirect: (): any => ({ url: 'https://cdn.example/big', maxBytes: 4 }),
       });
       await expect(pool.rpc('work', bytes({ n: 1 }))).rejects.toMatchObject({ code: errorCodes.redirectFailed });
+    });
+
+    test('a maxBytes which is not a whole number rejects with badConfiguration, and nothing is fetched', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = echo;
+      const fetchFunction: jest.Mock = fetchReturning(new Uint8Array([1]), 200);
+      const pool: RpcPool = createPool((): string => server.url, {
+        fetch: fetchFunction as any,
+        redirect: (): any => ({ url: 'https://cdn.example/x', maxBytes: Number.NaN }),
+      });
+      await expect(pool.rpc('work', bytes({ n: 1 }))).rejects.toMatchObject({ code: errorCodes.badConfiguration });
+      expect(fetchFunction).not.toHaveBeenCalled();
     });
 
     test('a redirect URL of the wrong scheme for the endpoint is refused without a fetch', async (): Promise<void> => {
