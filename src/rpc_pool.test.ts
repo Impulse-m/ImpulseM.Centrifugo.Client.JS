@@ -640,6 +640,20 @@ describe('RpcPool', () => {
       expect(pool.stats().connections).toBe(0);
     });
 
+    test('a call in flight at close arms no idle timer once it settles', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = (cmd: any): any => (isCall(cmd) ? holdReply : undefined);
+      const pool: RpcPool = createPool((): string => server.url, { idleTimeout: 5123 });
+      const inFlight: Promise<RpcResult> = pool.rpc('work', bytes({ n: 1 }));
+      await server.waitFor(isCall);
+      const timers: jest.SpyInstance = jest.spyOn(global, 'setTimeout');
+      pool.close();
+      await expect(inFlight).rejects.toMatchObject({ code: errorCodes.connectionClosed });
+      await sleep(20);
+      const armed: any[] = timers.mock.calls.filter((args: any[]): boolean => Math.abs(Number(args[1]) - 5123) <= 5);
+      expect(armed.length).toBe(0);
+    });
+
     test('getToken is called for each connection of the pool', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
       let held: number = 0;
