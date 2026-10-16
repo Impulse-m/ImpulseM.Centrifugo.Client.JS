@@ -649,6 +649,22 @@ describe('RpcPool', () => {
       expect(fetchFunction).not.toHaveBeenCalled();
     });
 
+    test('the global fetch is read when a redirect is fetched, so a fetch installed after the pool is made is used', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: bytes({ url: 'https://cdn.example/late' }) } } : undefined);
+      const original: any = (globalThis as any).fetch;
+      const pool: RpcPool = createPool((): string => server.url, {
+        redirect: (reply: RpcResult | null): any => (reply !== null ? { url: fromBytes(reply.data).url } : undefined),
+      });
+      (globalThis as any).fetch = fetchReturning(new Uint8Array([6]), 200);
+      try {
+        const result: RpcResult = await pool.rpc('work', bytes({ n: 1 }));
+        expect(Array.from(result.data)).toEqual([6]);
+      } finally {
+        (globalThis as any).fetch = original;
+      }
+    });
+
     test('a non-2xx status rejects with redirectFailed', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
       server.onCommand = echo;
@@ -726,6 +742,36 @@ describe('RpcPool', () => {
         new AbortController().signal
       )).rejects.toMatchObject({ code: errorCodes.redirectFailed });
       expect(arrayBuffer).not.toHaveBeenCalled();
+    });
+
+    test('a body with no stream and no declared length is refused without being buffered', async (): Promise<void> => {
+      const arrayBuffer: jest.Mock = jest.fn();
+      const response: any = { ok: true, status: 200, headers: new Headers(), body: {}, arrayBuffer: arrayBuffer };
+      await expect(fetchRedirect(
+        jest.fn(async (): Promise<any> => response) as any,
+        'wss://edge.example/connection/websocket',
+        { url: 'https://cdn.example/unbounded', maxBytes: 4 },
+        new AbortController().signal
+      )).rejects.toMatchObject({ code: errorCodes.redirectFailed });
+      expect(arrayBuffer).not.toHaveBeenCalled();
+    });
+
+    test('a URL with a fragment is not taken for a redirect followed by the runtime, which drops the fragment', async (): Promise<void> => {
+      const response: any = {
+        ok: true,
+        status: 200,
+        url: 'https://cdn.example/part/1',
+        headers: new Headers(),
+        body: null,
+        arrayBuffer: async (): Promise<ArrayBuffer> => new Uint8Array([7]).buffer,
+      };
+      const body: Uint8Array = await fetchRedirect(
+        jest.fn(async (): Promise<any> => response) as any,
+        'wss://edge.example/connection/websocket',
+        { url: 'https://cdn.example/part/1#p2' },
+        new AbortController().signal
+      );
+      expect(Array.from(body)).toEqual([7]);
     });
 
     test('a redirect URL of the wrong scheme for the endpoint is refused without a fetch', async (): Promise<void> => {

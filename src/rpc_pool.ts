@@ -3,9 +3,10 @@ import { disconnectedCodes, errorCodes } from './codes';
 import { callTimer } from './call_timer';
 import type { CallTimer } from './call_timer';
 import { laterResendDelay, maxLaterResends, retrySignal } from './rpc_tracker';
-import { poolError, RpcPoolEndpoint } from './rpc_pool_endpoint';
+import { RpcPoolEndpoint } from './rpc_pool_endpoint';
 import type { PoolConnection } from './rpc_pool_endpoint';
 import { fetchRedirect, RedirectGate } from './rpc_pool_redirect';
+import { poolError } from './rpc_pool_error';
 import type { Options, RpcOptions, RpcResult } from './types';
 
 /** The options of a pool call's client a pool accepts: nothing else of the client options is taken. */
@@ -152,7 +153,7 @@ const noop: () => void = (): void => {};
 export class RpcPool {
   private readonly resolver: (endpointKey: string) => string | string[] | Promise<string | string[]>;
   private readonly connectionOptions: Partial<Options>;
-  private readonly fetchFunction: typeof fetch | undefined;
+  private readonly fetchOption: typeof fetch | undefined;
   private readonly rerouteHook: ((error: any) => string | undefined) | undefined;
   private readonly redirectHook: ((reply: RpcResult | null, error: any | null) => RpcPoolRedirect | undefined) | undefined;
   private readonly affinityHeader: string | undefined;
@@ -194,7 +195,7 @@ export class RpcPool {
     this.redirects = new RedirectGate(integerOption('maxRedirectsInflight', options.maxRedirectsInflight, defaultMaxRedirectsInflight, 1));
     this.rerouteHook = options.reroute;
     this.redirectHook = options.redirect;
-    this.fetchFunction = options.fetch ?? (typeof fetch === 'function' ? fetch : undefined);
+    this.fetchOption = options.fetch;
   }
 
 
@@ -336,6 +337,12 @@ export class RpcPool {
       throw poolError(errorCodes.badConfiguration, 'timeout is above connection.timeout, which bounds the reply of a connection');
     }
     return timeout;
+  }
+
+
+  // The fetch of redirects: the option, else the global fetch as it is when a redirect is fetched, not when the pool is made.
+  private fetchOf(): typeof fetch | undefined {
+    return this.fetchOption ?? (typeof fetch === 'function' ? fetch : undefined);
   }
 
 
@@ -599,7 +606,7 @@ export class RpcPool {
     const controller: AbortController = new AbortController();
     call.controller = controller;
     this.redirects.acquire(controller.signal).then((release: () => void): void => {
-      fetchRedirect(this.fetchFunction, endpoint, redirect, controller.signal).then(
+      fetchRedirect(this.fetchOf(), endpoint, redirect, controller.signal).then(
         (data: Uint8Array): void => {
           release();
           this.succeed(call, { data: data, cached: false });

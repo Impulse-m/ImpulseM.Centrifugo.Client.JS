@@ -1,6 +1,6 @@
 import { errorCodes } from './codes';
 import type { RpcPoolRedirect } from './rpc_pool';
-import { poolError } from './rpc_pool_endpoint';
+import { poolError } from './rpc_pool_error';
 
 /** The default body limit of a redirect fetch, in bytes. */
 const defaultRedirectMaxBytes: number = 16 * 1024 * 1024;
@@ -110,8 +110,10 @@ export async function fetchRedirect(
     discardBody(response);
     throw redirectFailure('redirect fetch status ' + response.status);
   }
-  // A runtime which followed a redirect anyway (it ignores 'manual') is refused before its body is read.
-  if (typeof response.url === 'string' && response.url !== '' && response.url !== url) {
+  // A runtime which followed a redirect anyway (it ignores 'manual') is refused before its body is read. The URL of a
+  // response has no fragment, so the fragment of the requested URL is left out of the comparison.
+  const requested: string = url.split('#')[0];
+  if (typeof response.url === 'string' && response.url !== '' && response.url !== requested) {
     discardBody(response);
     throw redirectFailure('redirect followed by the runtime');
   }
@@ -145,15 +147,20 @@ function redirectUrl(endpoint: string, target: string): string {
 
 
 // The body as bytes, read chunk by chunk so that a body over the limit is cut off as it arrives. A declared length over
-// the limit is refused before the body is read. A response with no stream is buffered whole first, so the limit applies
-// only once the body is in memory.
+// the limit is refused before the body is read. A body with no stream is buffered whole, which is allowed only when its
+// length is declared: otherwise the limit would apply once the body is in memory, which is too late.
 async function readBounded(response: any, maxBytes: number): Promise<Uint8Array> {
-  if (declaredLength(response) > maxBytes) {
+  const declared: number | undefined = declaredLength(response);
+  if (declared !== undefined && declared > maxBytes) {
     discardBody(response);
     throw redirectFailure('redirect body over the limit');
   }
   const source: ChunkSource | null = chunkSource(response.body);
   if (source === null) {
+    if (response.body !== null && response.body !== undefined && declared === undefined) {
+      discardBody(response);
+      throw redirectFailure('redirect body cannot be bounded');
+    }
     const whole: Uint8Array = new Uint8Array(await response.arrayBuffer());
     if (whole.length > maxBytes) {
       throw redirectFailure('redirect body over the limit');
@@ -222,14 +229,14 @@ function chunkSource(body: any): ChunkSource | null {
 }
 
 
-// The length a response declares in its Content-Length header, 0 when it declares none.
-function declaredLength(response: any): number {
+// The length a response declares in its Content-Length header, undefined when it declares none.
+function declaredLength(response: any): number | undefined {
   const value: string | null | undefined = response.headers?.get?.('content-length');
   if (value === null || value === undefined) {
-    return 0;
+    return undefined;
   }
   const length: number = Number(value);
-  return Number.isFinite(length) ? length : 0;
+  return Number.isFinite(length) ? length : undefined;
 }
 
 
