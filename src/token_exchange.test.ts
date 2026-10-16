@@ -34,6 +34,16 @@ async function advanceUntil(condition: () => boolean): Promise<void> {
   expect(condition()).toBe(true);
 }
 
+/** Polls the condition every 10 milliseconds of real time, for the tests whose timers are real. */
+async function poll(condition: () => boolean): Promise<void> {
+  for (let turn: number = 0; turn < 500 && !condition(); turn++) {
+    await new Promise<void>((resolve: () => void): void => {
+      setTimeout(resolve, 10);
+    });
+  }
+  expect(condition()).toBe(true);
+}
+
 /** Records the events of a client as strings: the kind, and the type, channel or code the event carries. */
 function record(c: Centrifuge): string[] {
   const events: string[] = [];
@@ -487,6 +497,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
 
   test('a connection lost during the exchange bootstraps again, and the late result of the first exchange is ignored', async (): Promise<void> => {
     serve();
+    useFakeClock();
     let calls: number = 0;
     let release: (result: TokenExchangeResult) => void = (): void => {};
     const c: Centrifuge = create({
@@ -505,6 +516,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     c.connect();
     await until((): boolean => calls === 1);
     server.closeConnection();
+    await advanceUntil((): boolean => events.includes('connected'));
     await connected;
 
     release({ token: 'stale-access', refreshToken: 'stale-refresh' });
@@ -830,6 +842,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
 
   test('an rpc call of an exchange whose connection was lost is rejected and writes nothing', async (): Promise<void> => {
     serve();
+    useFakeClock();
     let calls: number = 0;
     let release: (result: TokenExchangeResult) => void = (): void => {};
     const held: { ctx: TokenExchangeContext | null } = { ctx: null };
@@ -849,6 +862,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     c.connect();
     await until((): boolean => calls === 1);
     server.closeConnection();
+    await advanceUntil((): boolean => c.state === State.Connected);
     await connected;
 
     await expect(held.ctx?.rpc('late', codecCase.encode({}))).rejects.toMatchObject({ code: errorCodes.connectionClosed });
@@ -857,6 +871,77 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     await flush();
     expect(order.filter((entry: string): boolean => entry === 'rpc:late')).toHaveLength(0);
     expect(c.state).toBe(State.Connected);
+  });
+
+  test('a refresh() during a renewal exchange joins it: one exchange, and its token is used', async (): Promise<void> => {
+    serve({ ttl: 2 });
+    let calls: number = 0;
+    let release: (result: TokenExchangeResult) => void = (): void => {};
+    const c: Centrifuge = create({
+      exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+        calls++;
+        if (calls === 2) {
+          return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+            release = resolve;
+          });
+        }
+        return issue(ctx);
+      },
+    });
+    await connectClient(c);
+    await poll((): boolean => calls === 2);
+
+    const refreshed: Promise<any> = c.refresh();
+    await new Promise<void>((resolve: () => void): void => {
+      setTimeout(resolve, 50);
+    });
+    expect(calls).toBe(2);
+
+    release({ token: 'access-joined', refreshToken: 'refresh-3' });
+    await refreshed;
+
+    expect(calls).toBe(2);
+    expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1', 'access-joined']);
+    expect(stored).toBe('refresh-3');
+  });
+
+  test('a bootstrap that follows a renewal on a lost connection waits for the renewal exchange, and reads its rotation', async (): Promise<void> => {
+    serve({ ttl: 1 });
+    const used: string[] = [];
+    let calls: number = 0;
+    let release: (result: TokenExchangeResult) => void = (): void => {};
+    const c: Centrifuge = create({
+      exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+        calls++;
+        used.push(ctx.refreshToken);
+        if (calls === 2) {
+          return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+            release = resolve;
+          });
+        }
+        return issue(ctx);
+      },
+    });
+    await connectClient(c);
+    await poll((): boolean => calls === 2);
+
+    // The access token of the one-second ttl expires, so the reconnect bootstraps instead of connecting with it.
+    await new Promise<void>((resolve: () => void): void => {
+      setTimeout(resolve, 1200);
+    });
+    const reconnected: Promise<void> = nextConnected(c);
+    server.closeConnection();
+    await poll((): boolean => commands('connect').length === 2);
+    await new Promise<void>((resolve: () => void): void => {
+      setTimeout(resolve, 50);
+    });
+    expect(calls).toBe(2);
+
+    release({ token: 'access-stale', refreshToken: 'refresh-2b' });
+    await reconnected;
+
+    expect(used).toEqual(['refresh-1', 'refresh-2', 'refresh-2b']);
+    expect(stored).toBe('refresh-3');
   });
 
   test('a connect reply that already carries a user is not bootstrapped: no exchange, connected with that user', async (): Promise<void> => {

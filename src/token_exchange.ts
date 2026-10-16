@@ -74,6 +74,13 @@ interface ExpiryRecord {
 }
 
 
+/** The token fetch of a renewal in progress, and the transport it runs on. */
+interface Fetch {
+  transportId: number;
+  token: Promise<string>;
+}
+
+
 /**
  * A bootstrap: the exchange that runs on a connection opened without a token, between its connect reply and its
  * connected state. The subscribe pushes held meanwhile (their payload) and the unsubscribed channels (null), by channel.
@@ -96,6 +103,10 @@ export class TokenExchangeFlow {
   private options: TokenExchange;
   private expiry: ExpiryRecord | null = null;
   private bootstrap: Bootstrap | null = null;
+  // The exchanges started so far, settled or not: the next one waits for them (see serialised).
+  private exchanges: Promise<void> = Promise.resolve();
+  // The token fetch of a renewal in progress: a refresh that asks for a token meanwhile joins it.
+  private fetching: Fetch | null = null;
   // The bootstrap steps that failed since the last bootstrap completed: the backoff of their retries.
   private failures: number = 0;
   // Set while a connect reply is resumed: that reply is not intercepted again.
@@ -168,15 +179,57 @@ export class TokenExchangeFlow {
     if (!this.client['_isConnected']()) {
       await this.host.waitConnected(null);
     }
-    const refreshToken: string | null | undefined = await this.options.load();
-    if (!refreshToken) {
-      throw new UnauthorizedError('');
-    }
     const transportId: number = this.client['_transportId'];
+    const running: Fetch | null = this.fetching;
+    if (running !== null && running.transportId === transportId) {
+      return running.token;
+    }
+    const token: Promise<string> = this.serialised((): Promise<string> => this.renewalToken(transportId));
+    this.fetching = { transportId: transportId, token: token };
+    try {
+      return await token;
+    } finally {
+      if (this.fetching?.token === token) {
+        this.fetching = null;
+      }
+    }
+  }
+
+
+  // The token of a renewal on the connected transport it was requested for: a refresh token that is no longer held
+  // is a dead session.
+  private async renewalToken(transportId: number): Promise<string> {
     const attempt: Attempt = this.attempt(
       (): Route => ({ session: this.client['_session'], node: this.client['_node'] }),
       (): boolean => this.client['_isConnected']() && this.client['_transportId'] === transportId,
     );
+    const token: string | null = await this.loadAndExchange(attempt);
+    if (token === null) {
+      throw new UnauthorizedError('');
+    }
+    return token;
+  }
+
+
+  // Runs an exchange once the exchanges started before it have settled: no two of them load or rotate the refresh
+  // token at once, so an exchange always reads the token the one before it stored.
+  private serialised<T>(run: () => Promise<T>): Promise<T> {
+    const result: Promise<T> = this.exchanges.then(run);
+    this.exchanges = result.then((): void => {}, (): void => {});
+    return result;
+  }
+
+
+  // Loads the refresh token and exchanges it on the connection of the attempt. Resolves with null when the application
+  // holds no refresh token.
+  private async loadAndExchange(attempt: Attempt): Promise<string | null> {
+    const refreshToken: string | null | undefined = await this.options.load();
+    if (!attempt.current()) {
+      throw this.host.createError(errorCodes.connectionClosed, 'connection closed before the token exchange');
+    }
+    if (!refreshToken) {
+      return null;
+    }
     return this.exchangeRefresh(refreshToken, attempt, false);
   }
 
@@ -279,34 +332,13 @@ export class TokenExchangeFlow {
     if (!this.isCurrent(bootstrap)) {
       return;
     }
-    let refreshToken: string | null | undefined;
-    try {
-      refreshToken = await this.options.load();
-    } catch (err: any) {
-      if (!this.isCurrent(bootstrap)) {
-        return;
-      }
-      if (err instanceof UnauthorizedError) {
-        this.client['_failUnauthorized']();
-        return;
-      }
-      this.retry(bootstrap, result, resume, 'connectToken', this.connectTokenError(err));
-      return;
-    }
-    if (!this.isCurrent(bootstrap)) {
-      return;
-    }
-    if (!refreshToken) {
-      this.finish(bootstrap, result, resume, null);
-      return;
-    }
     const attempt: Attempt = this.attempt(
       (): Route => ({ session: result.session, node: result.node }),
       (): boolean => this.isCurrent(bootstrap),
     );
-    let token: string;
+    let token: string | null;
     try {
-      token = await this.exchangeRefresh(refreshToken, attempt, false);
+      token = await this.serialised((): Promise<string | null> => this.loadAndExchange(attempt));
     } catch (err: any) {
       if (!this.isCurrent(bootstrap)) {
         return;
@@ -323,6 +355,10 @@ export class TokenExchangeFlow {
       return;
     }
     if (!this.isCurrent(bootstrap)) {
+      return;
+    }
+    if (token === null) {
+      this.finish(bootstrap, result, resume, null);
       return;
     }
     this.refreshConnection(bootstrap, result, resume, token);
