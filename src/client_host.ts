@@ -4,17 +4,13 @@ import type { RefreshSlotHost } from './refresh_slot';
 import type { CallResolveContext, RpcCallbacks, RpcHost } from './rpc_tracker';
 import type { ConnectionIdentity } from './identity';
 import type { WriteHost } from './write_commands';
-import type { TokenExchangeFlow } from './token_exchange';
 import { ttlMilliseconds } from './utils';
 
 /** The host of the rpc tracker, the refresh slot and the write of commands: see createClientHost. */
 export interface ClientHost extends RpcHost, RefreshSlotHost, WriteHost {
   /** Arms the refresh timer in place of the one armed before: refresh runs after the delay in milliseconds. */
   scheduleRefresh(delay: number, refresh: () => void): void;
-  /**
-   * Arms the refresh timer for the expiry of the connection token, from the ttl of the reply that set it: with the
-   * tokenExchange option the delay is a random moment before the expiry, and the expiry of the token is recorded.
-   */
+  /** Arms the refresh timer for the expiry of the connection token, from the ttl of the reply that set it. */
   scheduleExpiry(ttl: number, refresh: () => void): void;
 }
 
@@ -37,9 +33,7 @@ export function createClientHost(client: Centrifuge): ClientHost {
     client['_refreshTimeout'] = setTimeout(refresh, delay);
   };
   const scheduleExpiry = (ttl: number, refresh: () => void): void => {
-    const flow: TokenExchangeFlow | null = client['_tokenExchange'];
-    scheduleRefresh(flow === null ? ttlMilliseconds(ttl) : flow.renewalDelay(ttl), refresh);
-    flow?.observe(client['_token'], ttl);
+    scheduleRefresh(client['_tokenExchange']?.expiryDelay(ttl) ?? ttlMilliseconds(ttl), refresh);
   };
   return {
     isConnected: (): boolean => client['_isConnected'](),

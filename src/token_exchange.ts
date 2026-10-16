@@ -236,15 +236,13 @@ export class TokenExchangeFlow {
   }
 
 
-  /** The delay of the refresh timer for a ttl in seconds: a random moment between 0.7 and 0.9 of the ttl. */
-  renewalDelay(ttl: number): number {
+  /**
+   * Called with the ttl of a reply that set the access token: records its expiry, and returns the delay of the refresh
+   * timer in milliseconds, a random moment between 0.7 and 0.9 of the ttl.
+   */
+  expiryDelay(ttl: number): number {
+    this.expiry = { token: this.client['_token'], expiresAt: Date.now() + ttl * 1000 };
     return ttlMilliseconds(ttl * (0.7 + 0.2 * Math.random()));
-  }
-
-
-  /** Records the expiry of the access token from the ttl of the reply that accepted it. */
-  observe(token: string, ttl: number): void {
-    this.expiry = { token: token, expiresAt: Date.now() + ttl * 1000 };
   }
 
 
