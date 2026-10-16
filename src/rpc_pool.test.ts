@@ -1,3 +1,4 @@
+import { Readable } from 'stream';
 import WebSocket from 'ws';
 import { errorCodes, disconnectedCodes } from './codes';
 import { RpcPool, RpcPoolOptions } from './rpc_pool';
@@ -626,6 +627,36 @@ describe('RpcPool', () => {
       });
       await expect(pool.rpc('work', bytes({ n: 1 }))).rejects.toMatchObject({ code: errorCodes.badConfiguration });
       expect(fetchFunction).not.toHaveBeenCalled();
+    });
+
+    test('a Node stream body over maxBytes is cut off as it arrives, and one within it resolves', async (): Promise<void> => {
+      const chunks: Uint8Array[] = [new Uint8Array(3), new Uint8Array(3), new Uint8Array(3)];
+      const over: Promise<Uint8Array> = fetchRedirect(
+        jest.fn(async (): Promise<any> => ({ ok: true, status: 200, headers: new Headers(), body: Readable.from(chunks) })) as any,
+        'wss://edge.example/connection/websocket',
+        { url: 'https://cdn.example/stream', maxBytes: 4 },
+        new AbortController().signal
+      );
+      await expect(over).rejects.toMatchObject({ code: errorCodes.redirectFailed });
+      const within: Uint8Array = await fetchRedirect(
+        jest.fn(async (): Promise<any> => ({ ok: true, status: 200, headers: new Headers(), body: Readable.from(chunks) })) as any,
+        'wss://edge.example/connection/websocket',
+        { url: 'https://cdn.example/stream', maxBytes: 9 },
+        new AbortController().signal
+      );
+      expect(within.length).toBe(9);
+    });
+
+    test('a declared length over maxBytes is refused before the body is read', async (): Promise<void> => {
+      const arrayBuffer: jest.Mock = jest.fn();
+      const response: any = { ok: true, status: 200, headers: new Headers({ 'content-length': '10' }), body: null, arrayBuffer: arrayBuffer };
+      await expect(fetchRedirect(
+        jest.fn(async (): Promise<any> => response) as any,
+        'wss://edge.example/connection/websocket',
+        { url: 'https://cdn.example/big', maxBytes: 4 },
+        new AbortController().signal
+      )).rejects.toMatchObject({ code: errorCodes.redirectFailed });
+      expect(arrayBuffer).not.toHaveBeenCalled();
     });
 
     test('a redirect URL of the wrong scheme for the endpoint is refused without a fetch', async (): Promise<void> => {

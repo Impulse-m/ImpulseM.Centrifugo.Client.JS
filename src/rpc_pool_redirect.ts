@@ -130,27 +130,31 @@ function redirectUrl(endpoint: string, target: string): string {
 }
 
 
-// The body as bytes, read chunk by chunk so that a body over the limit is cut off as it arrives.
+// The body as bytes, read chunk by chunk so that a body over the limit is cut off as it arrives. A declared length over
+// the limit is refused before the body is read. A response with no stream is buffered whole first, so the limit applies
+// only once the body is in memory.
 async function readBounded(response: any, maxBytes: number): Promise<Uint8Array> {
-  const body: any = response.body;
-  if (body === null || body === undefined || typeof body.getReader !== 'function') {
-    const bytes: Uint8Array = new Uint8Array(await response.arrayBuffer());
-    if (bytes.length > maxBytes) {
+  if (declaredLength(response) > maxBytes) {
+    throw redirectFailure('redirect body over the limit');
+  }
+  const source: ChunkSource | null = chunkSource(response.body);
+  if (source === null) {
+    const whole: Uint8Array = new Uint8Array(await response.arrayBuffer());
+    if (whole.length > maxBytes) {
       throw redirectFailure('redirect body over the limit');
     }
-    return bytes;
+    return whole;
   }
-  const reader: any = body.getReader();
   const chunks: Uint8Array[] = [];
   let total: number = 0;
   for (;;) {
-    const step: any = await reader.read();
+    const step: any = await source.next();
     if (step.done === true) {
       break;
     }
     total += step.value.length;
     if (total > maxBytes) {
-      reader.cancel().catch((): void => {});
+      source.cancel();
       throw redirectFailure('redirect body over the limit');
     }
     chunks.push(step.value);
@@ -162,6 +166,55 @@ async function readBounded(response: any, maxBytes: number): Promise<Uint8Array>
     offset += chunk.length;
   }
   return out;
+}
+
+
+// The chunks of a body: next() gives the next one as {done, value}, cancel() ends the stream early.
+interface ChunkSource {
+  next: () => Promise<any>;
+  cancel: () => void;
+}
+
+
+// The chunks of a response body: a WHATWG stream is read through its reader, a Node stream (as node-fetch gives) through
+// its async iterator. Null when the body is neither, so it has to be buffered.
+function chunkSource(body: any): ChunkSource | null {
+  if (body === null || body === undefined) {
+    return null;
+  }
+  if (typeof body.getReader === 'function') {
+    const reader: any = body.getReader();
+    return {
+      next: (): Promise<any> => reader.read(),
+      cancel: (): void => {
+        reader.cancel().catch((): void => {});
+      },
+    };
+  }
+  const asyncIterator: symbol | undefined = (Symbol as any).asyncIterator;
+  if (asyncIterator !== undefined && typeof body[asyncIterator] === 'function') {
+    const iterator: any = body[asyncIterator]();
+    return {
+      next: (): Promise<any> => iterator.next(),
+      cancel: (): void => {
+        if (typeof iterator.return === 'function') {
+          iterator.return().catch((): void => {});
+        }
+      },
+    };
+  }
+  return null;
+}
+
+
+// The length a response declares in its Content-Length header, 0 when it declares none.
+function declaredLength(response: any): number {
+  const value: string | null | undefined = response.headers?.get?.('content-length');
+  if (value === null || value === undefined) {
+    return 0;
+  }
+  const length: number = Number(value);
+  return Number.isFinite(length) ? length : 0;
 }
 
 
