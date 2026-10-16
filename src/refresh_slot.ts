@@ -199,6 +199,10 @@ export class RefreshSlot {
   async send(token: string): Promise<CallResolveContext> {
     const release: () => void = await this.claimCommand();
     try {
+      // The connection may have gone while the slot was claimed: the command is not written then.
+      if (!this.host.isConnected()) {
+        throw { error: this.host.createError(errorCodes.clientDisconnected, 'client disconnected'), unsent: true };
+      }
       return await this.host.sendCommand({ refresh: { token: token } });
     } finally {
       release();
@@ -216,7 +220,8 @@ export class RefreshSlot {
   async sendTimer(token: string, generation: number): Promise<CallResolveContext | null> {
     const release: () => void = await this.claimCommand();
     try {
-      if (this.generationCount !== generation) {
+      // A connection lost while the slot was claimed is the same case: the command is not written, the retry is armed.
+      if (this.generationCount !== generation || !this.host.isConnected()) {
         if (this.acceptedGeneration <= generation) {
           this.host.armRefreshRetry();
         }

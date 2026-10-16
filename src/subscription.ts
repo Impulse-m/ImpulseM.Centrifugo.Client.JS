@@ -570,9 +570,7 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
       this._delta_negotiated = false;
     }
 
-    if (result.publish_debounce) {
-      this._debounceMs = result.publish_debounce;
-    }
+    this._debounceMs = result.publish_debounce || 0;
 
     if (this._sharedPoll) {
       const newEpoch = result.epoch || '';
@@ -2591,9 +2589,7 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
     }
 
     // Set publish debounce from subscribe result.
-    if (result.publish_debounce) {
-      this._debounceMs = result.publish_debounce;
-    }
+    this._debounceMs = result.publish_debounce || 0;
 
     // Take the buffers: a handler below may unsubscribe and subscribe again,
     // which starts a new flow using them.

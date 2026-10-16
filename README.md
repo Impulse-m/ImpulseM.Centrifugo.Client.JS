@@ -343,7 +343,7 @@ A write error of a tracked call on an open transport is handled as a lost transp
 
 A command the codec cannot encode, for example an rpc method that is not a string, is refused by its write: its call rejects with `errorCodes.transportWriteError` (10), the connection stays, and the other calls written with it are sent.
 
-A server error reply that carries the metadata key `x-centrifugo-retry` says that the server did not run the call, and the client sends the call again. The value `new_msg_id` means that the server refused the message id: the client re-syncs its message ids to the server time of that reply and sends the call again with a new id, at most twice. The value `later` means that the message id is still good: the call is sent again with the same id after 250 ms, then 500 ms, then 1000 ms, at most three times. All attempts stay within the call's timeout. When the attempts are used up, or the error carries no such key, the call rejects with the error as the server sent it, unchanged.
+A server error reply that carries the metadata key `x-centrifugo-retry` says that the server did not run the call, and the client sends the call again. The value `new_msg_id` means that the server refused the message id: the client re-syncs its message ids to the server time of that reply and sends the call again with a new id, at most twice. The value `later` means that the message id is still good: the call is sent again with the same id after a random delay, drawn uniformly from zero up to 250 ms, then up to 500 ms, then up to 1000 ms (full jitter), at most three times. All attempts stay within the call's timeout. When the attempts are used up, or the error carries no such key, the call rejects with the error as the server sent it, unchanged.
 
 A call that settles locally, by its deadline or its signal, keeps its callback for one call timeout, so a late reply is still acknowledged. Then the callback is dropped, and a server that never replies does not grow the client. The cancel command of such a call gets the call timeout too: a cancel the server does not answer in that time is dropped, and it is not sent again. The client keeps at most `maxPendingRpc` cancels waiting for a connection; when there are more, the oldest is dropped.
 
@@ -844,6 +844,19 @@ sub.publish({"input": "hello world"}).then(function() {
 
 *Note, that in order publish to work in Centrifugo corresponding option must be enabled in server channel configuration or client should have capability to publish*.
 
+#### Publish debouncing
+
+When the server sets a publish debounce interval for the channel (Centrifugo option `client_publish_debounce_interval`, returned to the client in the subscribe reply), the SDK coalesces rapid publishes:
+
+* the first publish goes out at once and opens a window of that interval;
+* publishes inside the window replace the pending data, and their promises resolve immediately; when the window closes, the latest data is sent and a new window opens;
+* a publish after an idle window goes out at once again;
+* on a map subscription each key has its own window;
+* pending data is dropped on `unsubscribe()`, on disconnect and on `remove(key)` of that key, and nothing more is sent for it;
+* an error of a publish sent when a window closes is not reported, since no caller awaits it.
+
+Debouncing is meant for fire-and-forget data such as cursor positions. Use it only when intermediate values may be dropped: a publish that is replaced inside the window is never delivered.
+
 #### unsubscribe method of subscription
 
 You can call `unsubscribe` method to unsubscribe from a channel:
@@ -984,11 +997,17 @@ Max delay between resubscribe attempts in milliseconds. Default is `20000`.
 
 Delta format to be used for differential updates. Currently only `'fossil'` is supported. Cannot be used together with `tagsFilter`.
 
+Delta also works without positioning (no `since`, no recovery) when the server keeps the latest publication of the channel (`keep_latest_publication`): the first publication after subscribe is full; later publications are deltas when the publisher sets `delta` on publish (or the namespace has `delta_publish`). The base is kept per node, so this is at most once; map subscriptions are not covered.
+
 ```javascript
 const sub = centrifuge.newSubscription("news", {
     delta: 'fossil'
 });
 ```
+
+#### Channel compaction
+
+When the server allows channel compaction (`allow_channel_compaction`), the SDK negotiates a numeric channel id on subscribe automatically, and the server then sends the id instead of the channel name in publication, join and leave pushes. Nothing needs to be configured on the client. Server-side subscriptions (for example those from the connection token) are not compacted.
 
 #### tagsFilter
 
