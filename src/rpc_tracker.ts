@@ -4,6 +4,7 @@ import { hasHeaders } from './extensions';
 import { MsgIdGenerator } from './msg_id';
 import { RpcQueue, TrackedRpc } from './rpc_queue';
 import { RpcOptions, RpcResult } from './types';
+import { randomInt } from './utils';
 
 /** The reply of a command, and next() to acknowledge it. */
 export type CallResolveContext = { reply: any; next?: () => void };
@@ -22,7 +23,7 @@ const rpcRetryLater: string = 'later';
 // Most sends of a call refused with a new message id, and most later attempts, after its first send.
 const maxNewIdResends: number = 2;
 const maxLaterResends: number = 3;
-// The delay of the first later attempt; each further one waits twice as long.
+// The bound of the delay of a later attempt: attempt n waits a uniform delay in [0, 250 ms * 2^n] (full jitter).
 const laterResendBase: number = 250;
 
 type RetrySignal = 'new_msg_id' | 'later' | null;
@@ -516,7 +517,7 @@ export class RpcTracker {
       if (call.deadline <= Date.now()) {
         return false;
       }
-      const delay: number = laterResendBase * 2 ** call.laterResends;
+      const delay: number = randomInt(0, laterResendBase * 2 ** call.laterResends);
       call.laterResends++;
       // Waits as a waiting call: a connection lost meanwhile sends it with the reconnect.
       call.commandId = 0;

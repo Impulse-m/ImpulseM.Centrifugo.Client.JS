@@ -29,6 +29,12 @@ function quiet<T>(promise: Promise<T>): Promise<T> {
   return promise;
 }
 
+// The delay of a later attempt is drawn from [0, its bound] (full jitter, see randomInt). A random source at the top
+// of its range takes the bound, so a case that does not measure the delay waits for the attempt as before.
+function randomAtBound(): jest.SpyInstance {
+  return jest.spyOn(Math, 'random').mockReturnValue(0.9999999);
+}
+
 // Resolves on the next event of the client of the given name: the waits of the cases use events, not polling.
 function nextEvent(c: Centrifuge, event: 'connecting' | 'connected'): Promise<void> {
   return new Promise<void>((resolve: () => void): void => {
@@ -73,6 +79,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
   });
 
   afterEach(async (): Promise<void> => {
+    jest.restoreAllMocks();
     disconnectAll(clients);
     await server.close();
   });
@@ -1020,7 +1027,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(callCommands()).toHaveLength(3);
   });
 
-  test('a refusal with the later signal is sent again with the same message id after its delay', async (): Promise<void> => {
+  test('a refusal with the later signal is sent again with the same message id after its random delay', async (): Promise<void> => {
     const c: Centrifuge = create({ timeout: 10000 });
     await connect(c);
     const queue: any = (c as any)._rpc.queue;
@@ -1033,13 +1040,15 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       }
       return { id: cmd.id, rpc: { data: codecCase.encode({ answer: 1 }) } };
     };
+    // A draw of one half of the bound 250 ms: floor(0.5 * 251) = 125 ms.
+    jest.spyOn(Math, 'random').mockReturnValue(0.5);
     jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
     try {
       const call: Promise<RpcResult> = c.rpc('work', codecCase.encode({}));
       const first: any = await server.waitFor(isCall);
       expect(await until((): boolean => queue.waiting().length === 1)).toBe(true);
 
-      jest.advanceTimersByTime(249);
+      jest.advanceTimersByTime(124);
       expect(queue.waiting()).toHaveLength(1);
       // A call timer runs its grace callback one tick after the due time: advance past it.
       jest.advanceTimersByTime(2);
@@ -1054,11 +1063,12 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     }
   });
 
-  test('four refusals with the later signal surface the error, after the delays of 250, 500 and 1000 ms', async (): Promise<void> => {
+  test('four refusals with the later signal surface the error, each later attempt within the bounds of 250, 500 and 1000 ms', async (): Promise<void> => {
     const c: Centrifuge = create({ timeout: 10000 });
     await connect(c);
     const queue: any = (c as any)._rpc.queue;
     server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, error: retryError('later', 100, true) } : undefined);
+    randomAtBound();
     jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
     try {
       const call: Promise<RpcResult> = quiet(c.rpc('work', codecCase.encode({})));
@@ -1083,6 +1093,38 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(callCommands()).toHaveLength(4);
   });
 
+  test('a later attempt drawn at zero goes out at once, with the same message id', async (): Promise<void> => {
+    const c: Centrifuge = create({ timeout: 10000 });
+    await connect(c);
+    const queue: any = (c as any)._rpc.queue;
+    server.onCommand = (cmd: any): any => {
+      if (!isCall(cmd)) {
+        return undefined;
+      }
+      if (callCommands().length === 1) {
+        return { id: cmd.id, error: retryError('later', 100, true) };
+      }
+      return { id: cmd.id, rpc: { data: codecCase.encode({ answer: 3 }) } };
+    };
+    jest.spyOn(Math, 'random').mockReturnValue(0);
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      const call: Promise<RpcResult> = c.rpc('work', codecCase.encode({}));
+      const first: any = await server.waitFor(isCall);
+      expect(await until((): boolean => queue.waiting().length === 1)).toBe(true);
+
+      // The due time is now: the due timer and its grace callback run in the next advance.
+      jest.advanceTimersByTime(2);
+      await server.waitForCount(isCall, 2);
+      const result: RpcResult = await call;
+
+      expect(codecCase.decode(result.data)).toEqual({ answer: 3 });
+      expect(callCommands()[1].rpc.msg_id).toBe(first.rpc.msg_id);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a call waiting for a later attempt goes out with the reconnect, with the same message id', async (): Promise<void> => {
     const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
     await connect(c);
@@ -1096,6 +1138,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       }
       return { id: cmd.id, rpc: { data: codecCase.encode({ answer: 2 }) } };
     };
+    randomAtBound();
     const call: Promise<RpcResult> = c.rpc('work', codecCase.encode({}));
     const first: any = await server.waitFor(isCall);
     expect(await until((): boolean => queue.waiting().length === 1)).toBe(true);
@@ -1115,6 +1158,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     await connect(c);
     const queue: any = (c as any)._rpc.queue;
     server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, error: retryError('later', 100, true) } : undefined);
+    randomAtBound();
     jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
     let sent: any;
     try {
@@ -1160,6 +1204,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     const queue: any = (c as any)._rpc.queue;
     const controller: AbortController = new AbortController();
     server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, error: retryError('later', 100, true) } : undefined);
+    randomAtBound();
     jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
     try {
       const call: Promise<RpcResult> = c.rpc('work', codecCase.encode({}), { signal: controller.signal });
