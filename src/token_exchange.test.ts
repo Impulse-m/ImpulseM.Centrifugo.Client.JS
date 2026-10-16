@@ -812,6 +812,45 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
+  test('a bootstrap exchange that settles after the client timeout stores its rotation before the reconnect loads the refresh token', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      const seen: string[] = [];
+      let release: (result: TokenExchangeResult) => void = (): void => {};
+      const c: Centrifuge = create({
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          seen.push(ctx.refreshToken);
+          if (seen.length === 1) {
+            return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+              release = resolve;
+            });
+          }
+          return Promise.resolve({ token: 'access-2', refreshToken: 'refresh-3' });
+        },
+      });
+      const events: string[] = record(c);
+      const connected: Promise<void> = nextConnected(c);
+      c.connect();
+      await until((): boolean => seen.length === 1);
+
+      // The first exchange runs past the client timeout, and its connection is closed after the abandon backoff. Its
+      // late result comes in before that reconnect, so the next exchange loads the rotated token.
+      await advanceUntil((): boolean => events.includes('error:connectToken'));
+      release({ token: 'late-access', refreshToken: 'refresh-2' });
+      await flush();
+      await advanceUntil((): boolean => events.includes('connected'));
+      await connected;
+
+      expect(seen).toEqual(['refresh-1', 'refresh-2']);
+      expect(order).toEqual(['connect', 'store:refresh-2', 'connect', 'store:refresh-3', 'refresh']);
+      expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-2']);
+      expect(events).toEqual(['error:connectToken', 'connected', 'auth']);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a late rotation after the client timeout is not stored when the application has stored another refresh token', async (): Promise<void> => {
     serve();
     useFakeClock();
