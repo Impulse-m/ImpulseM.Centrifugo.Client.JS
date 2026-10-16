@@ -240,7 +240,8 @@ export interface AuthContext {
 
 /** Context for the client 'error' event. */
 export interface ErrorContext {
-  /** Category of the error (e.g. 'transport', 'token', 'connect'). */
+  /** Category of the error (e.g. 'transport', 'token', 'connect'). 'tokenStore': the tokenExchange store callback failed
+   * (code clientRefreshToken, 6); the exchange goes on. */
   type: string;
   /** The error details. */
   error: Error;
