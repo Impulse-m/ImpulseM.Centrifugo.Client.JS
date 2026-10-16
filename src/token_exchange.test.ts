@@ -2,6 +2,7 @@ import { Centrifuge, UnauthorizedError } from './centrifuge';
 import { errorCodes } from './codes';
 import { CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, holdReply, until } from './testing/codecs';
 import { Options, State, TokenExchange, TokenExchangeContext, TokenExchangeResult } from './types';
+import { TokenExchangeRefusedError } from './token_exchange';
 
 // The token exchange of the tokenExchange option, over both codecs. The fake issuer answers the exchange rpc, and every
 // exchange rotates the refresh token: the app starts with refresh-1, and the n-th exchange issues access-n and
@@ -140,6 +141,13 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       }
       return undefined;
     };
+  }
+
+  // Answers the rpc calls with the server error given, and the other commands as serve() does.
+  function refuseRpc(error: any): void {
+    serve();
+    const answer: (cmd: any) => any = server.onCommand as (cmd: any) => any;
+    server.onCommand = (cmd: any): any => (cmd.rpc !== undefined ? { id: cmd.id, error: error } : answer(cmd));
   }
 
   function create(overrides: Partial<TokenExchange> = {}, options: Partial<Options> = {}): Centrifuge {
@@ -309,9 +317,10 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
-  test('an UnauthorizedError with the same refresh token is terminal: disconnected with code 1, no reconnect, no store', async (): Promise<void> => {
+  test('with grace 0, an UnauthorizedError with the same refresh token is terminal at once: disconnected with code 1, no store', async (): Promise<void> => {
     serve();
     const c: Centrifuge = create({
+      grace: 0,
       exchange: async (): Promise<TokenExchangeResult> => {
         throw new UnauthorizedError('refused');
       },
@@ -363,6 +372,359 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     expect(events).toEqual(['disconnected:1']);
     expect(commands('connect')).toHaveLength(1);
     expect(commands('rpc')).toHaveLength(0);
+  });
+
+  test('a refused refresh token is presented again with backoff until the grace horizon, then the session ends', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      const presented: string[] = [];
+      const c: Centrifuge = create({
+        grace: 10,
+        exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          presented.push(ctx.refreshToken);
+          throw new UnauthorizedError('refused');
+        },
+      });
+      const events: string[] = record(c);
+      c.connect();
+      await advanceUntil((): boolean => c.state === State.Disconnected);
+      await flush();
+
+      // The same token each time, retried with backoff; the last attempt is the one at the horizon, which ends the session.
+      expect(presented.length).toBeGreaterThan(1);
+      expect(presented.length).toBeLessThanOrEqual(10);
+      expect(presented.every((token: string): boolean => token === 'refresh-1')).toBe(true);
+      expect(events.filter((entry: string): boolean => entry === 'error:connectToken')).toHaveLength(presented.length - 1);
+      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual(['disconnected:1']);
+      expect(commands('connect')).toHaveLength(1);
+      expect(order.filter((entry: string): boolean => entry.startsWith('store:'))).toEqual([]);
+
+      // No timer is left after the verdict: no further exchange.
+      const attempts: number = presented.length;
+      jest.advanceTimersByTime(60000);
+      await flush();
+      expect(presented).toHaveLength(attempts);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a refusal run whose refresh token the storage no longer holds ends the session at once', async (): Promise<void> => {
+    serve();
+    let loads: number = 0;
+    const c: Centrifuge = create({
+      // The token is there at bootstrap, and gone by the re-read after the refusal.
+      load: (): string | null => (loads++ === 0 ? 'refresh-1' : null),
+      exchange: async (): Promise<TokenExchangeResult> => {
+        throw new UnauthorizedError('refused');
+      },
+    });
+    const events: string[] = record(c);
+    c.connect();
+    await until((): boolean => c.state === State.Disconnected);
+    await flush();
+
+    expect(events).toEqual(['disconnected:1']);
+    expect(commands('connect')).toHaveLength(1);
+  });
+
+  test('an accepted exchange closes the refusal run: a refusal at renewal starts a new run, and does not end the session at once', async (): Promise<void> => {
+    serve({ ttl: 100 });
+    useFakeClock();
+    try {
+      let exchanges: number = 0;
+      const c: Centrifuge = create({
+        grace: 10,
+        exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          exchanges++;
+          if (exchanges === 1) {
+            // Refused, and the storage holds another token by the re-read: presented at once, and accepted.
+            stored = 'refresh-2';
+            throw new UnauthorizedError('refused');
+          }
+          if (exchanges === 2) {
+            return issue(ctx);
+          }
+          throw new UnauthorizedError('refused');
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+      expect(exchanges).toBe(2);
+
+      // The renewal (at 70 to 90 seconds) is refused: a first refusal of a new run, which is not terminal.
+      await advanceUntil((): boolean => events.includes('error:refreshToken'));
+      expect(c.state).toBe(State.Connected);
+      expect(events).not.toContain('disconnected:1');
+
+      // The new run ends at its own horizon.
+      await advanceUntil((): boolean => c.state === State.Disconnected);
+      expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('the grace an accepted exchange publishes sets the next run horizon; an invalid one keeps the grace in use', async (): Promise<void> => {
+    serve({ ttl: 100 });
+    useFakeClock();
+    try {
+      let exchanges: number = 0;
+      const c: Centrifuge = create({
+        exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          exchanges++;
+          if (exchanges === 1) {
+            return { ...(await issue(ctx)), grace: 2 };
+          }
+          if (exchanges === 2) {
+            // An invalid grace is ignored: the grace of the previous accepted exchange, 2 seconds, still applies.
+            return { ...(await issue(ctx)), grace: -5 };
+          }
+          throw new UnauthorizedError('refused');
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+
+      // Renewal 1 (70 to 90 seconds on) is accepted; renewal 2 (70 to 90 seconds later) is refused; the retry, 5 to 10
+      // seconds on, is refused past the horizon of 2 seconds, and ends the session.
+      await advanceUntil((): boolean => exchanges >= 2);
+      await advanceUntil((): boolean => exchanges >= 3);
+      await advanceUntil((): boolean => c.state === State.Disconnected);
+      expect(exchanges).toBe(4);
+      expect(events.filter((entry: string): boolean => entry === 'error:refreshToken')).toHaveLength(1);
+      expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a refusal named in refusalTypes rejects the rpc as TokenExchangeRefusedError, and the refusal run starts', async (): Promise<void> => {
+    refuseRpc({ code: 400, message: 'invalid', app_code: 7, app_type: 'REFRESH_TOKEN_REFUSED' });
+    const caught: any[] = [];
+    const c: Centrifuge = create({
+      grace: 0,
+      refusalTypes: ['REFRESH_TOKEN_REFUSED'],
+      exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+        try {
+          return await issue(ctx);
+        } catch (err: any) {
+          caught.push(err);
+          throw err;
+        }
+      },
+    });
+    const events: string[] = record(c);
+    c.connect();
+    await until((): boolean => c.state === State.Disconnected);
+    await flush();
+
+    expect(caught).toHaveLength(1);
+    expect(caught[0]).toBeInstanceOf(TokenExchangeRefusedError);
+    expect(caught[0]).toBeInstanceOf(UnauthorizedError);
+    expect(caught[0].error).toMatchObject({ code: 400, appCode: 7, appType: 'REFRESH_TOKEN_REFUSED' });
+    expect(events).toEqual(['disconnected:1']);
+  });
+
+  test('an error whose name is not listed, or with no list at all, is an ordinary rejection: no refusal run', async (): Promise<void> => {
+    refuseRpc({ code: 101, message: 'unauthorized', app_type: 'REFRESH_TOKEN_REFUSED' });
+    const listed: any[] = [];
+    const listedClient: Centrifuge = create({
+      refusalTypes: ['OTHER_REFUSAL'],
+      exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+        try {
+          return await issue(ctx);
+        } catch (err: any) {
+          listed.push(err);
+          throw err;
+        }
+      },
+    });
+    const listedEvents: string[] = record(listedClient);
+    listedClient.connect();
+    await until((): boolean => listedEvents.includes('error:connectToken'));
+
+    expect(listed[0]).not.toBeInstanceOf(UnauthorizedError);
+    expect(listed[0].code).toBe(101);
+    expect(listedEvents).not.toContain('disconnected:1');
+
+    const unlisted: any[] = [];
+    const unlistedClient: Centrifuge = create({
+      exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+        try {
+          return await issue(ctx);
+        } catch (err: any) {
+          unlisted.push(err);
+          throw err;
+        }
+      },
+    });
+    const unlistedEvents: string[] = record(unlistedClient);
+    unlistedClient.connect();
+    await until((): boolean => unlistedEvents.includes('error:connectToken'));
+
+    expect(unlisted[0]).not.toBeInstanceOf(UnauthorizedError);
+    expect(unlistedEvents).not.toContain('disconnected:1');
+  });
+
+  test('a refusal name that is empty, and a grace that is negative or not a number, throw at construction', async (): Promise<void> => {
+    expect(() => codecCase.createClient(server.url, { tokenExchange: tokenExchange({ refusalTypes: [''] }) }))
+      .toThrow('tokenExchange.refusalTypes: entries must be non-empty strings');
+    expect(() => codecCase.createClient(server.url, { tokenExchange: tokenExchange({ refusalTypes: ['REFRESH_TOKEN_REFUSED', ''] }) }))
+      .toThrow('tokenExchange.refusalTypes: entries must be non-empty strings');
+    expect(() => codecCase.createClient(server.url, { tokenExchange: tokenExchange({ grace: -1 }) }))
+      .toThrow('tokenExchange.grace');
+    expect(() => codecCase.createClient(server.url, { tokenExchange: tokenExchange({ grace: Number.NaN }) }))
+      .toThrow('tokenExchange.grace');
+  });
+
+  test('the application disconnect closes the refusal run, so the next connect has a fresh horizon', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      const c: Centrifuge = create({
+        grace: 10,
+        exchange: async (): Promise<TokenExchangeResult> => {
+          throw new UnauthorizedError('refused');
+        },
+      });
+      const events: string[] = record(c);
+      c.connect();
+      await until((): boolean => events.includes('error:connectToken'));
+      jest.advanceTimersByTime(5000);
+      c.disconnect();
+
+      c.connect();
+      const restarted: number = performance.now();
+      await advanceUntil((): boolean => c.state === State.Disconnected);
+
+      // The horizon runs from the refusal after the new connect, not from the one before the disconnect.
+      expect(performance.now() - restarted).toBeGreaterThanOrEqual(10000);
+      expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a transport loss keeps the refusal run: the reconnect continues it, and the horizon still ends the session', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      const c: Centrifuge = create({
+        grace: 10,
+        exchange: async (): Promise<TokenExchangeResult> => {
+          throw new UnauthorizedError('refused');
+        },
+      });
+      const events: string[] = record(c);
+      c.connect();
+      await until((): boolean => events.includes('error:connectToken'));
+      server.closeConnection();
+      await advanceUntil((): boolean => commands('connect').length >= 2);
+      await advanceUntil((): boolean => c.state === State.Disconnected);
+
+      expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(1);
+      expect(commands('connect').length).toBeLessThanOrEqual(10);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('the refusal horizon is monotonic: a backward step of the wall clock does not extend the run', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      const attempts: number[] = [];
+      const c: Centrifuge = create({
+        grace: 10,
+        exchange: async (): Promise<TokenExchangeResult> => {
+          attempts.push(performance.now());
+          throw new UnauthorizedError('refused');
+        },
+      });
+      c.connect();
+      await until((): boolean => attempts.length === 1);
+      jest.setSystemTime(Date.now() - 3600 * 1000);
+      await advanceUntil((): boolean => c.state === State.Disconnected);
+
+      const run: number = attempts[attempts.length - 1] - attempts[0];
+      expect(run).toBeGreaterThanOrEqual(10000);
+      expect(run).toBeLessThan(10500);
+      expect(attempts.length).toBeLessThanOrEqual(10);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('two clients that exchange the same refresh token inside the grace store the same rotated token, each with its own access token', async (): Promise<void> => {
+    serve();
+    let accessed: number = 0;
+    const exchange = async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+      await ctx.rpc('exchange', codecCase.encode({ refresh: ctx.refreshToken }));
+      accessed++;
+      return { token: `access-${accessed}`, refreshToken: 'refresh-2' };
+    };
+    // Both clients present the token they loaded before the rotation: the fake server keeps one socket, so the second
+    // client connects once the first is connected, with the same refresh token still in its storage.
+    const first: Centrifuge = create({ load: (): string => 'refresh-1', exchange: exchange });
+    const second: Centrifuge = create({ load: (): string => 'refresh-1', exchange: exchange });
+    await connectClient(first);
+    await connectClient(second);
+
+    expect(order.filter((entry: string): boolean => entry === 'store:refresh-2')).toHaveLength(2);
+    expect(commands('refresh').map((cmd: any): string => cmd.refresh.token).sort()).toEqual(['access-1', 'access-2']);
+  });
+
+  test('an exchange that persists the rotation itself and returns no refreshToken: store is not called, the storage keeps its write', async (): Promise<void> => {
+    serve();
+    const c: Centrifuge = create({
+      load: (): string => 'refresh-0',
+      exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+        // The lock of the application: the value it presents is the one the storage holds under it, not the loaded one.
+        const presented: string = stored;
+        await ctx.rpc('exchange', codecCase.encode({ refresh: presented }));
+        stored = 'refresh-locked';
+        return { token: 'access-1' };
+      },
+    });
+    const events: string[] = record(c);
+    await connectClient(c);
+
+    expect(order.filter((entry: string): boolean => entry.startsWith('store:'))).toEqual([]);
+    expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1']);
+    expect(stored).toBe('refresh-locked');
+    expect(events.filter((entry: string): boolean => entry === 'connected')).toHaveLength(1);
+  });
+
+  test('a refusal at renewal inside the grace fails the fetch: refreshToken is reported, and the fetch is retried with the storage read again', async (): Promise<void> => {
+    serve({ ttl: 100 });
+    useFakeClock();
+    try {
+      let exchanges: number = 0;
+      const c: Centrifuge = create({
+        exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          exchanges++;
+          if (exchanges === 2) {
+            throw new UnauthorizedError('refused');
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+
+      await advanceUntil((): boolean => events.includes('error:refreshToken'));
+      expect(c.state).toBe(State.Connected);
+      expect(events).not.toContain('disconnected:1');
+
+      // The retry, 5 to 10 seconds on, exchanges again and is accepted: the connection stays connected with the new token.
+      await advanceUntil((): boolean => commands('refresh').length === 2);
+      expect(commands('refresh')[1].refresh.token).toBe('access-2');
+      expect(c.state).toBe(State.Connected);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('a rejected exchange at bootstrap reports connectToken and retries in place after the backoff', async (): Promise<void> => {
