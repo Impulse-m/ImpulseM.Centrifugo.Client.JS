@@ -225,7 +225,7 @@ export class TokenExchangeFlow {
   private async loadAndExchange(attempt: Attempt): Promise<string | null> {
     const refreshToken: string | null | undefined = await this.options.load();
     if (!attempt.current()) {
-      throw this.host.createError(errorCodes.connectionClosed, 'connection closed before the token exchange');
+      throw this.host.createError(errorCodes.connectionClosed, 'connection closed');
     }
     if (!refreshToken) {
       return null;
@@ -307,13 +307,12 @@ export class TokenExchangeFlow {
     if (!this.isCurrent(bootstrap)) {
       return;
     }
-    this.client['_token'] = '';
     const ctx: any = { type: type, error: error };
     this.client['_emitError'](ctx, (): void => {
       if (!this.isCurrent(bootstrap)) {
         return;
       }
-      this.client['_disconnect'](connectingCodes.transportClosed, 'token exchange abandoned', true);
+      this.client['_disconnect'](connectingCodes.transportClosed, 'exchange abandoned', true);
     });
   }
 
@@ -349,7 +348,7 @@ export class TokenExchangeFlow {
         return;
       }
       if (err?.code === errorCodes.timeout) {
-        this.abandon(bootstrap, 'connectToken', this.host.createError(errorCodes.clientConnectToken, 'token exchange timed out'));
+        this.abandon(bootstrap, 'connectToken', this.host.createError(errorCodes.clientConnectToken, 'timeout'));
         return;
       }
       this.retry(bootstrap, result, resume, 'connectToken', this.connectTokenError(err));
@@ -513,7 +512,7 @@ export class TokenExchangeFlow {
       await this.storeRotated(refreshToken, result.refreshToken, attempt);
     }
     if (!attempt.current()) {
-      throw this.host.createError(errorCodes.connectionClosed, 'connection closed during the token exchange');
+      throw this.host.createError(errorCodes.connectionClosed, 'connection closed');
     }
     this.host.debug('connection token exchanged');
     if (!result || !result.token) {
