@@ -487,9 +487,10 @@ export class RpcPool {
   }
 
 
-  // Closes a connection when it stays without calls for idleTimeout. Nothing runs without the option.
+  // Closes a connection when it stays without calls for idleTimeout. Nothing runs without the option, nor on a connection
+  // which ended: its calls may settle after it left the group, and close() would not reach a timer armed then.
   private armIdle(conn: PoolConnection): void {
-    if (this.idleTimeout === 0 || this.closed) {
+    if (this.idleTimeout === 0 || this.closed || conn.closeCode !== null) {
       return;
     }
     conn.idle?.clear();
