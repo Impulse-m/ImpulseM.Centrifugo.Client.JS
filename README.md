@@ -686,14 +686,14 @@ centrifuge.connect();
 
 The flow: on connect the client sends a connect command without a token. When the reply is anonymous and `load` returns a refresh token, the SDK runs `exchange` over that same connection, stores the rotated refresh token, sends the access token in a refresh command, and reports `connected` once, with the identity of the refresh reply. The renewal is driven by the expiry of the access token: the SDK runs the exchange over the connected socket at a random moment between 0.7 and 0.9 of the token's ttl, so clients that connected together spread their renewals. A renewal that fails is reported and retried with backoff, as `getToken` failures are. The access token stays in memory; the SDK never stores either token itself.
 
-Several tabs or processes of one installation can share the refresh token through the same storage without a lock. The SDK reads `load` right before each exchange and stores the rotated token right after it. A client that is refused because another one rotated the token meanwhile reads `load` again and retries once with the new value, with no event; the refresh token is terminal only when the value is the same.
+Several tabs or processes of one installation can share the refresh token through the same storage without a lock. The SDK reads `load` right before each exchange and stores the rotated token right after it. A client that is refused because another one rotated the token meanwhile reads `load` again and retries once with the new value, with no event; the refresh token is terminal only when the value is the same. The check and the store of an exchange that was abandoned (its connection ended) are two steps, so a rotation another tab stores between them can be overwritten by that late result; take a lock inside `exchange` (for example the Web Locks API) where that matters.
 
 The events an application sees:
 
 | Event | When |
 |---|---|
 | `connected` | with an empty `user` when `load` returns nothing at connect: the connection is anonymous |
-| `error`, type `connectToken` | `load` or `exchange` failed at connect, other than `UnauthorizedError`; retried on the same connection with backoff |
+| `error`, type `connectToken` | `load` or `exchange` failed at connect, other than `UnauthorizedError`; retried on the same connection with backoff. An exchange that runs past the client `timeout` closes the connection instead, and the reconnect bootstraps again |
 | `error`, type `refreshToken` | the renewal failed; retried with backoff |
 | `error`, type `tokenStore`, code `6` (`clientRefreshToken`) | `store` threw or rejected; the exchange went on with its access token |
 | `disconnected`, code `1` (`unauthorized`) | the session is dead: `exchange` threw `UnauthorizedError` and the refresh token is still the same, or `load` returned nothing at renewal. The client does not reconnect |
