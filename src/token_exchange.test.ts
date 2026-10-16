@@ -1,4 +1,5 @@
 import { Centrifuge, UnauthorizedError } from './centrifuge';
+import { errorCodes } from './codes';
 import { CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, holdReply, until } from './testing/codecs';
 import { Options, State, TokenExchange, TokenExchangeContext, TokenExchangeResult } from './types';
 
@@ -825,6 +826,37 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  test('an rpc call of an exchange whose connection was lost is rejected and writes nothing', async (): Promise<void> => {
+    serve();
+    let calls: number = 0;
+    let release: (result: TokenExchangeResult) => void = (): void => {};
+    const held: { ctx: TokenExchangeContext | null } = { ctx: null };
+    const c: Centrifuge = create({
+      exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+        calls++;
+        if (calls === 1) {
+          held.ctx = ctx;
+          return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+            release = resolve;
+          });
+        }
+        return issue(ctx);
+      },
+    });
+    const connected: Promise<void> = nextConnected(c);
+    c.connect();
+    await until((): boolean => calls === 1);
+    server.closeConnection();
+    await connected;
+
+    await expect(held.ctx?.rpc('late', codecCase.encode({}))).rejects.toMatchObject({ code: errorCodes.connectionClosed });
+    expect(order.filter((entry: string): boolean => entry === 'rpc:late')).toHaveLength(0);
+    release({ token: 'stale-access' });
+    await flush();
+    expect(order.filter((entry: string): boolean => entry === 'rpc:late')).toHaveLength(0);
+    expect(c.state).toBe(State.Connected);
   });
 
   test('a connect reply that already carries a user is not bootstrapped: no exchange, connected with that user', async (): Promise<void> => {

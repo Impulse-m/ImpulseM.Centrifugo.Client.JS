@@ -469,7 +469,7 @@ export class TokenExchangeFlow {
   private async exchangeWith(refreshToken: string, attempt: Attempt): Promise<string> {
     const result: TokenExchangeResult = await this.bounded(this.options.exchange({
       refreshToken: refreshToken,
-      rpc: (method: string, data: any): Promise<RpcResult> => this.rpc(attempt.route, method, data),
+      rpc: (method: string, data: any): Promise<RpcResult> => this.rpc(attempt, method, data),
     }), attempt);
     if (result && result.refreshToken && result.refreshToken !== refreshToken) {
       await this.storeRotated(refreshToken, result.refreshToken, attempt);
@@ -520,8 +520,12 @@ export class TokenExchangeFlow {
 
 
   // The rpc call of the exchange, on the connection the route names.
-  private rpc(route: () => Route, method: string, data: any): Promise<RpcResult> {
-    const target: Route = route();
+  // Nothing is written once the connection of the attempt is gone: the call rejects with connectionClosed instead.
+  private rpc(attempt: Attempt, method: string, data: any): Promise<RpcResult> {
+    if (!attempt.current()) {
+      return Promise.reject(this.host.createError(errorCodes.connectionClosed, 'connection closed'));
+    }
+    const target: Route = attempt.route();
     return this.plainCall({ rpc: { method: method, data: data } }, target.session, target.node).then(
       (ctx: CallResolveContext): RpcResult => {
         try {
