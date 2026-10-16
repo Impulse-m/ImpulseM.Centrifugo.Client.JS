@@ -19,6 +19,7 @@ export enum errorCodes {
   limitExceeded = 16,
   // The call was cancelled by its signal.
   cancelled = 17,
+  redirectFailed = 18,
 }
 
 export enum connectingCodes {

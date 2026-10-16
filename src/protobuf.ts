@@ -3,6 +3,7 @@ import { Subscription } from './subscription';
 import { ProtobufCodec } from './protobuf.codec';
 export * from "./types";
 export * from "./codes";
+export * from './rpc_pool';
 
 class CentrifugeProtobuf extends Centrifuge {
   protected _formatOverride() {
@@ -12,6 +13,7 @@ class CentrifugeProtobuf extends Centrifuge {
 
 export {
   CentrifugeProtobuf as Centrifuge,
+  CentrifugeProtobuf as ProtobufCentrifuge,
   UnauthorizedError,
   Subscription
 }
