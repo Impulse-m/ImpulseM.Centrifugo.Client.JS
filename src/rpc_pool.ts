@@ -12,7 +12,9 @@ import type { Options, RpcOptions, RpcResult } from './types';
 export interface RpcPoolOptions {
   /**
    * Endpoints of an endpoint key. '' is the key of a call without one. The key is whatever the server answered the
-   * application (a cluster, a region); the pool does not interpret it. Resolved once per key, until close().
+   * application (a cluster, a region); the pool does not interpret it. Resolved once per key, until close(). Each key
+   * keeps its connections and its state for the life of the pool, so keys should be a bounded set (clusters, regions),
+   * not one per object.
    */
   endpoints: (endpointKey: string) => string | string[] | Promise<string | string[]>;
   /**
@@ -33,7 +35,10 @@ export interface RpcPoolOptions {
    * (0, one command at a time). A larger window needs client.concurrency >= window + 1 on the server.
    */
   maxInflightPerConnection?: number;
-  /** Calls waiting for a slot at most, over all endpoints. Beyond it rpc() rejects with limitExceeded. Default 64. */
+  /**
+   * Calls waiting for a slot at most, over all endpoints. Beyond it rpc() rejects with limitExceeded. Default 64. The
+   * queue is walked on every change of a connection, so keep it small: tens of calls, not thousands.
+   */
   maxQueued?: number;
   /** Closes a connection without calls for this long, in milliseconds. 0 keeps it open. Default 60000. */
   idleTimeout?: number;
@@ -194,8 +199,8 @@ export class RpcPool {
   /**
    * Runs a call on a connection of its endpoint key. It takes a slot of a connection with room, opens one when the key
    * has none and may open one, or waits in the queue. Rejects with badConfiguration for a timeout out of range, with
-   * limitExceeded when the queue is full, with
-   * timeout at the deadline, with cancelled when the signal aborts, and with the error of the server otherwise.
+   * limitExceeded when the queue is full, with timeout at the deadline, with cancelled when the signal aborts, and with
+   * the error of the server otherwise.
    */
   rpc(method: string, data: Uint8Array, opts?: RpcPoolCallOptions): Promise<RpcResult> {
     return new Promise<RpcResult>((resolve: (result: RpcResult) => void, reject: (error: any) => void): void => {

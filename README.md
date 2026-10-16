@@ -683,12 +683,12 @@ const result = await pool.rpc("part.write", chunk, {endpointKey: "eu-2", affinit
 
 | Option | Default | Meaning |
 |---|---|---|
-| `endpoints(key)` | required | the endpoint or endpoints of a key; `''` is the key of a call without one. May return a promise. Resolved once per key, until `close()` |
+| `endpoints(key)` | required | the endpoint or endpoints of a key; `''` is the key of a call without one. May return a promise. Resolved once per key, until `close()`. Keys are kept for the life of the pool, so use a bounded set (clusters, regions), not one key per object |
 | `connection` | none | the options of each connection: `token`, `getToken`, `headers`, `name`, `version`, `timeout`, `websocket`, `minReconnectDelay`, `maxReconnectDelay`, `maxServerPingDelay`, `debug`. Any other option, `instance` in particular, throws `badConfiguration` |
 | `affinityHeader` | none | the header that carries a call's `affinity`. Required to pass one, and it must be allow-listed for the method on the server |
 | `maxConnectionsPerEndpoint` | `2` | connections opened per endpoint at most |
 | `maxInflightPerConnection` | `1` | calls in flight per connection. A window above `1` needs `client.concurrency >= window + 1` on the server |
-| `maxQueued` | `64` | calls waiting for a slot, over all endpoints. Beyond it `rpc()` rejects with `limitExceeded` |
+| `maxQueued` | `64` | calls waiting for a slot, over all endpoints. Beyond it `rpc()` rejects with `limitExceeded`. The queue is walked on every change of a connection, so keep it to tens of calls |
 | `idleTimeout` | `60000` | a connection without calls closes after this many milliseconds; `0` keeps it open |
 | `retries` | `3` | resends of a call lost with its connection, refused with the `later` signal, or moved by `reroute`, counted together |
 | `reroute(error)` | none | returns the endpoint key a server error moves the call to, or `undefined` |

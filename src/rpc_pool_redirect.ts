@@ -3,7 +3,7 @@ import type { RpcPoolRedirect } from './rpc_pool';
 import { poolError } from './rpc_pool_endpoint';
 
 /** The default body limit of a redirect fetch, in bytes. */
-export const defaultRedirectMaxBytes: number = 16 * 1024 * 1024;
+const defaultRedirectMaxBytes: number = 16 * 1024 * 1024;
 
 // A waiter of the gate: its start takes a slot, and it is removed when its signal aborts first.
 interface RedirectWaiter {
