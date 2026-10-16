@@ -4,13 +4,48 @@ import { errorCodes } from './codes';
 import type { ClientHost } from './client_host';
 import type { CallRejectContext, CallResolveContext } from './rpc_tracker';
 import { refreshRetries } from './refresh_slot';
-import type { Options, RpcResult, TokenExchange, TokenExchangeResult } from './types';
+import type { Options, RpcResult } from './types';
 import { backoff, ttlMilliseconds } from './utils';
 import { writeCommands } from './write_commands';
 
 // The private members of the client this file reaches by name (a rename in centrifuge.ts must change this file too):
 // _token, _refreshRequired, _transportId, _isConnecting, _isConnected, _call, _session, _node, _emitError, _disconnect,
 // _failUnauthorized, _dispatchFailed, _reportDispatchError.
+
+
+/** What the `exchange` callback of tokenExchange gets. */
+export interface TokenExchangeContext {
+  /** The refresh token `load` returned for this exchange. */
+  refreshToken: string;
+  /** Sends a plain rpc call over the connection the exchange runs on: the one being set up, or the connected one.
+   * It does not wait for the connected state, carries no message id and is not retransmitted. Rejects with
+   * `connectionClosed` when that connection is lost, or with `transportWriteError` when the write fails. `data` is
+   * what `rpc` takes for the codec in use. */
+  rpc: (method: string, data: any) => Promise<RpcResult>;
+}
+
+
+/** What the `exchange` callback of tokenExchange resolves with. */
+export interface TokenExchangeResult {
+  /** The access token: the connection token from now on. */
+  token: string;
+  /** The rotated refresh token, when the issuer rotated it. Absent or equal to the one used: nothing is stored. */
+  refreshToken?: string;
+}
+
+
+/** Persistence and exchange of the refresh token, see the tokenExchange option. */
+export interface TokenExchange {
+  /** The refresh token the application persisted, or null/undefined/'' when there is none. Called before every exchange.
+   * Throw `UnauthorizedError` when the refresh token is gone for good: the session is dead, at bootstrap and at renewal. */
+  load: () => string | null | undefined | Promise<string | null | undefined>;
+  /** Persists a rotated refresh token. Awaited before the access token issued with it is used. A rejection is reported
+   * as a `tokenStore` error, and the exchange goes on. */
+  store: (refreshToken: string) => void | Promise<void>;
+  /** Exchanges the refresh token for an access token. Throw `UnauthorizedError` when the issuer refused the refresh
+   * token: the session is dead. Any other rejection is reported and retried with backoff. */
+  exchange: (ctx: TokenExchangeContext) => Promise<TokenExchangeResult>;
+}
 
 
 /** The session and node the commands of an exchange are written with. */
