@@ -696,7 +696,7 @@ const result = await pool.rpc("part.write", chunk, {endpointKey: "eu-2", affinit
 | `maxRedirectsInflight` | `4` | redirect fetches in flight over the pool |
 | `fetch` | `globalThis.fetch` | the fetch function of redirects |
 
-`rpc(method, data, {endpointKey, affinity, headers, signal, timeout})` resolves with `{data, cached}` like `Centrifuge.rpc`. `timeout` defaults to the connection's `timeout` and covers the resends and the redirect fetch of the call. Each attempt is also bounded by the connection's own reply timeout.
+`rpc(method, data, {endpointKey, affinity, headers, signal, timeout})` resolves with `{data, cached}` like `Centrifuge.rpc`. `timeout` defaults to the connection's `timeout` and covers the resends and the redirect fetch of the call. It is at most the connection's `timeout`, because a reply is bounded by that timeout: a longer call needs a larger `connection.timeout`. A `timeout` that is not a positive number, or is above the connection's, rejects with `badConfiguration` before the call is sent.
 
 ### Plain calls
 

@@ -510,6 +510,19 @@ describe('RpcPool', () => {
       expect(callsOf(server).length).toBe(0);
     });
 
+    test('a call timeout above connection.timeout is refused before anything is sent', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = echo;
+      const pool: RpcPool = createPool((): string => server.url, {
+        connection: { websocket: WebSocket, timeout: 200, minReconnectDelay: 10, maxReconnectDelay: 50 },
+      });
+      await expect(pool.rpc('work', bytes({ n: 1 }), { timeout: 300 })).rejects.toMatchObject({
+        code: errorCodes.badConfiguration,
+      });
+      expect(callsOf(server).length).toBe(0);
+      expect(fromBytes((await pool.rpc('work', bytes({ n: 2 }), { timeout: 200 })).data)).toEqual({ n: 2 });
+    });
+
     test('an aborted signal rejects before anything is sent', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
       server.onCommand = echo;

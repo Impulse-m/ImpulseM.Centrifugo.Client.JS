@@ -69,7 +69,10 @@ export interface RpcPoolCallOptions {
   headers?: Record<string, string>;
   /** Rejects the promise with cancelled. The call itself drains on its connection: no cancel goes to the server. */
   signal?: AbortSignal;
-  /** Deadline of the call across its resends and its redirect fetch, in milliseconds. Default connection.timeout. */
+  /**
+   * Deadline of the call across its resends and its redirect fetch, in milliseconds. Default connection.timeout, which
+   * is also the most it can be: a reply is bounded by the connection timeout, so a longer call needs a longer one.
+   */
   timeout?: number;
 }
 
@@ -190,7 +193,8 @@ export class RpcPool {
 
   /**
    * Runs a call on a connection of its endpoint key. It takes a slot of a connection with room, opens one when the key
-   * has none and may open one, or waits in the queue. Rejects with limitExceeded when the queue is full, with
+   * has none and may open one, or waits in the queue. Rejects with badConfiguration for a timeout out of range, with
+   * limitExceeded when the queue is full, with
    * timeout at the deadline, with cancelled when the signal aborts, and with the error of the server otherwise.
    */
   rpc(method: string, data: Uint8Array, opts?: RpcPoolCallOptions): Promise<RpcResult> {
@@ -312,11 +316,15 @@ export class RpcPool {
   }
 
 
-  // The deadline span of a call in milliseconds: a positive finite number, the connection timeout when unset.
+  // The deadline span of a call in milliseconds: the connection timeout when unset, else a positive finite number at
+  // most the connection timeout, since the reply of a connection is bounded by it.
   private timeoutOf(opts?: RpcPoolCallOptions): number {
     const timeout: number = opts?.timeout ?? this.timeout;
     if (!Number.isFinite(timeout) || timeout <= 0) {
       throw poolError(errorCodes.badConfiguration, 'timeout must be a positive number of milliseconds');
+    }
+    if (timeout > this.timeout) {
+      throw poolError(errorCodes.badConfiguration, 'timeout is above connection.timeout, which bounds the reply of a connection');
     }
     return timeout;
   }
