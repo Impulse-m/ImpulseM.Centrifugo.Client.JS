@@ -218,7 +218,10 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
   });
 
   test('a kept valid access token connects with the token: no exchange, no refresh', async (): Promise<void> => {
-    serve();
+    // A server that accepts the token answers the connect with its user, so the connect is not bootstrapped again.
+    serve({
+      connect: (cmd: any): any => (cmd.connect.token ? { id: cmd.id, connect: { ...server.connectResult, user: 'alice' } } : undefined),
+    });
     const c: Centrifuge = create();
     await connectClient(c);
 
