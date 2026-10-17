@@ -362,9 +362,9 @@ export class TokenExchangeFlow {
       }
     }
     if (refused !== null) {
-      // A superseded or abandoned renewal drops its refusal: it spends no re-presentation and ends no session. The fetch
-      // it fails is reported and retried by the refresh timer as any failed fetch of a connected client (centrifuge.ts
-      // _refresh); the token of the refresh(token) call that superseded it is the one in use.
+      // A superseded or abandoned renewal drops its refusal: it spends no re-presentation, reports nothing and ends no
+      // session. The refresh(token) call that superseded it is the one in use; centrifuge.ts _refresh drops the failure of a
+      // superseded renewal.
       if (this.stale(attempt)) {
         throw this.closedError();
       }
