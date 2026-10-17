@@ -1,6 +1,38 @@
 import type { Centrifuge } from './centrifuge';
 import type { CallTimer } from './call_timer';
-import type { PendingCall } from './rpc_pool';
+import type { RpcResult } from './types';
+
+// A call of the pool from rpc() until it settles.
+export interface PendingCall {
+  method: string;
+  data: Uint8Array;
+  headers: Record<string, string> | undefined;
+  key: string;
+  deadline: number;
+  // Resends made so far, across the three causes: see failed and retry.
+  resends: number;
+  // Later refusals retried so far: the exponent of their delay, as the main client counts them.
+  laterResends: number;
+  settled: boolean;
+  // True while the call holds a slot of a connection: from its send until its reply or its error.
+  sent: boolean;
+  // True while the call is counted in RpcPool.queued: from its admission until it holds a slot or settles. It is counted
+  // while its key is still resolving, and while it waits in the line of its key (line).
+  queued: boolean;
+  // The line of the endpoint key the call waits in, null while it is not in one.
+  line: RpcPoolEndpoint | null;
+  // The neighbours of the call in its line, null at either end.
+  previous: PendingCall | null;
+  next: PendingCall | null;
+  timer: CallTimer | null;
+  resend: CallTimer | null;
+  // Removes the abort listener of the signal, if the call has one.
+  detach: () => void;
+  // Aborted when the call settles, so a redirect fetch in progress is cancelled.
+  controller: AbortController | null;
+  resolve: (result: RpcResult) => void;
+  reject: (error: any) => void;
+}
 
 /** A connection of an rpc pool: its client, the calls it carries and whether its connect is still in flight. */
 export interface PoolConnection {
@@ -31,16 +63,56 @@ export interface PoolConnection {
 /** The connections of one endpoint key, over the endpoints its resolver gave. */
 export class RpcPoolEndpoint {
   readonly urls: string[];
-  /**
-   * The calls of the key waiting for a slot, first come first served. A call settled while it waits stays in the line
-   * until it reaches the head, where it is dropped: the pool does not search the line to remove it.
-   */
-  readonly waiting: PendingCall[] = [];
+  // The calls of the key waiting for a slot, first come first served: a doubly linked line, so a call leaves it in O(1)
+  // when it settles.
+  private first: PendingCall | null = null;
+  private last: PendingCall | null = null;
   private connections: PoolConnection[] = [];
 
 
   constructor(urls: string[]) {
     this.urls = urls;
+  }
+
+
+  /** The call at the head of the line, null when no call waits. */
+  head(): PendingCall | null {
+    return this.first;
+  }
+
+
+  /** Appends a call to the end of the line. */
+  enqueue(call: PendingCall): void {
+    call.line = this;
+    call.previous = this.last;
+    call.next = null;
+    if (this.last === null) {
+      this.first = call;
+    } else {
+      this.last.next = call;
+    }
+    this.last = call;
+  }
+
+
+  /** Takes a call out of the line in O(1). A call which is not in this line is left alone. */
+  dequeue(call: PendingCall): void {
+    if (call.line !== this) {
+      return;
+    }
+    if (call.previous === null) {
+      this.first = call.next;
+    } else {
+      call.previous.next = call.next;
+    }
+    if (call.next === null) {
+      this.last = call.previous;
+    } else {
+      call.next.previous = call.previous;
+    }
+    call.line = null;
+    call.previous = null;
+    call.next = null;
   }
 
 

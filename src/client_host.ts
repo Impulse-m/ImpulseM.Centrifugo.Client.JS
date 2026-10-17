@@ -30,7 +30,7 @@ export interface TokenSourceHost {
   tokenExpired(token: string): boolean;
   /** Whether the client can renew its token: it has getToken or tokenExchange. */
   canRenew(): boolean;
-  /** Starts one renewal of the token now, through the client's own refresh. */
+  /** Starts one renewal of the token now, through the client's own refresh, unless a refresh is in flight already. */
   renewNow(): void;
   /** Sets the listener of the accepted refresh replies, or removes it with null. */
   setRefreshAccepted(listener: (() => void) | null): void;
@@ -178,6 +178,10 @@ export function createTokenSourceHost(client: Centrifuge): TokenSourceHost {
     tokenExpired: (token: string): boolean => client['_tokenExchange']?.tokenExpired(token) ?? false,
     canRenew: (): boolean => client['_host'].hasGetToken(),
     renewNow: (): void => {
+      // A refresh in flight renews the token already: a second one would send the same token again, as Java does not.
+      if (client['_refreshSlot'].busy()) {
+        return;
+      }
       client['_host'].scheduleRefresh(0, (): void => client['_refresh']());
     },
     setRefreshAccepted: (listener: (() => void) | null): void => {

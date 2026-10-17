@@ -73,6 +73,7 @@ export class TokenSource {
     });
     this.attach();
     this.host.setRefreshAccepted((): void => {
+      this.refusedAgain();
       this.settle();
     });
   }
@@ -101,9 +102,21 @@ export class TokenSource {
   }
 
 
-  /** Whether the client's session ended as unauthorized, and no connect attempt has begun since. */
-  ended(): boolean {
-    return this.sessionEnded;
+  /**
+   * Whether a call of the pool must not be sent now: the session ended as unauthorized, or the client holds no usable
+   * token and is neither connecting nor connected. Then a connection would only be opened to fail with unauthorized.
+   * A client which connects or holds a usable token lends it, so this is false for it.
+   */
+  refuses(): boolean {
+    if (this.sessionEnded) {
+      return true;
+    }
+    const state: State = this.host.state();
+    if (state === State.Connected || state === State.Connecting) {
+      return false;
+    }
+    const token: string = this.host.token();
+    return token === '' || this.host.tokenExpired(token);
   }
 
 
@@ -182,6 +195,22 @@ export class TokenSource {
   private settle(): void {
     for (const [requester, waiter] of this.waiting) {
       this.step(requester, waiter);
+    }
+  }
+
+
+  // A renewal accepted with the token a request was refused: the renewal gave back the refused token, which no request
+  // can use, so those requests fail as unauthorized now. Waiting for the next event of the client would wait up to a
+  // whole token ttl, and the same refusal would come back. The choice is recorded in the README.
+  private refusedAgain(): void {
+    const token: string = this.host.token();
+    if (token === '') {
+      return;
+    }
+    for (const [requester, waiter] of this.waiting) {
+      if (waiter.refused === token) {
+        this.fail(requester, waiter);
+      }
     }
   }
 

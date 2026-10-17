@@ -152,6 +152,30 @@ describe('RpcPool', () => {
       expect(pool.stats().queued).toBe(1);
     });
 
+    test('counts a call waiting for its endpoint key against maxQueued, so a slow resolver cannot admit calls without a bound', async (): Promise<void> => {
+      const pool: RpcPool = createPool((): Promise<string[]> => new Promise<string[]>((): void => {}), { maxQueued: 1 });
+      quiet(pool.rpc('work', bytes({ n: 1 })));
+      let refused: any;
+      try {
+        await pool.rpc('work', bytes({ n: 2 }));
+      } catch (e) {
+        refused = e;
+      }
+      expect(refused.code).toBe(errorCodes.limitExceeded);
+      expect(pool.stats().queued).toBe(1);
+    });
+
+    test('a call which times out while it waits leaves its line at once, and the line keeps no settled call', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = (cmd: any): any => (isCall(cmd) ? holdReply : undefined);
+      const pool: RpcPool = createPool((): string => server.url, { maxConnectionsPerEndpoint: 1, maxQueued: 8 });
+      quiet(pool.rpc('work', bytes({ n: 1 })));
+      const waited: any = await pool.rpc('work', bytes({ n: 2 }), { timeout: 100 }).then((): string => 'resolved', (error: any): any => error);
+      expect(waited.code).toBe(errorCodes.timeout);
+      expect((pool as any).groups.get('').head()).toBeNull();
+      expect(pool.stats().queued).toBe(0);
+    });
+
     test('a release places the calls of its own key, and a call settled while it waits is dropped at the head', async (): Promise<void> => {
       const serverA: WaitableFakeServer = await startServer();
       const serverB: WaitableFakeServer = await startServer();

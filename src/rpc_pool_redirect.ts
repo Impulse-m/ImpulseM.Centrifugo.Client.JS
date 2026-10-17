@@ -12,17 +12,20 @@ interface RedirectWaiter {
 
 
 /**
- * Bounds the redirect fetches in flight over one pool. A fetch waits for a slot; a waiter whose signal aborts
- * leaves the line without taking one. No timer: a waiter waits for a release only.
+ * Bounds the redirect fetches in flight over one pool. A fetch waits for a slot, at most maxWaiters of them; a waiter
+ * whose signal aborts leaves the line without taking one. No timer: a waiter waits for a release only.
  */
 export class RedirectGate {
   private limit: number;
+  private maxWaiters: number;
   private running: number = 0;
-  private waiters: RedirectWaiter[] = [];
+  // The waiters in arrival order: a Set keeps the order, and an abort removes its waiter in O(1).
+  private waiters: Set<RedirectWaiter> = new Set<RedirectWaiter>();
 
 
-  constructor(limit: number) {
+  constructor(limit: number, maxWaiters: number) {
     this.limit = limit;
+    this.maxWaiters = maxWaiters;
   }
 
 
@@ -39,6 +42,11 @@ export class RedirectGate {
         reject(poolError(errorCodes.cancelled, 'cancelled'));
         return;
       }
+      // A fetch which would wait beyond the bound is refused, as a call beyond maxQueued is.
+      if (this.waiters.size >= this.maxWaiters) {
+        reject(poolError(errorCodes.limitExceeded, 'too many redirects waiting for a fetch slot'));
+        return;
+      }
       const waiter: RedirectWaiter = {
         start: (): void => {
           signal.removeEventListener('abort', onAbort);
@@ -47,11 +55,11 @@ export class RedirectGate {
         },
       };
       const onAbort: () => void = (): void => {
-        this.waiters = this.waiters.filter((other: RedirectWaiter): boolean => other !== waiter);
+        this.waiters.delete(waiter);
         reject(poolError(errorCodes.cancelled, 'cancelled'));
       };
       signal.addEventListener('abort', onAbort, { once: true });
-      this.waiters.push(waiter);
+      this.waiters.add(waiter);
       this.grant();
     });
   }
@@ -70,12 +78,13 @@ export class RedirectGate {
 
 
   private grant(): void {
-    while (this.running < this.limit && this.waiters.length > 0) {
-      const waiter: RedirectWaiter | undefined = this.waiters.shift();
-      if (waiter === undefined) {
+    while (this.running < this.limit && this.waiters.size > 0) {
+      const next: RedirectWaiter | undefined = this.waiters.values().next().value;
+      if (next === undefined) {
         return;
       }
-      waiter.start();
+      this.waiters.delete(next);
+      next.start();
     }
   }
 }
@@ -157,7 +166,7 @@ function secureEndpoint(endpoint: string): boolean {
 
 // The body as bytes, read chunk by chunk so that a body over the limit is cut off as it arrives. A declared length over
 // the limit is refused before the body is read. A body with no stream is refused, since its size cannot be bounded while
-// it arrives: only an absent body is buffered, and it is empty.
+// it arrives: only a null body is buffered, and it is empty. A missing body property is refused the same way.
 async function readBounded(response: any, maxBytes: number): Promise<Uint8Array> {
   const declared: number | undefined = declaredLength(response);
   if (declared !== undefined && declared > maxBytes) {
@@ -166,7 +175,7 @@ async function readBounded(response: any, maxBytes: number): Promise<Uint8Array>
   }
   const source: ChunkSource | null = chunkSource(response.body);
   if (source === null) {
-    if (response.body !== null && response.body !== undefined) {
+    if (response.body !== null) {
       discardBody(response);
       throw redirectFailure('redirect body cannot be bounded');
     }

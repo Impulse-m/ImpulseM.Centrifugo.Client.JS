@@ -478,4 +478,48 @@ describe('RpcPool tokenFrom', () => {
     pool.close();
     expect(waiting.size).toBe(0);
   });
+
+  test('a call while the main client is disconnected and holds no token opens no connection', async (): Promise<void> => {
+    const c: ProtobufCentrifuge = createMain();
+    const pool: RpcPool = createPool(c);
+    const failed: any = await pool.rpc('work', bytes({ n: 1 })).then((): string => 'resolved', (error: any): any => error);
+    expect(failed).toMatchObject({ code: errorCodes.clientDisconnected, message: 'unauthorized' });
+    expect(connectsOf(edgeA).length + connectsOf(edgeB).length).toBe(0);
+  });
+
+  test('a call queued before the logout is not placed after it: it fails as unauthorized, and no call reaches the live socket', async (): Promise<void> => {
+    mainTtl = 1;
+    const c: ProtobufCentrifuge = createMain();
+    await connectClient(c);
+    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url], maxConnectionsPerEndpoint: 1 });
+    const heldA: any[] = [];
+    holdCalls(edgeA, heldA);
+    const first: Promise<any> = pool.rpc('work', bytes({ n: 1 })).then((): string => 'resolved', (error: any): any => error);
+    expect(await until((): boolean => heldA.length === 1)).toBe(true);
+    const queued: Promise<any> = pool.rpc('work', bytes({ n: 2 })).then((): string => 'resolved', (error: any): any => error);
+    expect(await until((): boolean => pool.stats().queued === 1)).toBe(true);
+    const ended: Promise<number> = new Promise<number>((resolve: (code: number) => void): void => {
+      c.once('disconnected', (ctx: any): void => resolve(ctx.code));
+    });
+    stored = '';
+    expect(await ended).toBe(disconnectedCodes.unauthorized);
+    // The in-flight call completes on the connection it was sent on, and that release places the queued call.
+    edgeA.send({ id: heldA[0].id, rpc: { data: bytes({ n: 1 }) } });
+    expect(await first).toBe('resolved');
+    expect(await queued).toMatchObject({ code: errorCodes.clientDisconnected, message: 'unauthorized' });
+    expect(callsOf(edgeA)).toHaveLength(1);
+  });
+
+  test('a renewal which gives back the refused token fails the waiting connection as unauthorized, with one renewal', async (): Promise<void> => {
+    const c: ProtobufCentrifuge = createMain({ getToken: async (): Promise<string> => 'same-token' }, false);
+    await connectClient(c);
+    refusedToken = 'same-token';
+    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url], maxConnectionsPerEndpoint: 1 });
+    const failed: any = await pool.rpc('work', bytes({ n: 1 })).then((): string => 'resolved', (error: any): any => error);
+    // The waiting request fails at once, not at the call deadline: the call ends with the connection, not with a timeout.
+    expect(failed).toBeDefined();
+    expect(failed.code).not.toBe(errorCodes.timeout);
+    expect(refreshesOf(main)).toHaveLength(1);
+    expect(connectsOf(edgeA).every((cmd: any): boolean => cmd.connect.token === 'same-token')).toBe(true);
+  });
 });

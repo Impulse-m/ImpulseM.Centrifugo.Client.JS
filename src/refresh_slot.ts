@@ -95,6 +95,12 @@ export class RefreshSlot {
   }
 
 
+  /** Whether a refresh is in flight: a refresh() call or a refresh command, the timer-driven ones included. */
+  busy(): boolean {
+    return this.callInFlight !== null || this.commandInFlight !== null;
+  }
+
+
   /**
    * Whether a refresh(token) call started after the generation given (see currentGeneration). A refresh() that
    * fetches its own token does not count: it does not supersede a timer refresh that fetched its token before it.
