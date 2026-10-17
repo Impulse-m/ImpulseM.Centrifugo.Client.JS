@@ -549,7 +549,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
-  test('a terminal verdict of a renewal whose connection was lost ends the session: no reconnect with the kept token', async (): Promise<void> => {
+  test('a terminal verdict of a renewal whose connection was lost does not end the session: the reconnect keeps its access token', async (): Promise<void> => {
     serve({
       ttl: 100,
       connect: (cmd: any): any => (cmd.connect.token ? { id: cmd.id, connect: { ...server.connectResult, user: 'alice' } } : undefined),
@@ -579,15 +579,14 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       // The connection is lost while the renewal exchange is in flight, and the client waits to reconnect.
       server.closeConnection();
       await flush();
-      // The issuer refuses the token after the connection is gone: with grace 0 the refusal is the verdict.
+      // The issuer refuses the token after the connection is gone: with grace 0 the refusal would be the verdict of the
+      // attempt, but the attempt is no longer current, so its outcome is dropped and the session goes on.
       refuse(new UnauthorizedError('refused'));
-      expect(await until((): boolean => c.state === State.Disconnected)).toBe(true);
-
-      // The reconnect the lost connection would have made, were the session not over, does not come.
-      jest.advanceTimersByTime(60000);
       await flush();
-      expect(commands('connect')).toHaveLength(1);
-      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual(['disconnected:1']);
+      jest.advanceTimersByTime(60000);
+      expect(await until((): boolean => c.state === State.Connected)).toBe(true);
+      expect(commands('connect')).toHaveLength(2);
+      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual([]);
     } finally {
       jest.useRealTimers();
     }
@@ -1509,7 +1508,94 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
-  test('an empty refresh token read by a renewal whose connection was lost ends the session: no reconnect with the kept token', async (): Promise<void> => {
+  test('an UnauthorizedError from load at renewal is terminal: disconnected with code 1, no retry', async (): Promise<void> => {
+    serve({ ttl: 10 });
+    useFakeClock();
+    try {
+      let loads: number = 0;
+      const c: Centrifuge = create({
+        load: (): string => {
+          if (loads++ === 0) {
+            return 'refresh-1';
+          }
+          throw new UnauthorizedError('refresh token deleted');
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+
+      jest.advanceTimersByTime(9000);
+      await until((): boolean => events.includes('disconnected:1'));
+      jest.advanceTimersByTime(60000);
+      await flush();
+
+      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual(['disconnected:1']);
+      expect(commands('connect')).toHaveLength(1);
+      expect(commands('refresh')).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('another error from load at bootstrap is a failure: reported, retried after the backoff, then connected', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      let loads: number = 0;
+      const c: Centrifuge = create({
+        load: (): string => {
+          if (loads++ === 0) {
+            throw new Error('disk busy');
+          }
+          return 'refresh-1';
+        },
+      });
+      const events: string[] = record(c);
+      c.connect();
+      expect(await until((): boolean => events.includes('error:connectToken'))).toBe(true);
+      expect(c.state).toBe(State.Connecting);
+
+      jest.advanceTimersByTime(60000);
+      expect(await until((): boolean => c.state === State.Connected)).toBe(true);
+
+      expect(loads).toBe(2);
+      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual([]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('another error from load at renewal is a failed fetch: reported, retried after the refresh delay, then renewed', async (): Promise<void> => {
+    serve({ ttl: 10 });
+    useFakeClock();
+    try {
+      let loads: number = 0;
+      const c: Centrifuge = create({
+        load: (): string => {
+          loads++;
+          if (loads === 2) {
+            throw new Error('disk busy');
+          }
+          return 'refresh-1';
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+
+      jest.advanceTimersByTime(9000);
+      expect(await until((): boolean => events.includes('error:refreshToken'))).toBe(true);
+      expect(c.state).toBe(State.Connected);
+
+      jest.advanceTimersByTime(10000);
+      expect(await until((): boolean => commands('refresh').length === 2)).toBe(true);
+      expect(c.state).toBe(State.Connected);
+      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual([]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('an empty refresh token read by a renewal whose connection was lost does not end the session: the reconnect keeps its access token', async (): Promise<void> => {
     serve({
       ttl: 100,
       connect: (cmd: any): any => (cmd.connect.token ? { id: cmd.id, connect: { ...server.connectResult, user: 'alice' } } : undefined),
@@ -1534,16 +1620,15 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       await advanceUntil((): boolean => loads === 2);
 
       // The connection is lost while the renewal reads the storage, and the application removes the refresh token meanwhile.
+      // The renewal is no longer current, so its empty value is dropped: the session goes on.
       server.closeConnection();
       expect(await until((): boolean => c.state !== State.Connected)).toBe(true);
       removed(null);
-      expect(await until((): boolean => c.state === State.Disconnected)).toBe(true);
-
-      // The reconnect the kept access token would have made, were the session not over, does not come.
-      jest.advanceTimersByTime(60000);
       await flush();
-      expect(commands('connect')).toHaveLength(1);
-      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual(['disconnected:1']);
+
+      await advanceUntil((): boolean => c.state === State.Connected);
+      expect(commands('connect')).toHaveLength(2);
+      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual([]);
     } finally {
       jest.useRealTimers();
     }

@@ -48,7 +48,8 @@ export interface TokenExchangeResult {
 /** Persistence and exchange of the refresh token, see the tokenExchange option. */
 export interface TokenExchange {
   /** The refresh token the application persisted, or null/undefined/'' when there is none. Called before every exchange.
-   * Throw `UnauthorizedError` when the refresh token is gone for good: the session is dead, at bootstrap and at renewal. */
+   * Throw `UnauthorizedError` when the refresh token is gone for good: the session is dead, at bootstrap and at renewal.
+   * Any other error is a failure, retried with backoff. Only the current attempt decides: the outcome of a superseded one is dropped. */
   load: () => string | null | undefined | Promise<string | null | undefined>;
   /** Persists a rotated refresh token. Awaited before the access token issued with it is used. A rejection is reported
    * as a `tokenStore` error, and the exchange goes on. */
@@ -346,8 +347,11 @@ export class TokenExchangeFlow {
       if (err instanceof Refusal && !err.terminal) {
         refused = err;
       } else if (err instanceof UnauthorizedError) {
-        // The session is over whether its attempt is still current or not: a connection lost during the exchange must not
-        // reconnect with the access token it held. The client is already disconnected then, and the disconnect does nothing.
+        // Only the current attempt decides: the outcome of a superseded, expired or abandoned attempt is dropped, and the
+        // session goes on on the connection it has, or reconnects with the access token it held.
+        if (!attempt.current()) {
+          throw this.closedError();
+        }
         this.endSession();
         throw new UnauthorizedError('');
       } else {
@@ -410,11 +414,11 @@ export class TokenExchangeFlow {
   // holds no refresh token.
   private async loadAndExchange(attempt: Attempt): Promise<string | null> {
     const refreshToken: string | null | undefined = await this.options.load();
-    if (!refreshToken) {
-      return null;
-    }
     if (!attempt.current()) {
       throw this.closedError();
+    }
+    if (!refreshToken) {
+      return null;
     }
     return this.exchangeRefresh(refreshToken, attempt);
   }
@@ -682,11 +686,11 @@ export class TokenExchangeFlow {
         throw new Refusal(this.horizonPassed(), false);
       }
       const current: string | null | undefined = await this.options.load();
-      if (!current) {
-        throw new Refusal(true, true);
-      }
       if (!attempt.current()) {
         throw this.closedError();
+      }
+      if (!current) {
+        throw new Refusal(true, true);
       }
       // Each presentation of a different value is bounded by the change itself: a value presented here was stored after the one refused.
       if (current !== refreshToken) {
