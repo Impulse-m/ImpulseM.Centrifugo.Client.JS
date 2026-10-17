@@ -307,16 +307,18 @@ export class TokenExchangeFlow {
   // holds ends the session; a refusal inside the grace horizon fails the fetch, which the refresh timer retries.
   private async renewalToken(attempt: Attempt): Promise<string> {
     let token: string | null;
+    let refused: boolean = false;
     try {
       token = await this.loadAndExchange(attempt);
     } catch (err: any) {
       if (!(err instanceof UnauthorizedError) || !attempt.current()) {
         throw err;
       }
-      if (err instanceof Refusal && !err.terminal) {
-        throw new Error(refusedMessage);
-      }
+      refused = err instanceof Refusal && !err.terminal;
       token = null;
+    }
+    if (refused) {
+      throw new Error(refusedMessage);
     }
     if (token === null) {
       this.closeRun();
@@ -619,10 +621,14 @@ export class TokenExchangeFlow {
     try {
       return await this.exchangeWith(refreshToken, attempt);
     } catch (err: any) {
-      if (!(err instanceof UnauthorizedError) || !attempt.current()) {
+      if (!(err instanceof UnauthorizedError)) {
         throw err;
       }
+      // A refusal counts even when its attempt has already ended: the horizon is measured from the first refusal.
       this.openRun();
+      if (!attempt.current()) {
+        throw err;
+      }
       if (!retried) {
         const current: string | null | undefined = await this.options.load();
         if (!attempt.current()) {
@@ -797,8 +803,8 @@ export class TokenExchangeFlow {
 
 /**
  * The flow of the tokenExchange option of a client, or null without the option. The option is exclusive with getToken:
- * setting both throws, and so does a refusal name that is not a non-empty string, or a grace that is not a finite
- * number of seconds from 0 up.
+ * setting both throws, and so does a refusal name that is not a non-empty string, a grace that is not a finite
+ * number of seconds from 0 up, or a callback (load, store, exchange) that is not a function.
  */
 export function createTokenExchangeFlow(host: ClientHost, options: Options): TokenExchangeFlow | null {
   const tokenExchange: TokenExchange | null | undefined = options.tokenExchange;
@@ -816,6 +822,10 @@ export function createTokenExchangeFlow(host: ClientHost, options: Options): Tok
   const grace: number | undefined = tokenExchange.grace;
   if (grace !== undefined && (typeof grace !== 'number' || !Number.isFinite(grace) || grace < 0)) {
     throw new Error('tokenExchange.grace: must be a finite number of seconds, 0 or more');
+  }
+  if (typeof tokenExchange.load !== 'function' || typeof tokenExchange.store !== 'function'
+    || typeof tokenExchange.exchange !== 'function') {
+    throw new Error('tokenExchange: load, store and exchange must be functions');
   }
   return new TokenExchangeFlow(host, tokenExchange);
 }
