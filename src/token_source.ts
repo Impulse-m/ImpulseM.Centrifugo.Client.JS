@@ -81,8 +81,9 @@ export class TokenSource {
 
   /**
    * The token for a connection of the pool, with the generation it belongs to. refused is the token the connection was
-   * given last, '' on its first request. Resolves at once when the client holds a usable token, with '' when the client
-   * is anonymous; otherwise it waits for the client, and rejects with UnauthorizedError when the session has ended.
+   * given last, '' on its first request. Resolves at once when the connected client holds a usable token, with '' when it
+   * is anonymous; it waits while the client connects, and rejects with UnauthorizedError when the client is not
+   * connected or connecting, or the session has ended.
    */
   token(requester: object, refused: string): Promise<SourcedToken> {
     // Re-attaches the listeners an application removed (removeAllListeners), so the source keeps its events.
@@ -105,20 +106,15 @@ export class TokenSource {
 
 
   /**
-   * Whether a call of the pool must not be sent now: the session ended as unauthorized, or the client holds no usable
-   * token and is neither connecting nor connected. Then a connection would only be opened to fail with unauthorized.
-   * A client which connects or holds a usable token lends it, so this is false for it.
+   * Whether a call of the pool must not be sent now: the session ended as unauthorized, or the client is neither
+   * connecting nor connected, so no token can be lent. Then no connection is opened, and the call fails at once.
    */
   refuses(): boolean {
     if (this.sessionEnded) {
       return true;
     }
     const state: State = this.host.state();
-    if (state === State.Connected || state === State.Connecting) {
-      return false;
-    }
-    const token: string = this.host.token();
-    return token === '' || this.host.tokenExpired(token);
+    return state !== State.Connected && state !== State.Connecting;
   }
 
 
@@ -167,16 +163,18 @@ export class TokenSource {
     if (this.sessionEnded) {
       return this.fail(requester, waiter);
     }
-    const token: string = this.host.token();
-    if (token !== '' && token !== waiter.refused && !this.host.tokenExpired(token)) {
-      return this.deliver(requester, waiter, token);
-    }
+    // A token is lent only while the client is connected, so that its identity is confirmed: in the connecting window
+    // the request waits for the connect, an accepted token or a terminal disconnect.
     const state: State = this.host.state();
     if (state === State.Connecting) {
       return false;
     }
     if (state !== State.Connected) {
       return this.fail(requester, waiter);
+    }
+    const token: string = this.host.token();
+    if (token !== '' && token !== waiter.refused && !this.host.tokenExpired(token)) {
+      return this.deliver(requester, waiter, token);
     }
     if (token === '') {
       return this.deliver(requester, waiter, '');

@@ -328,7 +328,7 @@ describe('RpcPool tokenFrom', () => {
     expect(exchanges).toBe(3);
   });
 
-  test('after the main client disconnects, its valid token is still lent; a refusal ends the connection as unauthorized, and the call is not resent', async (): Promise<void> => {
+  test('after the main client disconnects, no token is lent: a call fails at once and opens no connection, and a call in flight is not resent', async (): Promise<void> => {
     const c: ProtobufCentrifuge = createMain();
     await connectClient(c);
     const pool: RpcPool = createPool(c);
@@ -341,17 +341,21 @@ describe('RpcPool tokenFrom', () => {
     const first: Promise<any> = pool.rpc('work', bytes({ n: 1 })).then((): string => 'resolved', (error: any): any => error);
     expect(await until((): boolean => heldA.length === 1)).toBe(true);
     c.disconnect();
-    // Edge A is busy, so the next call opens a connection on edge B with the token the main client still lends.
+    // The main client is disconnected, so no token is lent: the call fails at once, and no connection is opened on edge B.
     edgeB.onCommand = echo;
-    expect(fromBytes((await pool.rpc('work', bytes({ n: 2 }))).data)).toEqual({ n: 2 });
-    expect(connectsOf(edgeB)[0].connect.token).toBe('access-1');
+    expect(await pool.rpc('work', bytes({ n: 2 })).then((): string => 'resolved', (error: any): any => error)).toMatchObject({
+      code: errorCodes.clientDisconnected,
+      message: 'unauthorized',
+    });
+    expect(connectsOf(edgeB).length).toBe(0);
     // Edge A refuses the token now, and its socket closes with a call in flight. The call is settled with the loss of the
-    // connection, not sent again: the reconnect is refused, the connection ends as unauthorized, and the call fails with it.
+    // connection, not sent again: the reconnect is refused, and the connection needs a token, none is lent, so it ends as
+    // unauthorized.
     refusedToken = 'access-1';
     edgeA.onCommand = (cmd: any): any => (cmd.connect !== undefined && cmd.connect.token === 'access-1' ? refuseConnect(cmd) : echo(cmd));
     closeSocket(edgeA, 1001);
     expect(await first).toMatchObject({ code: errorCodes.clientDisconnected });
-    expect(errors.some((ctx: any): boolean => ctx.error?.code === disconnectedCodes.unauthorized)).toBe(true);
+    await eventually((): boolean => errors.some((ctx: any): boolean => ctx.error?.code === disconnectedCodes.unauthorized), 15000);
     expect(callsOf(edgeA).length).toBe(1);
   });
 
