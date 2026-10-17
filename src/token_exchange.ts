@@ -558,10 +558,10 @@ export class TokenExchangeFlow {
   }
 
 
-  // A refresh of a bootstrap that the server refused, or that gave no identity. The access token is dropped, unless
-  // the connection has moved on. A refresh that timed out or failed to write has an unknown outcome: the connection is
-  // closed and the reconnect bootstraps again. A temporary refusal is retried with a new exchange; any other ends the
-  // connection.
+  // A refresh of a bootstrap that the server refused, or that gave no identity. The access token is dropped while it is
+  // still the one held, whatever became of the connection: an unaccepted token is never kept. A refresh that timed out
+  // or failed to write has an unknown outcome: the connection is closed and the reconnect bootstraps again. A temporary
+  // refusal is retried with a new exchange; any other ends the connection.
   private refreshFailed(
     bootstrap: Bootstrap,
     result: any,
