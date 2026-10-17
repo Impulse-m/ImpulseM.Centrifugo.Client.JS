@@ -153,6 +153,7 @@ export function createClientHost(client: Centrifuge): ClientHost {
       client['_reportDispatchError'](err);
     },
     tokenGeneration: (): number => client['_refreshSlot'].currentTokenGeneration(),
-    tokenExchangeActive: (): boolean => client['_tokenExchange'] !== null,
+    tokenSuperseded: (generation: number): boolean => client['_tokenExchange'] !== null
+      && client['_refreshSlot'].currentTokenGeneration() !== generation,
   };
 }

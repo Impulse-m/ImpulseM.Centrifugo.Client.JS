@@ -51,8 +51,8 @@ class FakeRefreshHost implements RefreshSlotHost {
     return this.slot === null ? 0 : this.slot.currentTokenGeneration();
   }
 
-  tokenExchangeActive(): boolean {
-    return this.exchange;
+  tokenSuperseded(generation: number): boolean {
+    return this.exchange && this.tokenGeneration() !== generation;
   }
 
   token(): string {

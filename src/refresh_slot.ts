@@ -38,8 +38,8 @@ export interface RefreshSlotHost {
   getToken(): Promise<string>;
   /** The generation of the connection token: moves on with each refresh(token) call. */
   tokenGeneration(): number;
-  /** Whether the token of getToken is fetched by the token exchange, whose fetch a refresh(token) call supersedes. */
-  tokenExchangeActive(): boolean;
+  /** Whether a token fetched by the token exchange, read at the generation given, was superseded by a refresh(token) call. */
+  tokenSuperseded(generation: number): boolean;
   token(): string;
   setToken(token: string): void;
   debug(message: string, ...args: any[]): void;
@@ -141,13 +141,11 @@ export class RefreshSlot {
       if (!this.host.hasGetToken()) {
         throw this.host.createError(errorCodes.badConfiguration, 'refresh needs a token: pass one to refresh() or set getToken');
       }
-      const exchange: boolean = this.host.tokenExchangeActive();
       const generation: number = this.host.tokenGeneration();
       newToken = await this.host.getToken();
-      // With the token exchange, a refresh(token) call made while the token was fetched supersedes it: the token fetched
-      // is not sent, and the call's own token follows in turn. The caller gets the identity the connection has meanwhile, with ttl 0.
-      // A getToken token is sent as it always was.
-      if (exchange && this.host.tokenGeneration() !== generation) {
+      // A refresh(token) call made while the token was fetched by the token exchange supersedes it: the token fetched is
+      // not sent, and the call's own token follows in turn. The caller gets the identity the connection has meanwhile.
+      if (this.host.tokenSuperseded(generation)) {
         return this.host.identity().context(0);
       }
     }
