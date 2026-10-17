@@ -869,6 +869,31 @@ describe('RpcPool', () => {
       expect(fetchFunction).not.toHaveBeenCalled();
     });
 
+    test('an https URL is fetched on an https endpoint, which is a secure scheme', async (): Promise<void> => {
+      const fetchFunction: jest.Mock = fetchReturning(new Uint8Array([8]), 200);
+      const body: Uint8Array = await fetchRedirect(fetchFunction as any, 'https://edge.example/connection/websocket', {
+        url: 'https://cdn.example/part/1',
+      }, new AbortController().signal);
+      expect(Array.from(body)).toEqual([8]);
+      expect(fetchFunction).toHaveBeenCalledWith('https://cdn.example/part/1', expect.objectContaining({ redirect: 'manual' }));
+    });
+
+    test('a redirect followed to an http URL on an https endpoint is refused, and its body is not read', async (): Promise<void> => {
+      const arrayBuffer: jest.Mock = jest.fn(async (): Promise<ArrayBuffer> => new ArrayBuffer(1));
+      const fetchFunction: jest.Mock = jest.fn(async (): Promise<any> => ({
+        ok: true,
+        status: 200,
+        url: 'http://edge.example/part/1',
+        headers: new Headers(),
+        body: null,
+        arrayBuffer: arrayBuffer,
+      }));
+      await expect(fetchRedirect(fetchFunction as any, 'https://edge.example/connection/websocket', {
+        url: 'https://cdn.example/part/1',
+      }, new AbortController().signal)).rejects.toMatchObject({ code: errorCodes.redirectFailed });
+      expect(arrayBuffer).not.toHaveBeenCalled();
+    });
+
     test('an abort cancels a redirect fetch in progress', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
       server.onCommand = echo;
