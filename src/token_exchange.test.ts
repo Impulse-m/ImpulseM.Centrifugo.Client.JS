@@ -1613,7 +1613,8 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       jest.advanceTimersByTime(60000);
       expect(await until((): boolean => c.state === State.Connected)).toBe(true);
 
-      expect(loads).toBe(2);
+      // The failed read, the retry's read, and the store step's read of the rotation the retry stores.
+      expect(loads).toBe(3);
       expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual([]);
     } finally {
       jest.useRealTimers();
@@ -1628,7 +1629,8 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       const c: Centrifuge = create({
         load: (): string => {
           loads++;
-          if (loads === 2) {
+          // Read 2 is the store step of the bootstrap's rotation, so the failing read is the renewal's one, read 3.
+          if (loads === 3) {
             throw new Error('disk busy');
           }
           return 'refresh-1';
@@ -1662,7 +1664,8 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       const c: Centrifuge = create({
         load: (): string | null | Promise<string | null> => {
           loads++;
-          if (loads === 1) {
+          // Reads 1 and 2 are the bootstrap and its store step; read 3 is the renewal's.
+          if (loads <= 2) {
             return 'refresh-1';
           }
           return new Promise<string | null>((resolve: (token: string | null) => void): void => {
@@ -1672,7 +1675,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       });
       const events: string[] = record(c);
       await connectClient(c);
-      await advanceUntil((): boolean => loads === 2);
+      await advanceUntil((): boolean => loads === 3);
 
       // The connection is lost while the renewal reads the storage, and the application removes the refresh token meanwhile.
       // The renewal is no longer current, so its empty value is dropped: the session goes on.
@@ -2031,6 +2034,77 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       await flush();
 
       expect(events).toContain('error:tokenStore');
+      expect(order.filter((step: string): boolean => step.startsWith('store:'))).toEqual([]);
+      expect(stored).toBe('refresh-1');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a logout during a bootstrap exchange is not undone: the rotation is not stored over the empty storage', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      let release: (result: TokenExchangeResult) => void = (): void => {};
+      const c: Centrifuge = create({
+        exchange: (): Promise<TokenExchangeResult> => {
+          calls++;
+          return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+            release = resolve;
+          });
+        },
+      });
+      const connected: Promise<void> = nextConnected(c);
+      c.connect();
+      await until((): boolean => calls === 1);
+
+      // Another tab logs out while the bootstrap exchange runs: the storage is cleared.
+      stored = '';
+      release({ token: 'access-1', refreshToken: 'refresh-2' });
+      await connected;
+      await flush();
+
+      expect(order.filter((step: string): boolean => step.startsWith('store:'))).toEqual([]);
+      expect(stored).toBe('');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a failing load in the store step of a current bootstrap reports tokenStore, and the rotation is not stored', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      let failRead: boolean = false;
+      let release: (result: TokenExchangeResult) => void = (): void => {};
+      const c: Centrifuge = create({
+        load: (): string => {
+          if (failRead) {
+            throw new Error('storage read failed');
+          }
+          return stored;
+        },
+        exchange: (): Promise<TokenExchangeResult> => {
+          calls++;
+          return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+            release = resolve;
+          });
+        },
+      });
+      const events: string[] = record(c);
+      const connected: Promise<void> = nextConnected(c);
+      c.connect();
+      await until((): boolean => calls === 1);
+
+      failRead = true;
+      release({ token: 'access-1', refreshToken: 'refresh-2' });
+      await connected;
+      await flush();
+
+      expect(events).toContain('error:tokenStore');
+      expect(events).toContain('connected');
       expect(order.filter((step: string): boolean => step.startsWith('store:'))).toEqual([]);
       expect(stored).toBe('refresh-1');
     } finally {
@@ -2782,7 +2856,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     expect(events).toEqual(['connected', 'auth']);
   });
 
-  test('a plain refresh() during a renewal exchange does not supersede its rotation', async (): Promise<void> => {
+  test('a plain refresh() during a renewal exchange does not supersede its rotation, which is stored while the storage holds the used token', async (): Promise<void> => {
     serve({ ttl: 10 });
     useFakeClock();
     try {
@@ -2802,14 +2876,47 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       await connectClient(c);
       await advanceUntil((): boolean => calls === 2);
 
-      // Another tab stored its own token meanwhile. Only refresh(token) supersedes an exchange, so the rotation is stored.
-      stored = 'refresh-other';
+      // Only refresh(token) supersedes an exchange, so the rotation is stored: the storage still holds the used token.
       const refreshed: Promise<any> = c.refresh();
       await flush();
       release({ token: 'access-late', refreshToken: 'refresh-3' });
       await refreshed;
 
       expect(stored).toBe('refresh-3');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a rotation of a current renewal is not stored when the application stored another token meanwhile', async (): Promise<void> => {
+    serve({ ttl: 10 });
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      let release: (result: TokenExchangeResult) => void = (): void => {};
+      const c: Centrifuge = create({
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 2) {
+            return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+              release = resolve;
+            });
+          }
+          return issue(ctx);
+        },
+      });
+      await connectClient(c);
+      await advanceUntil((): boolean => calls === 2);
+
+      // Another tab stored its own token meanwhile: the rotation of the token it replaced is not stored over it.
+      stored = 'refresh-other';
+      const refreshed: Promise<any> = c.refresh();
+      await flush();
+      release({ token: 'access-late', refreshToken: 'refresh-3' });
+      await refreshed;
+
+      expect(order.filter((step: string): boolean => step.startsWith('store:'))).toEqual(['store:refresh-2']);
+      expect(stored).toBe('refresh-other');
     } finally {
       jest.useRealTimers();
     }

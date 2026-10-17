@@ -737,13 +737,13 @@ export class TokenExchangeFlow {
     });
     const rotation: string | undefined = result ? result.refreshToken : undefined;
     if (rotation && rotation !== refreshToken) {
-      await this.storeRotated(refreshToken, rotation, attempt);
-    }
-    if (!result || !result.token) {
-      throw new Error('token exchange returned no token');
+      await this.storeRotated(refreshToken, rotation);
     }
     if (!attempt.current()) {
       throw this.closedError();
+    }
+    if (!result || !result.token) {
+      throw new Error('token exchange returned no token');
     }
     this.recordGrace(result.grace);
     this.closeRun();
@@ -766,23 +766,21 @@ export class TokenExchangeFlow {
   }
 
 
-  // Stores a rotated refresh token the issuer issued. An abandoned attempt, or one a refresh(token) call superseded,
-  // stores it only while the application still holds the token the attempt exchanged: a rotation made meanwhile by a
-  // newer exchange or by the application is kept, so the late result of an old attempt never overwrites a newer token.
-  // A failing read or store is reported, and the exchange goes on: the issuer already consumed the pair. A failing read
-  // of an abandoned or superseded attempt skips the store, since it cannot tell whether the token is still the one used.
-  private async storeRotated(used: string, rotated: string, attempt: Attempt): Promise<void> {
-    if (!attempt.current() || attempt.superseded()) {
-      let held: string | null | undefined;
-      try {
-        held = await this.options.load();
-      } catch (err: any) {
-        this.reportStoreFailure(err);
-        return;
-      }
-      if (held !== used) {
-        return;
-      }
+  // Stores a rotated refresh token the issuer issued. Whatever the attempt, it stores the token only while the application
+  // still holds the token the attempt exchanged: a rotation made meanwhile by a newer exchange or by the application is
+  // kept, so the late result of an old attempt never overwrites a newer token, and a logout meanwhile is not undone. A
+  // failing read or store is reported, and the exchange goes on: the issuer already consumed the pair. A failing read
+  // skips the store, since it cannot tell whether the token is still the one used.
+  private async storeRotated(used: string, rotated: string): Promise<void> {
+    let held: string | null | undefined;
+    try {
+      held = await this.options.load();
+    } catch (err: any) {
+      this.reportStoreFailure(err);
+      return;
+    }
+    if (held !== used) {
+      return;
     }
     try {
       await this.options.store(rotated);
