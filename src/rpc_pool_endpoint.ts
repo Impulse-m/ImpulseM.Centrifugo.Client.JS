@@ -14,7 +14,9 @@ export interface PoolConnection {
   connecting: boolean;
   /** The code of the disconnect that ended the connection for good, null while it is not ended. */
   closeCode: number | null;
-  /** Closes the connection when it stays without calls, see RpcPool. */
+  /** The time the connection was last left without calls, read by its idle check, see RpcPool. */
+  lastUse: number;
+  /** The pending idle check, at most one per connection, see RpcPool. */
   idle: CallTimer | null;
 }
 

@@ -201,6 +201,62 @@ describe('RpcPool', () => {
       expect(connectsOf(server).length).toBe(1);
     });
 
+    test('a connection used call after call arms one idle check, not one per call', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = echo;
+      const pool: RpcPool = createPool((): string => server.url, { idleTimeout: 5123 });
+      const timers: jest.SpyInstance = jest.spyOn(global, 'setTimeout');
+      for (let n: number = 0; n < 20; n++) {
+        expect(fromBytes((await pool.rpc('work', bytes({ n: n }))).data)).toEqual({ n: n });
+      }
+      expect(connectsOf(server).length).toBe(1);
+      const armed: any[] = timers.mock.calls.filter((args: any[]): boolean => Math.abs(Number(args[1]) - 5123) <= 5);
+      expect(armed.length).toBeLessThanOrEqual(1);
+      pool.close();
+      timers.mockRestore();
+    });
+
+    test('a busy connection arms no idle check per call', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = (cmd: any): any => (isCall(cmd) ? holdReply : undefined);
+      const pool: RpcPool = createPool((): string => server.url, {
+        idleTimeout: 5123,
+        maxConnectionsPerEndpoint: 1,
+        maxInflightPerConnection: 2,
+      });
+      const timers: jest.SpyInstance = jest.spyOn(global, 'setTimeout');
+      const pending: Array<Promise<RpcResult>> = [
+        quiet(pool.rpc('work', bytes({ n: 0 }))),
+        quiet(pool.rpc('work', bytes({ n: 1 }))),
+      ];
+      expect(await until((): boolean => callsOf(server).length === 2)).toBe(true);
+      for (let n: number = 2; n < 12; n++) {
+        reply(server, callsOf(server)[n - 2], { n: n - 2 });
+        pending.push(quiet(pool.rpc('work', bytes({ n: n }))));
+        expect(await until((): boolean => callsOf(server).length === n + 1)).toBe(true);
+      }
+      expect(pool.stats()).toEqual({ connections: 1, inflight: 2, queued: 0, redirects: 0 });
+      const armed: any[] = timers.mock.calls.filter((args: any[]): boolean => Math.abs(Number(args[1]) - 5123) <= 5);
+      expect(armed.length).toBe(0);
+      pool.close();
+      timers.mockRestore();
+      await Promise.allSettled(pending);
+    });
+
+    test('a connection used within each idle period stays open, and closes after a period without calls', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = echo;
+      const pool: RpcPool = createPool((): string => server.url, { idleTimeout: 100 });
+      for (let n: number = 0; n < 5; n++) {
+        await pool.rpc('work', bytes({ n: n }));
+        await sleep(60);
+        expect(pool.stats().connections).toBe(1);
+      }
+      expect(connectsOf(server).length).toBe(1);
+      await sleep(250);
+      expect(pool.stats().connections).toBe(0);
+    });
+
     test('a connect which throws leaves no connection in its group, and the next call opens a new one', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
       server.onCommand = echo;

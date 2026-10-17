@@ -424,8 +424,6 @@ export class RpcPool {
   private send(call: PendingCall, conn: PoolConnection): void {
     conn.inflight++;
     call.sent = true;
-    conn.idle?.clear();
-    conn.idle = null;
     const options: RpcOptions | undefined = call.headers === undefined ? undefined : { headers: call.headers };
     conn.client.rpc(call.method, call.data, options).then(
       (reply: RpcResult): void => this.replied(call, conn, reply),
@@ -444,6 +442,7 @@ export class RpcPool {
       inflight: 0,
       connecting: true,
       closeCode: null,
+      lastUse: Date.now(),
       idle: null,
     };
     client.on('connected', (): void => {
@@ -499,29 +498,41 @@ export class RpcPool {
   }
 
 
-  // A slot became free: an idle connection is closed after idleTimeout, and the queue takes the free slot.
+  // A slot became free: a connection left without calls is marked as used now, and the queue takes the free slot.
   private released(conn: PoolConnection): void {
     if (conn.inflight === 0) {
+      conn.lastUse = Date.now();
       this.armIdle(conn);
     }
     this.dispatch();
   }
 
 
-  // Closes a connection when it stays without calls for idleTimeout. Nothing runs without the option, nor on a connection
-  // which ended: its calls may settle after it left the group, and close() would not reach a timer armed then.
+  // Arms the idle check of a connection when none is pending. Nothing runs without the option, nor on a connection
+  // which ended: its calls may settle after it left the group, and close() would not reach a timer armed then. The
+  // check is not cancelled when a call starts: it reads lastUse when it is due, so a busy connection arms no timer per
+  // call, and a connection has at most one check pending.
   private armIdle(conn: PoolConnection): void {
-    if (this.idleTimeout === 0 || this.closed || conn.closeCode !== null) {
+    if (this.idleTimeout === 0 || this.closed || conn.closeCode !== null || conn.idle !== null) {
       return;
     }
-    conn.idle?.clear();
-    conn.idle = callTimer(Date.now() + this.idleTimeout, (): void => {
-      conn.idle = null;
-      if (conn.inflight === 0 && !this.closed) {
-        conn.group.remove(conn);
-        conn.client.disconnect();
-      }
-    });
+    conn.idle = callTimer(conn.lastUse + this.idleTimeout, (): void => this.idleDue(conn));
+  }
+
+
+  // The idle check: a connection with calls waits for the release of its last call, and a connection used since the
+  // check was armed waits for the rest of its period.
+  private idleDue(conn: PoolConnection): void {
+    conn.idle = null;
+    if (this.closed || conn.closeCode !== null || conn.inflight > 0) {
+      return;
+    }
+    if (Date.now() < conn.lastUse + this.idleTimeout) {
+      this.armIdle(conn);
+      return;
+    }
+    conn.group.remove(conn);
+    conn.client.disconnect();
   }
 
 
