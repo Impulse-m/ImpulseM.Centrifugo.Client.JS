@@ -145,7 +145,7 @@ export class RefreshSlot {
       const generation: number = this.host.tokenGeneration();
       newToken = await this.host.getToken();
       // With the token exchange, a refresh(token) call made while the token was fetched supersedes it: the token fetched
-      // is not sent, and the call's own token follows in turn. The caller gets the identity the connection has meanwhile.
+      // is not sent, and the call's own token follows in turn. The caller gets the identity the connection has meanwhile, with ttl 0.
       // A getToken token is sent as it always was.
       if (exchange && this.host.tokenGeneration() !== generation) {
         return this.host.identity().context(0);
