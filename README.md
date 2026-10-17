@@ -648,7 +648,7 @@ const client = new Centrifuge(
 
 #### Refreshing the connection token on demand
 
-`refresh(token?)` sends a connection token to the server now, the given one or the one `getToken` returns. Use it after the application obtained a new token, for example after a login or a logout. The promise resolves `{ user, authClass, ttl }` with the identity the server confirmed. The token is kept for the reconnects that follow once the server accepts it. When the server refuses the new token, the previous one is kept. A `refresh()` without a token that a `refresh(token)` call superseded resolves with the identity the connection holds, and `ttl` 0: the token it fetched was not sent.
+`refresh(token?)` sends a connection token to the server now, the given one or the one `getToken` returns. Use it after the application obtained a new token, for example after a login or a logout. The promise resolves `{ user, authClass, ttl }` with the identity the server confirmed. The token is kept for the reconnects that follow once the server accepts it. When the server refuses the new token, the previous one is kept.
 
 ```javascript
 const identity = await centrifuge.refresh('NEW-CONNECTION-TOKEN');
@@ -658,6 +658,8 @@ console.log('now connected as', identity.user);
 While the client is disconnected, the refresh is sent on the next connect, however long the reconnect takes: the call timeout does not apply to the refresh itself. At most 32 refresh calls can be in progress at once; beyond that `refresh` rejects with `errorCodes.limitExceeded`. Calls with the same token, or without one, made while a refresh is pending share its promise. A refresh with another token is sent after the one in flight, and each caller gets the identity of its own token. The explicit refresh and the timer-driven refresh never have two refresh commands in flight, and the reconnects use the token of the last refresh the server accepted. `rpc` calls wait for a refresh in flight, so they go out under the identity it confirms; such a wait ends at the call's own timeout, and rejects with `errorCodes.cancelled` when the call's signal aborts. When the server refuses the token, the promise rejects with the server error, the connection keeps its identity, and the reconnects keep the previous token. A timer-driven refresh that the server refuses is handled by the code of the error. A temporary error, or a client error with a code below 100, emits an `error` event with type `refresh` and is retried with backoff, with a token from `getToken`. A refusal with 109 (token expired) is handled the same way, and the retry uses a fresh token from `getToken`. A refusal with 103 (permission denied) emits the `error` event and keeps the connection with its identity; it is not retried, since the same token would be refused again. The server ends the connection at the expiry of the token, and the reconnect uses `getToken`. Any other error disconnects the client with its code. The retries of 109 and the keeping of the connection on 103 differ from the upstream client, which disconnects on both. Whether the server accepts a change of user is decided by the server configuration.
 
 Deploy the server before the clients that use the identity fields: a server that does not send `user` and `auth_class` in its refresh replies makes each refresh read as an anonymous connection.
+
+A `refresh()` without a token that a `refresh(token)` call superseded resolves with the identity the connection holds, and `ttl` 0: the token it fetched was not sent.
 
 #### Token exchange over the connection
 
