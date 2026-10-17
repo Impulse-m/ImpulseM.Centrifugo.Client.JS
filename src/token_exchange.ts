@@ -306,24 +306,17 @@ export class TokenExchangeFlow {
   // The token of a renewal on the connected transport it was requested for. A refresh token the application no longer
   // holds ends the session; a refusal inside the grace horizon fails the fetch, which the refresh timer retries.
   private async renewalToken(attempt: Attempt): Promise<string> {
-    let token: string | null = null;
-    let failure: any = null;
-    let failed: boolean = false;
+    let token: string | null;
     try {
       token = await this.loadAndExchange(attempt);
     } catch (err: any) {
-      failure = err;
-      failed = true;
-    }
-    if (failed) {
-      if (!(failure instanceof UnauthorizedError) || !attempt.current()) {
-        throw failure;
+      if (!(err instanceof UnauthorizedError) || !attempt.current()) {
+        throw err;
       }
-      if (failure instanceof Refusal && !failure.terminal) {
+      if (err instanceof Refusal && !err.terminal) {
         throw new Error(refusedMessage);
       }
-      this.closeRun();
-      throw new UnauthorizedError('');
+      token = null;
     }
     if (token === null) {
       this.closeRun();
@@ -404,14 +397,7 @@ export class TokenExchangeFlow {
   // connection is closed after a backoff, so the reconnect bootstraps again. A stalled exchange is not retried in place.
   // The backoff keeps a stalled bootstrap from reconnecting at once: the connect reply resets the transport backoff.
   private abandon(bootstrap: Bootstrap, type: string, error: any): void {
-    if (!this.isCurrent(bootstrap)) {
-      return;
-    }
-    const ctx: any = { type: type, error: error };
-    this.host.emitError(ctx, (): void => {
-      if (!this.isCurrent(bootstrap)) {
-        return;
-      }
+    this.reported(bootstrap, type, error, (): void => {
       this.backedOff(bootstrap, (): void => {
         if (this.isCurrent(bootstrap)) {
           this.host.disconnect(connectingCodes.transportClosed, 'exchange abandoned', true);
@@ -421,11 +407,29 @@ export class TokenExchangeFlow {
   }
 
 
+  // Reports an error of a bootstrap that is still current, and runs next once the report is handled, if the bootstrap
+  // is still current then: a handler that disconnected the client ends it instead.
+  private reported(bootstrap: Bootstrap, type: string, error: any, next: () => void): void {
+    if (!this.isCurrent(bootstrap)) {
+      return;
+    }
+    this.host.emitError({ type: type, error: error }, (): void => {
+      if (this.isCurrent(bootstrap)) {
+        next();
+      }
+    });
+  }
+
+
   // Runs next after a backoff that grows with the failed bootstrap steps since the last bootstrap completed, this one
   // included, so it escalates across reconnects too. The timer is cleared by reset().
   private backedOff(bootstrap: Bootstrap, next: () => void): void {
-    const delay: number = backoff(this.failures, 5000, 60000);
-    this.failures++;
+    this.after(bootstrap, backoff(this.failures++, 5000, 60000), next);
+  }
+
+
+  // Runs next after the delay, on the retry timer of the bootstrap, which reset() clears.
+  private after(bootstrap: Bootstrap, delay: number, next: () => void): void {
     bootstrap.timer = setTimeout((): void => {
       bootstrap.timer = null;
       next();
@@ -473,7 +477,7 @@ export class TokenExchangeFlow {
         this.endSession();
         return;
       }
-      this.retry(bootstrap, result, resume, 'connectToken', this.connectTokenError(err));
+      this.retry(bootstrap, result, resume, 'connectToken', this.host.createError(errorCodes.clientConnectToken, err?.toString() ?? ''));
       return;
     }
     if (!this.isCurrent(bootstrap)) {
@@ -491,48 +495,25 @@ export class TokenExchangeFlow {
   }
 
 
-  // The error of a bootstrap step that could not get the access token: reported as connectToken.
-  private connectTokenError(err: any): any {
-    return this.host.createError(errorCodes.clientConnectToken, err?.toString() ?? '');
-  }
-
-
   // Reports a refusal inside the grace horizon, and runs the bootstrap again on the same connection after a backoff that
   // ends no later than the horizon. The horizon is checked again once the report is handled: a session that ends meanwhile
   // is ended, not retried.
   private refused(bootstrap: Bootstrap, result: any, resume: (result: any) => void): void {
-    if (!this.isCurrent(bootstrap)) {
-      return;
-    }
-    const ctx: any = { type: 'connectToken', error: this.host.createError(errorCodes.clientConnectToken, refusedMessage) };
-    this.host.emitError(ctx, (): void => {
-      if (!this.isCurrent(bootstrap)) {
-        return;
-      }
+    this.reported(bootstrap, 'connectToken', this.host.createError(errorCodes.clientConnectToken, refusedMessage), (): void => {
       if (this.horizonPassed()) {
         this.endSession();
         return;
       }
-      const delay: number = Math.min(backoff(this.refusals, 1000, 8000), this.horizon() - performance.now());
-      this.refusals++;
-      bootstrap.timer = setTimeout((): void => {
-        bootstrap.timer = null;
+      this.after(bootstrap, Math.min(backoff(this.refusals++, 1000, 8000), this.horizon() - performance.now()), (): void => {
         this.start(bootstrap, result, resume);
-      }, delay);
+      });
     });
   }
 
 
   // Reports a failed step of a bootstrap, and runs the step again on the same connection after a backoff.
   private retry(bootstrap: Bootstrap, result: any, resume: (result: any) => void, type: string, error: any): void {
-    if (!this.isCurrent(bootstrap)) {
-      return;
-    }
-    const ctx: any = { type: type, error: error };
-    this.host.emitError(ctx, (): void => {
-      if (!this.isCurrent(bootstrap)) {
-        return;
-      }
+    this.reported(bootstrap, type, error, (): void => {
       this.backedOff(bootstrap, (): void => {
         this.start(bootstrap, result, resume);
       });
@@ -659,12 +640,6 @@ export class TokenExchangeFlow {
   }
 
 
-  // The rotated refresh token of an exchange result, or null when the issuer did not rotate it.
-  private rotated(used: string, result: TokenExchangeResult | undefined): string | null {
-    return result && result.refreshToken && result.refreshToken !== used ? result.refreshToken : null;
-  }
-
-
   // One exchange: the app's exchange callback, then the store of the rotated refresh token, awaited before the access
   // token is used. Resolves with the access token. The access token of an attempt that timed out, or was abandoned, is
   // not used, but its rotated refresh token is stored (see storeRotated): the issuer has already consumed the pair.
@@ -675,8 +650,8 @@ export class TokenExchangeFlow {
       rpc: (method: string, data: any): Promise<RpcResult> => this.rpc(attempt, method, data),
     });
     this.recordGrace(result ? result.grace : undefined);
-    const rotation: string | null = this.rotated(refreshToken, result);
-    if (rotation !== null) {
+    const rotation: string | undefined = result ? result.refreshToken : undefined;
+    if (rotation && rotation !== refreshToken) {
       await this.storeRotated(refreshToken, rotation, attempt);
     }
     if (!result || !result.token) {
