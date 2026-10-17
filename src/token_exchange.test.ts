@@ -1286,6 +1286,56 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
+  test('a refresh(token) made while a renewal waits in the exchange queue supersedes that renewal: the storage keeps the application token', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      const releases: ((result: TokenExchangeResult) => void)[] = [];
+      const c: Centrifuge = create({
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 2 || calls === 3) {
+            return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+              releases.push(resolve);
+            });
+          }
+          return issue(ctx);
+        },
+      });
+      await connectClient(c);
+
+      // The first renewal stalls: it times out, but its exchange stays in the queue until the exchange settles.
+      let timedOut: boolean = false;
+      c.refresh().then((): void => {
+        timedOut = true;
+      }, (): void => {
+        timedOut = true;
+      });
+      await until((): boolean => calls === 2);
+      await advanceUntil((): boolean => timedOut);
+
+      // The second renewal waits behind the stalled exchange; the refresh(token) call made meanwhile supersedes it.
+      c.refresh().then((): void => {}, (): void => {});
+      await flush();
+      c.refresh('access-b').then((): void => {}, (): void => {});
+      await flush();
+
+      releases[0]({ token: 'access-stalled' });
+      await until((): boolean => calls === 3);
+      // The application stores its own token while the second renewal's exchange is in flight.
+      stored = 'refresh-b';
+      releases[1]({ token: 'access-f', refreshToken: 'refresh-4' });
+      await flush();
+
+      expect(order.filter((entry: string): boolean => entry === 'store:refresh-4')).toHaveLength(0);
+      expect(stored).toBe('refresh-b');
+      expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).not.toContain('access-f');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a refresh(token) during a renewal exchange keeps the refresh token the application stored: the late rotation is not stored', async (): Promise<void> => {
     serve({ ttl: 2 });
     let calls: number = 0;

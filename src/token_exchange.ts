@@ -251,10 +251,13 @@ export class TokenExchangeFlow {
     if (running !== null && running.transportId === transportId) {
       return running.token;
     }
+    // Read now, not when the turn starts: a refresh(token) call made while this fetch waits in the queue supersedes it.
+    const generation: number = this.host.tokenGeneration();
     const token: Promise<string> = this.serialised((): Turn<string> => {
       const attempt: Attempt = this.attempt(
         (): Route => this.host.route(),
         (): boolean => this.host.isConnected() && this.host.transportId() === transportId,
+        generation,
       );
       return this.bounded(this.renewalToken(attempt), attempt);
     });
@@ -381,10 +384,10 @@ export class TokenExchangeFlow {
 
 
   // An attempt that is current while alive() holds and it has not been expired by its timeout. It is superseded once a
-  // refresh(token) call starts, which moves the token generation of the refresh slot on.
-  private attempt(route: () => Route, alive: () => boolean): Attempt {
+  // refresh(token) call starts after the generation it was made with, which moves the token generation of the refresh
+  // slot on. The caller reads the generation when it makes the attempt, before any wait for the exchange queue.
+  private attempt(route: () => Route, alive: () => boolean, generation: number): Attempt {
     let timedOut: boolean = false;
-    const generation: number = this.host.tokenGeneration();
     return {
       route: route,
       current: (): boolean => !timedOut && alive(),
@@ -460,6 +463,7 @@ export class TokenExchangeFlow {
     const attempt: Attempt = this.attempt(
       (): Route => ({ session: result.session, node: result.node }),
       (): boolean => this.isCurrent(bootstrap),
+      this.host.tokenGeneration(),
     );
     let token: string | null;
     try {
