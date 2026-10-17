@@ -1882,7 +1882,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       this._deviceWentOffline = false;
     }
 
-    this._tokenExchange?.reset(code === disconnectedCodes.disconnectCalled);
+    this._tokenExchange?.reset(reconnect);
     const ctx = {
       code: code,
       reason: reason

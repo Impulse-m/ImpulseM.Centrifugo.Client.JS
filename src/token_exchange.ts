@@ -86,10 +86,13 @@ export class TokenExchangeRefusedError extends UnauthorizedError {
  */
 class Refusal extends UnauthorizedError {
   terminal: boolean;
+  // Whether the storage was read again after the refusal: only such refusals count toward the one re-presentation.
+  reread: boolean;
 
-  constructor(terminal: boolean) {
+  constructor(terminal: boolean, reread: boolean) {
     super('refresh token refused');
     this.terminal = terminal;
+    this.reread = reread;
   }
 }
 
@@ -286,11 +289,11 @@ export class TokenExchangeFlow {
 
 
   /**
-   * Ends a bootstrap in progress, and its retry timer: called when the connection ends. A client-initiated end (the
-   * application called disconnect) also closes the refusal run; a transport loss keeps it, so a client that reconnects
-   * repeatedly still ends its session at the horizon.
+   * Ends a bootstrap in progress, and its retry timer: called when the connection ends. A connection that ends for good
+   * (the application's disconnect, or a server disconnect that does not reconnect) also closes the refusal run; a transport
+   * loss keeps it, so a client that reconnects repeatedly still ends its session at the horizon.
    */
-  reset(clientInitiated: boolean): void {
+  reset(reconnect: boolean): void {
     const bootstrap: Bootstrap | null = this.bootstrap;
     if (bootstrap !== null) {
       this.bootstrap = null;
@@ -299,7 +302,7 @@ export class TokenExchangeFlow {
         bootstrap.timer = null;
       }
     }
-    if (clientInitiated) {
+    if (!reconnect) {
       this.closeRun();
     }
   }
@@ -318,13 +321,13 @@ export class TokenExchangeFlow {
   // the next refusal of an unchanged value ends the session.
   private async renewalToken(attempt: Attempt): Promise<string> {
     let token: string | null = null;
-    let refused: boolean = false;
+    let refused: Refusal | null = null;
     try {
       token = await this.loadAndExchange(attempt);
     } catch (err: any) {
       // A refusal inside the horizon fails the fetch whether its attempt is still current or not: the session goes on.
       if (err instanceof Refusal && !err.terminal) {
-        refused = true;
+        refused = err;
       } else if (err instanceof UnauthorizedError) {
         // The session is over whether its attempt is still current or not: a connection lost during the exchange must not
         // reconnect with the access token it held. The client is already disconnected then, and the disconnect does nothing.
@@ -334,9 +337,11 @@ export class TokenExchangeFlow {
         throw err;
       }
     }
-    if (refused) {
-      // The retry of the refresh timer is the one re-presentation of the run.
-      this.refusals++;
+    if (refused !== null) {
+      // The retry of the refresh timer is the one re-presentation of the run, when the storage was read again.
+      if (refused.reread) {
+        this.refusals++;
+      }
       throw new Error(refusedMessage);
     }
     if (token === null) {
@@ -647,24 +652,29 @@ export class TokenExchangeFlow {
       if (!(err instanceof UnauthorizedError)) {
         throw err;
       }
+      // The client is gone for good (the application's or the server's disconnect): the session is over, and no run opens
+      // on it, so a later connect starts with a fresh horizon.
+      if (!this.host.isConnected() && !this.host.isConnecting()) {
+        throw new Refusal(true, false);
+      }
       // A refusal counts even when its attempt has already ended: the horizon is measured from the first refusal.
       this.openRun();
       if (!attempt.current()) {
         // The attempt ran on a connection that is gone: the refusal still counts against the horizon, and does not end the session.
-        throw new Refusal(this.horizonPassed());
+        throw new Refusal(this.horizonPassed(), false);
       }
       const current: string | null | undefined = await this.options.load();
       if (!attempt.current()) {
         throw this.closedError();
       }
       if (!current) {
-        throw new Refusal(true);
+        throw new Refusal(true, true);
       }
       // Each presentation of a different value is bounded by the change itself: a value presented here was stored after the one refused.
       if (current !== refreshToken) {
         return this.exchangeRefresh(current, attempt);
       }
-      throw new Refusal(this.horizonPassed() || this.refusals >= maxRefusalRetries);
+      throw new Refusal(this.horizonPassed() || this.refusals >= maxRefusalRetries, true);
     }
   }
 

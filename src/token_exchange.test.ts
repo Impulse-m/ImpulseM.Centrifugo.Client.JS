@@ -19,14 +19,18 @@ function commandKind(cmd: any): string {
   return Object.keys(cmd).find((key: string): boolean => key !== 'id' && cmd[key] !== null && cmd[key] !== undefined) ?? '';
 }
 
+// The per-test timeout of this file: the waits below are bounded by their own budgets, and a slow runner must not fail them.
+jest.setTimeout(20000);
+
 /**
  * Advances the fake clock in steps of stepMs (half a second by default) until the condition holds. Between the steps the
- * socket gets its real turns, so a reconnect opens within the connect timeout of the fake clock.
+ * socket gets a few real turns, so a reconnect opens within the connect timeout of the fake clock. The turns are few on
+ * purpose: a wait of a minute and a half of fake time is about 180 steps, and every step's turns are real time.
  */
 async function advanceUntil(condition: () => boolean, maxSteps: number = 200, stepMs: number = 500): Promise<void> {
   for (let step: number = 0; step < maxSteps && !condition(); step++) {
     jest.advanceTimersByTime(stepMs);
-    for (let turn: number = 0; turn < 200 && !condition(); turn++) {
+    for (let turn: number = 0; turn < 20 && !condition(); turn++) {
       await new Promise<void>((resolve: () => void): void => {
         setImmediate(resolve);
       });
@@ -35,9 +39,9 @@ async function advanceUntil(condition: () => boolean, maxSteps: number = 200, st
   expect(condition()).toBe(true);
 }
 
-/** Polls the condition every 10 milliseconds of real time, for the tests whose timers are real. */
+/** Polls the condition every 10 milliseconds of real time, for the tests whose timers are real: up to 15 seconds. */
 async function poll(condition: () => boolean): Promise<void> {
-  for (let turn: number = 0; turn < 500 && !condition(); turn++) {
+  for (let turn: number = 0; turn < 1500 && !condition(); turn++) {
     await new Promise<void>((resolve: () => void): void => {
       setTimeout(resolve, 10);
     });
@@ -795,6 +799,93 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       // have ended the session 5 seconds after this connect.
       expect(verdictAt - refusedAt).toBeGreaterThanOrEqual(9990);
       expect(verdictAt - refusedAt).toBeLessThanOrEqual(10010);
+      expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(1);
+    } finally {
+      random.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  test('a server disconnect that does not reconnect closes the refusal run: the next connect gets a fresh horizon', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    // The re-presentation draws the middle of the grace, so the first run is still open when the server disconnects.
+    const random: jest.SpyInstance = jest.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      const presented: string[] = [];
+      const c: Centrifuge = create({
+        grace: 10,
+        exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          presented.push(ctx.refreshToken);
+          throw new UnauthorizedError('refused');
+        },
+      });
+      const events: string[] = record(c);
+      c.connect();
+      await until((): boolean => events.includes('error:connectToken'));
+      // The server ends the connection with a code that does not reconnect: the run ends with the connection.
+      server.disconnect(3500, 'closed');
+      await until((): boolean => c.state === State.Disconnected);
+      await flush();
+      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual(['disconnected:3500']);
+
+      // Past the horizon of the first run: the next connect's first refusal still gets its re-presentation.
+      jest.advanceTimersByTime(12000);
+      const before: number = presented.length;
+      c.connect();
+      await advanceUntil((): boolean => c.state === State.Disconnected);
+
+      expect(presented.length - before).toBe(2);
+      expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(1);
+    } finally {
+      random.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  test('a renewal refused after its connection was lost does not count as the re-presentation: the next refusal of the unchanged token gets it', async (): Promise<void> => {
+    serve({
+      ttl: 100,
+      connect: (cmd: any): any => (cmd.connect.token ? { id: cmd.id, connect: { ...server.connectResult, user: 'alice', expires: true, ttl: 100 } } : undefined),
+    });
+    useFakeClock();
+    // The renewal is due 80 seconds on, and the refresh retries come 7.5 seconds apart. The grace is long, so the calls
+    // after the lost connection all fall inside the horizon: only the count of refusals decides the verdict.
+    const random: jest.SpyInstance = jest.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      let calls: number = 0;
+      let refuse: (err: any) => void = (): void => {};
+      const c: Centrifuge = create({
+        grace: 300,
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 1) {
+            return issue(ctx);
+          }
+          if (calls === 2) {
+            return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult | PromiseLike<TokenExchangeResult>) => void): void => {
+              refuse = (err: any): void => {
+                resolve(Promise.reject(err));
+              };
+            });
+          }
+          throw new UnauthorizedError('refused');
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+      await advanceUntil((): boolean => calls === 2);
+
+      // The connection is lost while the renewal is in flight, and the issuer refuses the token after the connection is gone:
+      // that refusal was never read again, so it does not count toward the one re-presentation.
+      server.closeConnection();
+      await flush();
+      refuse(new UnauthorizedError('refused'));
+      await flush();
+
+      // The reconnect keeps the token and its renewal is refused inside the horizon: that refusal is the one re-presentation.
+      await advanceUntil((): boolean => c.state === State.Disconnected, 1000);
+      expect(calls).toBe(4);
       expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(1);
     } finally {
       random.mockRestore();
