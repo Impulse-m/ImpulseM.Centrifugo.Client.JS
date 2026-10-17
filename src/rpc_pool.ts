@@ -195,7 +195,7 @@ export class RpcPool {
     this.maxQueued = integerOption('maxQueued', options.maxQueued, defaultMaxQueued, 0);
     this.idleTimeout = integerOption('idleTimeout', options.idleTimeout, defaultIdleTimeout, 0);
     if (this.idleTimeout > maxTimerDelay) {
-      throw poolError(errorCodes.badConfiguration, 'idleTimeout must be at most 2147483647 milliseconds');
+      throw poolError(errorCodes.badConfiguration, `idleTimeout must be at most ${maxTimerDelay} milliseconds`);
     }
     this.retries = integerOption('retries', options.retries, maxLaterResends, 0);
     this.redirects = new RedirectGate(integerOption('maxRedirectsInflight', options.maxRedirectsInflight, defaultMaxRedirectsInflight, 1), this.maxQueued);
@@ -495,11 +495,16 @@ export class RpcPool {
   // Opens a connection to an endpoint. Its connect is in flight until its first connected event.
   private open(group: RpcPoolEndpoint, url: string): PoolConnection {
     const source: TokenSource | null = this.source;
-    // The connection exists before its client: the token getter of the client is bound to it.
+    // The token getter of the client is bound to the connection below. The getter runs only from connect(), which is
+    // called after the connection exists.
+    const options: Partial<Options> = source === null
+      ? this.connectionOptions
+      : { ...this.connectionOptions, getToken: (): Promise<string> => this.tokenOf(conn, source) };
+    const client: CentrifugeProtobuf = new CentrifugeProtobuf(url, options);
     const conn: PoolConnection = {
       url: url,
       group: group,
-      client: undefined as unknown as CentrifugeProtobuf,
+      client: client,
       inflight: 0,
       connecting: true,
       closeCode: null,
@@ -509,11 +514,6 @@ export class RpcPool {
       generation: null,
       retired: false,
     };
-    const options: Partial<Options> = source === null
-      ? this.connectionOptions
-      : { ...this.connectionOptions, getToken: (): Promise<string> => this.tokenOf(conn, source) };
-    const client: CentrifugeProtobuf = new CentrifugeProtobuf(url, options);
-    conn.client = client;
     client.on('connected', (): void => {
       conn.connecting = false;
       this.dispatch(group);
@@ -765,9 +765,16 @@ export class RpcPool {
 
   // Fetches a redirect for a call, once a redirect slot is free. The call settles with the bytes or with the failure.
   private fetchInto(call: PendingCall, endpoint: string, redirect: RpcPoolRedirect): void {
+    // A fetch which would wait for a slot waits in the pool-wide count of maxQueued, like a call waiting for a connection.
+    if (this.redirects.full && this.queued >= this.maxQueued) {
+      this.fail(call, poolError(errorCodes.limitExceeded, 'too many redirects waiting for a fetch slot'));
+      return;
+    }
     const controller: AbortController = new AbortController();
     call.controller = controller;
+    this.count(call);
     this.redirects.acquire(controller.signal).then((release: () => void): void => {
+      this.uncount(call);
       fetchRedirect(this.fetchOf(), endpoint, redirect, controller.signal).then(
         (data: Uint8Array): void => {
           release();

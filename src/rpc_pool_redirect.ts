@@ -35,6 +35,12 @@ export class RedirectGate {
   }
 
 
+  /** True when every slot is held, so a fetch asked now would wait for one. */
+  get full(): boolean {
+    return this.running >= this.limit;
+  }
+
+
   /** Resolves with the release of a slot once one is free; rejects when the signal aborts first. */
   acquire(signal: AbortSignal): Promise<() => void> {
     return new Promise<() => void>((resolve: (release: () => void) => void, reject: (error: any) => void): void => {
@@ -42,8 +48,9 @@ export class RedirectGate {
         reject(poolError(errorCodes.cancelled, 'cancelled'));
         return;
       }
-      // A fetch which would wait beyond the bound is refused, as a call beyond maxQueued is.
-      if (this.waiters.size >= this.maxWaiters) {
+      // A fetch which would wait beyond the bound is refused, as a call beyond maxQueued is. A fetch which gets a slot
+      // at once waits for nothing, so a zero bound still lets one fetch run.
+      if (this.full && this.waiters.size >= this.maxWaiters) {
         reject(poolError(errorCodes.limitExceeded, 'too many redirects waiting for a fetch slot'));
         return;
       }

@@ -700,7 +700,7 @@ const result = await pool.rpc("part.write", chunk, {endpointKey: "eu-2", affinit
 | `retries` | `3` | resends of a call lost with its connection, refused with the `later` signal, or moved by `reroute`, counted together |
 | `reroute(error)` | none | returns the endpoint key a server error moves the call to, or `undefined` |
 | `redirect(reply, error)` | none | returns `{url, headers?, maxBytes?}` when the bytes of the call are served elsewhere, or `undefined` |
-| `maxRedirectsInflight` | `4` | redirect fetches in flight over the pool. A fetch which would wait beyond `maxQueued` fetches rejects with `limitExceeded` |
+| `maxRedirectsInflight` | `4` | redirect fetches in flight over the pool. A fetch which would wait while `maxQueued` calls already wait rejects with `limitExceeded`; a fetch waiting for a slot counts in `stats().queued` |
 | `fetch` | `globalThis.fetch` | the fetch function of redirects |
 
 `rpc(method, data, {endpointKey, affinity, headers, signal, timeout})` resolves with `{data, cached}` like `Centrifuge.rpc`. `timeout` defaults to the connection's `timeout` and covers the resends and the redirect fetch of the call. It is at most the connection's `timeout`, because a reply is bounded by that timeout: a longer call needs a larger `connection.timeout`. The redirect fetch counts in the same deadline, so a redirected body the link cannot carry in that time rejects with `timeout`: 16 MiB over a 2 Mbit/s link takes about 64 s, and a fleet which serves such bodies raises `connection.timeout` for its pool. A `timeout` that is not a positive number, or is above the connection's, rejects with `badConfiguration` before the call is sent.

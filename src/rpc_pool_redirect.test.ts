@@ -20,6 +20,25 @@ describe('RedirectGate', () => {
     expect(gate.inflight).toBe(0);
   });
 
+  test('a zero maxWaiters still grants a free slot, and refuses only a fetch which would wait', async (): Promise<void> => {
+    const gate: RedirectGate = new RedirectGate(1, 0);
+    const release: () => void = await gate.acquire(new AbortController().signal);
+    expect(gate.full).toBe(true);
+    let refused: any;
+    try {
+      await gate.acquire(new AbortController().signal);
+    } catch (e) {
+      refused = e;
+    }
+    expect(refused.code).toBe(errorCodes.limitExceeded);
+    release();
+    expect(gate.inflight).toBe(0);
+    expect(gate.full).toBe(false);
+    const again: () => void = await gate.acquire(new AbortController().signal);
+    expect(gate.inflight).toBe(1);
+    again();
+  });
+
   test('an aborted waiter leaves the line without taking a slot, and the others are granted in arrival order', async (): Promise<void> => {
     const gate: RedirectGate = new RedirectGate(1, 8);
     const release: () => void = await gate.acquire(new AbortController().signal);
