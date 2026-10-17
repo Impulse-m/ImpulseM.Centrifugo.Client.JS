@@ -5,7 +5,8 @@ With the `tokenExchange` option the application persists one long-lived refresh 
 The option has three callbacks. `load` returns the refresh token the application stored, or `null` when there is none, and it is called before every exchange. `store` persists a rotated refresh token, and the SDK awaits it before it uses the access token that came with it. `exchange` gets the refresh token and a `ctx.rpc(method, data)` function that sends a plain rpc call over the connection the exchange runs on. The exchange calls its own rpc method with the refresh token, decodes the reply, and resolves `{ token, refreshToken }`, where `refreshToken` is present only when the issuer rotated it. When the issuer refuses the refresh token, the refusal is classified by the error name the server sent (see `refusalTypes` below), and the SDK runs a refusal run before it ends the session.
 
 ```javascript
-import { Centrifuge } from '@impulsem/centrifuge';
+// The import path is the package the application installs.
+import { Centrifuge } from 'centrifuge';
 
 const centrifuge = new Centrifuge('wss://example.com/connection/websocket', {
   tokenExchange: {
