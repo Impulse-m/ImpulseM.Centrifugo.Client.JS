@@ -662,7 +662,7 @@ Deploy the server before the clients that use the identity fields: a server that
 
 ## RPC pool for large payloads
 
-`RpcPool` carries calls with large payloads (chunks of a few hundred KiB to a few MiB) over several connections, so that one transfer does not hold up the others. It is an ordinary client on a server configured for large frames: see the server's large-payload fleet. The pool speaks protobuf only, and it is exported from both entry points.
+`RpcPool` carries calls with large payloads (chunks of a few hundred KiB to a few MiB) over several connections, so that one transfer does not hold up the others. It is an ordinary client on a server configured for large frames: see the server's large-payload fleet. The pool speaks protobuf only, so it is exported from the protobuf entry (`@impulsem/centrifuge/build/protobuf`) and not from the JSON entry: a pool needs the protobuf entry, and the JSON entry does not load the protobuf codec for an application that creates no pool.
 
 ```javascript
 const pool = new RpcPool({
