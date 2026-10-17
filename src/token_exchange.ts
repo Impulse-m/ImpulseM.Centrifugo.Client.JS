@@ -217,7 +217,9 @@ export class TokenExchangeFlow {
       return false;
     }
     if (result.user) {
-      this.tokenAccepted();
+      if (this.host.token() !== '') {
+        this.tokenAccepted();
+      }
       return false;
     }
     this.host.setToken('');
@@ -408,11 +410,11 @@ export class TokenExchangeFlow {
   // holds no refresh token.
   private async loadAndExchange(attempt: Attempt): Promise<string | null> {
     const refreshToken: string | null | undefined = await this.options.load();
-    if (!attempt.current()) {
-      throw this.closedError();
-    }
     if (!refreshToken) {
       return null;
+    }
+    if (!attempt.current()) {
+      throw this.closedError();
     }
     return this.exchangeRefresh(refreshToken, attempt);
   }
@@ -680,11 +682,11 @@ export class TokenExchangeFlow {
         throw new Refusal(this.horizonPassed(), false);
       }
       const current: string | null | undefined = await this.options.load();
-      if (!attempt.current()) {
-        throw this.closedError();
-      }
       if (!current) {
         throw new Refusal(true, true);
+      }
+      if (!attempt.current()) {
+        throw this.closedError();
       }
       // Each presentation of a different value is bounded by the change itself: a value presented here was stored after the one refused.
       if (current !== refreshToken) {
@@ -704,7 +706,6 @@ export class TokenExchangeFlow {
       refreshToken: refreshToken,
       rpc: (method: string, data: any): Promise<RpcResult> => this.rpc(attempt, method, data),
     });
-    this.recordGrace(result ? result.grace : undefined);
     const rotation: string | undefined = result ? result.refreshToken : undefined;
     if (rotation && rotation !== refreshToken) {
       await this.storeRotated(refreshToken, rotation, attempt);
@@ -712,6 +713,7 @@ export class TokenExchangeFlow {
     if (!result || !result.token) {
       throw new Error('token exchange returned no token');
     }
+    this.recordGrace(result.grace);
     this.closeRun();
     if (!attempt.current()) {
       throw this.closedError();
