@@ -1,8 +1,10 @@
 import { Centrifuge, UnauthorizedError } from './centrifuge';
 import { errorCodes } from './codes';
+import { RefreshSlot } from './refresh_slot';
 import { CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, holdReply, until } from './testing/codecs';
+import { FakeRefreshHost } from './testing/refresh_slot_host';
 import { Options, State, TokenExchange, TokenExchangeContext, TokenExchangeResult } from './types';
-import type { ClientHost } from './client_host';
+import type { TokenExchangeHost } from './client_host';
 import { TokenExchangeFlow, TokenExchangeRefusedError } from './token_exchange';
 
 // The token exchange of the tokenExchange option, over both codecs. The fake issuer answers the exchange rpc, and every
@@ -921,6 +923,12 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       .toThrow('tokenExchange.grace');
     expect(() => codecCase.createClient(server.url, { tokenExchange: tokenExchange({ grace: Number.NaN }) }))
       .toThrow('tokenExchange.grace');
+  });
+
+  test('a null refusalTypes or grace, from an untyped caller, is absent: the defaults apply', async (): Promise<void> => {
+    expect(() => codecCase.createClient(server.url, {
+      tokenExchange: tokenExchange({ refusalTypes: null as any, grace: null as any }),
+    })).not.toThrow();
   });
 
   test('the application disconnect closes the refusal run, so the next connect has a fresh horizon', async (): Promise<void> => {
@@ -1945,10 +1953,12 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
-  test('a renewal refusal that arrives after the connection was lost and reconnected stays inside the horizon: the session goes on', async (): Promise<void> => {
+  test('a renewal refusal that arrives after the connection was lost and reconnected is dropped: no error is reported, the session goes on', async (): Promise<void> => {
     serve({
       ttl: 100,
-      connect: (cmd: any): any => (cmd.connect.token ? { id: cmd.id, connect: { ...server.connectResult, user: 'alice' } } : undefined),
+      // The reconnect gets a client id of its own, as every connection does: the renewal of the lost connection is then
+      // no longer the client's, and its failure is not reported.
+      connect: (cmd: any): any => (cmd.connect.token ? { id: cmd.id, connect: { ...server.connectResult, client: 'reconnected', user: 'alice' } } : undefined),
     });
     useFakeClock();
     try {
@@ -1977,17 +1987,19 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       await advanceUntil((): boolean => commands('connect').length === 2 && c.state === State.Connected);
       expect(commands('connect').map((cmd: any): string => cmd.connect.token ?? '')).toEqual(['', 'access-1']);
 
-      // The issuer refuses the token on the old connection. A refusal inside the horizon fails the fetch, and the session goes on.
+      // The issuer refuses the token of the old connection. That attempt is no longer current: its refusal is dropped, so
+      // it neither reports an error nor arms a retry, and the session goes on on the connection it has.
       refuse(new UnauthorizedError('refused'));
-      await advanceUntil((): boolean => events.includes('error:refreshToken'));
+      await flush();
+      expect(events).not.toContain('error:refreshToken');
       expect(events).not.toContain('disconnected:1');
       expect(c.state).toBe(State.Connected);
 
-      // The refresh timer retries with a new exchange, which succeeds on the connection.
+      // No exchange follows from the dropped refusal, and the connection keeps the access token it was given.
       jest.advanceTimersByTime(10000);
-      await until((): boolean => commands('refresh').length === 2);
-      expect(calls).toBe(3);
-      expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1', 'access-2']);
+      await flush();
+      expect(calls).toBe(2);
+      expect(events).not.toContain('error:refreshToken');
       expect(events).not.toContain('disconnected:1');
       expect(c.state).toBe(State.Connected);
     } finally {
@@ -2439,7 +2451,7 @@ describe('TokenExchangeFlow horizon', (): void => {
     try {
       // The page is older than the default grace of 30 seconds, and no refusal has opened a run.
       jest.advanceTimersByTime(60000);
-      const flow: TokenExchangeFlow = new TokenExchangeFlow({} as ClientHost, {
+      const flow: TokenExchangeFlow = new TokenExchangeFlow({} as TokenExchangeHost, {
         load: (): string => 'refresh-1',
         store: (): void => {},
         exchange: (): Promise<TokenExchangeResult> => Promise.reject(new Error('not called')),
@@ -2449,5 +2461,34 @@ describe('TokenExchangeFlow horizon', (): void => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('a refresh() without a token that a refresh(token) call overlaps', (): void => {
+  test('a getToken client sends the token it fetched, then the token of the call, as it always did', async (): Promise<void> => {
+    const host: FakeRefreshHost = new FakeRefreshHost();
+    host.getTokenSet = true;
+    const slot: RefreshSlot = new RefreshSlot(host);
+    host.slot = slot;
+    const explicit: Promise<any> = slot.call(undefined);
+    const later: Promise<any> = slot.call('tok2');
+    host.resolveFetch('fetched');
+    await expect(explicit).resolves.toMatchObject({ ttl: 60 });
+    await expect(later).resolves.toMatchObject({ ttl: 60 });
+    expect(host.sent).toEqual([{ refresh: { token: 'fetched' } }, { refresh: { token: 'tok2' } }]);
+  });
+
+  test('with the token exchange, the token fetched is superseded and not sent, and the call resolves at once', async (): Promise<void> => {
+    const host: FakeRefreshHost = new FakeRefreshHost();
+    host.getTokenSet = true;
+    host.exchange = true;
+    const slot: RefreshSlot = new RefreshSlot(host);
+    host.slot = slot;
+    const explicit: Promise<any> = slot.call(undefined);
+    const later: Promise<any> = slot.call('tok2');
+    host.resolveFetch('fetched');
+    await expect(explicit).resolves.toMatchObject({ ttl: 0 });
+    await expect(later).resolves.toMatchObject({ ttl: 60 });
+    expect(host.sent).toEqual([{ refresh: { token: 'tok2' } }]);
   });
 });

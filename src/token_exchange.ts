@@ -1,6 +1,6 @@
 import { raceCall } from './call_timer';
 import { connectingCodes, errorCodes } from './codes';
-import type { ClientHost } from './client_host';
+import type { TokenExchangeHost } from './client_host';
 import type { CallRejectContext, CallResolveContext } from './rpc_tracker';
 import { refreshRetries } from './refresh_slot';
 import type { Error as ServerError, Options, RpcResult, ServerErrorFields } from './types';
@@ -162,7 +162,7 @@ interface Turn<T> {
  * hooks check for that.
  */
 export class TokenExchangeFlow {
-  private host: ClientHost;
+  private host: TokenExchangeHost;
   private options: TokenExchange;
   private refusalTypes: Set<string>;
   // The grace of the option, or the default: the grace of a refusal run when the latest accepted result publishes none.
@@ -187,11 +187,11 @@ export class TokenExchangeFlow {
   private connectSentToken: boolean = false;
 
 
-  constructor(host: ClientHost, options: TokenExchange) {
+  constructor(host: TokenExchangeHost, options: TokenExchange) {
     this.host = host;
     this.options = options;
     this.refusalTypes = new Set<string>(options.refusalTypes ?? []);
-    this.optionGrace = options.grace === undefined ? defaultGrace : Math.min(options.grace, maxGrace);
+    this.optionGrace = Math.min(options.grace ?? defaultGrace, maxGrace);
     this.grace = this.optionGrace;
   }
 
@@ -315,6 +315,7 @@ export class TokenExchangeFlow {
     }
     if (!reconnect) {
       this.closeRun();
+      this.failures = 0;
     }
   }
 
@@ -479,7 +480,8 @@ export class TokenExchangeFlow {
   }
 
 
-  // Runs next after the delay, on the retry timer of the bootstrap, which reset() clears.
+  // Runs next after the delay, on the retry timer of the bootstrap, which reset() clears. A plain timer, not callTimer: its
+  // late-run grace would hold a retry past the grace horizon, which the refusal run must not do.
   private after(bootstrap: Bootstrap, delay: number, next: () => void): void {
     bootstrap.timer = setTimeout((): void => {
       bootstrap.timer = null;
@@ -682,12 +684,11 @@ export class TokenExchangeFlow {
       if (!this.host.isConnected() && !this.host.isConnecting()) {
         throw new Refusal(true, false);
       }
-      // A refusal counts even when its attempt has already ended: the horizon is measured from the first refusal.
-      this.openRun();
+      // A stale attempt drops its outcome, a refusal included: it opens no run and ends no session.
       if (!attempt.current()) {
-        // The attempt ran on a connection that is gone: the refusal still counts against the horizon, and does not end the session.
-        throw new Refusal(this.horizonPassed(), false);
+        throw this.closedError();
       }
+      this.openRun();
       const current: string | null | undefined = await this.options.load();
       if (!attempt.current()) {
         throw this.closedError();
@@ -865,7 +866,7 @@ export class TokenExchangeFlow {
  * setting both throws, and so does a refusal name that is not a non-empty string, a grace that is not a finite
  * number of seconds from 0 up, or a callback (load, store, exchange) that is not a function.
  */
-export function createTokenExchangeFlow(host: ClientHost, options: Options): TokenExchangeFlow | null {
+export function createTokenExchangeFlow(host: TokenExchangeHost, options: Options): TokenExchangeFlow | null {
   const tokenExchange: TokenExchange | null | undefined = options.tokenExchange;
   if (!tokenExchange) {
     return null;
@@ -874,12 +875,12 @@ export function createTokenExchangeFlow(host: ClientHost, options: Options): Tok
     throw new Error('tokenExchange and getToken are exclusive');
   }
   const refusalTypes: string[] | undefined = tokenExchange.refusalTypes;
-  if (refusalTypes !== undefined && (!Array.isArray(refusalTypes)
+  if (refusalTypes != null && (!Array.isArray(refusalTypes)
     || !refusalTypes.every((name: string): boolean => typeof name === 'string' && name !== ''))) {
     throw new Error('tokenExchange.refusalTypes: entries must be non-empty strings');
   }
   const grace: number | undefined = tokenExchange.grace;
-  if (grace !== undefined && (typeof grace !== 'number' || !Number.isFinite(grace) || grace < 0)) {
+  if (grace != null && (typeof grace !== 'number' || !Number.isFinite(grace) || grace < 0)) {
     throw new Error('tokenExchange.grace: must be a finite number of seconds, 0 or more');
   }
   if (typeof tokenExchange.load !== 'function' || typeof tokenExchange.store !== 'function'

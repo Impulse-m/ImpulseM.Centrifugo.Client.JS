@@ -10,8 +10,13 @@ import { ttlMilliseconds } from './utils';
 export interface ClientHost extends RpcHost, RefreshSlotHost, WriteHost {
   /** Arms the refresh timer in place of the one armed before: refresh runs after the delay in milliseconds. */
   scheduleRefresh(delay: number, refresh: () => void): void;
-  /** Arms the refresh timer for the expiry of the connection token, from the ttl of the reply that set it. */
-  scheduleExpiry(ttl: number, refresh: () => void): void;
+}
+
+/**
+ * The members the token exchange flow adds to the host, created by createTokenExchangeHost only when the tokenExchange
+ * option is set: a client without the option holds none of them.
+ */
+export interface TokenExchangeHost extends ClientHost {
   /** Whether the server asked for a fresh connection token (a 109 at the last connect). */
   refreshRequired(): boolean;
   /** Resets the request for a fresh connection token, once the connect goes out without one. */
@@ -57,9 +62,6 @@ export function createClientHost(client: Centrifuge): ClientHost {
     client['_clearRefreshTimeout']();
     client['_refreshTimeout'] = setTimeout(refresh, delay);
   };
-  const scheduleExpiry = (ttl: number, refresh: () => void): void => {
-    scheduleRefresh(client['_tokenExchange']?.expiryDelay(ttl) ?? ttlMilliseconds(ttl), refresh);
-  };
   return {
     isConnected: (): boolean => client['_isConnected'](),
     createError: (code: number, message: string): any => client['_createErrorObject'](code, message),
@@ -86,7 +88,6 @@ export function createClientHost(client: Centrifuge): ClientHost {
     },
     debug: (message: string, ...args: any[]): void => client['_debug'](message, ...args),
     scheduleRefresh: scheduleRefresh,
-    scheduleExpiry: scheduleExpiry,
     armRefreshRetry: (): void => {
       scheduleRefresh(client['_getRefreshRetryDelay'](), (): void => client['_refresh']());
     },
@@ -101,7 +102,7 @@ export function createClientHost(client: Centrifuge): ClientHost {
         if (result.client) {
           client['_client'] = result.client;
         }
-        scheduleExpiry(result.ttl, (): void => client['_refresh']());
+        scheduleRefresh(client['_tokenExchange']?.expiryDelay(result.ttl) ?? ttlMilliseconds(result.ttl), (): void => client['_refresh']());
       }
       client['_identity'].applyRefresh(result);
     },
@@ -132,6 +133,19 @@ export function createClientHost(client: Centrifuge): ClientHost {
     disconnectWriteFailed: (): void => {
       client['_disconnect'](connectingCodes.transportClosed, 'transport write error', true);
     },
+    tokenSuperseded: (generation: number): boolean => client['_tokenExchange'] !== null
+      && client['_refreshSlot'].currentTokenGeneration() !== generation,
+  };
+}
+
+
+/**
+ * The host of the token exchange flow: the host of createClientHost plus the members only the flow uses. Called only when
+ * the tokenExchange option is set, so a client without the option allocates none of them.
+ */
+export function createTokenExchangeHost(client: Centrifuge, host: ClientHost): TokenExchangeHost {
+  return {
+    ...host,
     refreshRequired: (): boolean => client['_refreshRequired'],
     clearRefreshRequired: (): void => {
       client['_refreshRequired'] = false;
@@ -154,7 +168,5 @@ export function createClientHost(client: Centrifuge): ClientHost {
       client['_reportDispatchError'](err);
     },
     tokenGeneration: (): number => client['_refreshSlot'].currentTokenGeneration(),
-    tokenSuperseded: (generation: number): boolean => client['_tokenExchange'] !== null
-      && client['_refreshSlot'].currentTokenGeneration() !== generation,
   };
 }

@@ -19,7 +19,7 @@ import { JsonCodec } from './json';
 
 import {
   isFunction, log, startsWith, errorExists,
-  backoff, localStorageItem,
+  backoff, ttlMilliseconds, localStorageItem,
   hasOffset, toOffset,
 } from './utils';
 
@@ -30,7 +30,7 @@ import { normaliseRpcOptions, loggedConfig } from './rpc_options';
 
 import { addWaiter, CallTimer, callTimer } from './call_timer';
 import { CallRejectContext, CallResolveContext, RpcTracker } from './rpc_tracker';
-import { ClientHost, createClientHost } from './client_host';
+import { ClientHost, createClientHost, createTokenExchangeHost } from './client_host';
 import { writeCommands } from './write_commands';
 import { RefreshSlot, refreshKeepsConnection, refreshRetries } from './refresh_slot';
 import { ConnectionIdentity } from './identity';
@@ -714,7 +714,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
     this._codec = new JsonCodec();
     this._formatOverride();
-    this._tokenExchange = createTokenExchangeFlow(this._host, this._config);
+    this._tokenExchange = this._config.tokenExchange
+      ? createTokenExchangeFlow(createTokenExchangeHost(this, this._host), this._config)
+      : null;
 
     if (this._config.debug === true || localStorageItem('centrifuge.debug')) {
       this._debugEnabled = true;
@@ -2219,7 +2221,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
     this._clearRefreshTimeout();
     if (result.expires) {
-      this._host.scheduleExpiry(result.ttl, () => this._refresh());
+      this._host.scheduleRefresh(this._tokenExchange?.expiryDelay(result.ttl) ?? ttlMilliseconds(result.ttl), () => this._refresh());
     }
 
     this._session = result.session;

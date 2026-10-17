@@ -1,82 +1,9 @@
 import { errorCodes } from './codes';
-import { refreshKeepsConnection, refreshRetries, RefreshSlot, RefreshSlotHost } from './refresh_slot';
+import { refreshKeepsConnection, refreshRetries, RefreshSlot } from './refresh_slot';
+import { FakeRefreshHost } from './testing/refresh_slot_host';
 
 // The policy of a timer-driven refresh for each server error: retried, kept, or disconnected. An explicit
 // refresh() is never retried, so it does not use this policy.
-
-// A host of the refresh slot that records the commands sent and the retries armed. The connection state is a flag
-// the test sets: a flag set right after a send() call runs in the microtask gap between the claim of the command
-// slot and the write of the command, where nothing else of the client runs.
-class FakeRefreshHost implements RefreshSlotHost {
-  connected: boolean = true;
-  sent: any[] = [];
-  armed: number = 0;
-  // Whether the client has a getToken function, and whether the token it gives comes from the token exchange.
-  getTokenSet: boolean = false;
-  exchange: boolean = false;
-  // The slot the host serves: its token generation is read from it.
-  slot: RefreshSlot | null = null;
-  // Settles the getToken call in flight.
-  resolveFetch: (token: string) => void = (): void => {};
-  private tokenValue: string = 'old';
-
-  isConnected(): boolean {
-    return this.connected;
-  }
-
-  waitConnected(): Promise<void> {
-    return this.connected ? Promise.resolve() : new Promise<void>((): void => {});
-  }
-
-  createError(code: number, message: string): any {
-    return { code: code, message: message };
-  }
-
-  sendCommand(command: any): Promise<any> {
-    this.sent.push(command);
-    return Promise.resolve({ reply: { refresh: { ttl: 60 } }, next: (): void => {} });
-  }
-
-  hasGetToken(): boolean {
-    return this.getTokenSet;
-  }
-
-  getToken(): Promise<string> {
-    return new Promise<string>((resolve: (token: string) => void): void => {
-      this.resolveFetch = resolve;
-    });
-  }
-
-  tokenGeneration(): number {
-    return this.slot === null ? 0 : this.slot.currentTokenGeneration();
-  }
-
-  tokenSuperseded(generation: number): boolean {
-    return this.exchange && this.tokenGeneration() !== generation;
-  }
-
-  token(): string {
-    return this.tokenValue;
-  }
-
-  setToken(token: string): void {
-    this.tokenValue = token;
-  }
-
-  debug(): void {}
-
-  applyReply(): void {}
-
-  armRefreshRetry(): void {
-    this.armed++;
-  }
-
-  identity(): any {
-    return { context: (ttl: number): any => ({ ttl: ttl }) };
-  }
-
-  dispatchFailed(): void {}
-}
 
 describe('a refresh command that finds the client disconnected after its slot is claimed', (): void => {
   test('send() releases the slot and rejects as unsent, without writing the command', async (): Promise<void> => {
@@ -102,35 +29,6 @@ describe('a refresh command that finds the client disconnected after its slot is
     host.connected = true;
     await expect(slot.send('next')).resolves.toMatchObject({ reply: { refresh: { ttl: 60 } } });
     expect(host.sent).toEqual([{ refresh: { token: 'next' } }]);
-  });
-});
-
-describe('a refresh() without a token that a refresh(token) call overlaps', (): void => {
-  test('a getToken client sends the token it fetched, then the token of the call, as it always did', async (): Promise<void> => {
-    const host: FakeRefreshHost = new FakeRefreshHost();
-    host.getTokenSet = true;
-    const slot: RefreshSlot = new RefreshSlot(host);
-    host.slot = slot;
-    const explicit: Promise<any> = slot.call(undefined);
-    const later: Promise<any> = slot.call('tok2');
-    host.resolveFetch('fetched');
-    await expect(explicit).resolves.toMatchObject({ ttl: 60 });
-    await expect(later).resolves.toMatchObject({ ttl: 60 });
-    expect(host.sent).toEqual([{ refresh: { token: 'fetched' } }, { refresh: { token: 'tok2' } }]);
-  });
-
-  test('with the token exchange, the token fetched is superseded and not sent, and the call resolves at once', async (): Promise<void> => {
-    const host: FakeRefreshHost = new FakeRefreshHost();
-    host.getTokenSet = true;
-    host.exchange = true;
-    const slot: RefreshSlot = new RefreshSlot(host);
-    host.slot = slot;
-    const explicit: Promise<any> = slot.call(undefined);
-    const later: Promise<any> = slot.call('tok2');
-    host.resolveFetch('fetched');
-    await expect(explicit).resolves.toMatchObject({ ttl: 0 });
-    await expect(later).resolves.toMatchObject({ ttl: 60 });
-    expect(host.sent).toEqual([{ refresh: { token: 'tok2' } }]);
   });
 });
 
