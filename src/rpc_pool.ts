@@ -9,6 +9,14 @@ import { fetchRedirect, RedirectGate } from './rpc_pool_redirect';
 import { poolError } from './rpc_pool_error';
 import type { Options, RpcOptions, RpcResult } from './types';
 
+// The connection options a pool passes on to its clients. The type of RpcPoolOptions.connection and the check of
+// connectionOptionsOf both come from this list, so they cannot disagree.
+const connectionOptionNames = [
+  'token', 'getToken', 'headers', 'name', 'version', 'timeout', 'websocket',
+  'minReconnectDelay', 'maxReconnectDelay', 'maxServerPingDelay', 'debug',
+] as const;
+type ConnectionOptionName = typeof connectionOptionNames[number];
+
 /** The options of a pool call's client a pool accepts: nothing else of the client options is taken. */
 export interface RpcPoolOptions {
   /**
@@ -23,7 +31,7 @@ export interface RpcPoolOptions {
    * maxReconnectDelay, maxServerPingDelay and debug. Any other option throws a badConfiguration error, instance in
    * particular: pool calls are plain calls, without an instance.
    */
-  connection?: Partial<Pick<Options, 'token' | 'getToken' | 'headers' | 'name' | 'version' | 'timeout' | 'websocket' | 'minReconnectDelay' | 'maxReconnectDelay' | 'maxServerPingDelay' | 'debug'>>;
+  connection?: Partial<Pick<Options, ConnectionOptionName>>;
   /**
    * Name of the per-call header which carries RpcPoolCallOptions.affinity. Required to pass affinity; it must match
    * the allow-list of the method and the affinity header of the target on the server.
@@ -38,7 +46,8 @@ export interface RpcPoolOptions {
   maxInflightPerConnection?: number;
   /**
    * Calls waiting for a slot at most, over all endpoints. Beyond it rpc() rejects with limitExceeded. Default 64. The
-   * queue is walked on every change of a connection, so keep it small: tens of calls, not thousands.
+   * queue is walked on every change of a connection, so keep it small: tens of calls, not thousands. A resend of a call
+   * already admitted (lost connection, later, move) is queued beyond this bound, and is bounded by retries instead.
    */
   maxQueued?: number;
   /** Closes a connection without calls for this long, in milliseconds. 0 keeps it open. Default 60000. */
@@ -127,11 +136,6 @@ interface PendingCall {
   reject: (error: any) => void;
 }
 
-// The connection options a pool passes on to its clients.
-const connectionOptionNames: string[] = [
-  'token', 'getToken', 'headers', 'name', 'version', 'timeout', 'websocket',
-  'minReconnectDelay', 'maxReconnectDelay', 'maxServerPingDelay', 'debug',
-];
 // The reply timeout of a client when none is set. Keep it equal to the default timeout of centrifuge.ts (config).
 const defaultTimeout: number = 5000;
 const defaultMaxConnectionsPerEndpoint: number = 2;
@@ -719,7 +723,7 @@ function connectionOptionsOf(connection: Partial<Options> | undefined): Partial<
     return taken;
   }
   for (const name of Object.keys(connection)) {
-    if (connectionOptionNames.indexOf(name) < 0) {
+    if ((connectionOptionNames as readonly string[]).indexOf(name) < 0) {
       throw poolError(errorCodes.badConfiguration, 'connection option ' + name + ' is not accepted by the rpc pool');
     }
     taken[name] = (connection as Record<string, any>)[name];
