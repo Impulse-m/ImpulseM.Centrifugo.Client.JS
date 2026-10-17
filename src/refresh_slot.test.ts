@@ -38,6 +38,10 @@ class FakeRefreshHost implements RefreshSlotHost {
     return Promise.resolve('fetched');
   }
 
+  tokenGeneration(): number {
+    return 0;
+  }
+
   token(): string {
     return this.tokenValue;
   }

@@ -36,6 +36,8 @@ export interface RefreshSlotHost {
   sendCommand(command: any): Promise<CallResolveContext>;
   hasGetToken(): boolean;
   getToken(): Promise<string>;
+  /** The generation of the connection token: moves on with each refresh(token) call. */
+  tokenGeneration(): number;
   token(): string;
   setToken(token: string): void;
   debug(message: string, ...args: any[]): void;
@@ -137,7 +139,13 @@ export class RefreshSlot {
       if (!this.host.hasGetToken()) {
         throw this.host.createError(errorCodes.badConfiguration, 'refresh needs a token: pass one to refresh() or set getToken');
       }
+      const generation: number = this.host.tokenGeneration();
       newToken = await this.host.getToken();
+      // A refresh(token) call made while the token was fetched supersedes it: the token fetched is not sent, and the
+      // call's own token follows in turn. The caller gets the identity the connection has meanwhile.
+      if (this.host.tokenGeneration() !== generation) {
+        return this.host.identity().context(0);
+      }
     }
     if (!newToken) {
       throw this.host.createError(errorCodes.clientRefreshToken, 'refresh token is empty');
