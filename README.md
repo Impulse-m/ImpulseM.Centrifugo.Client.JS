@@ -694,7 +694,7 @@ const result = await pool.rpc("part.write", chunk, {endpointKey: "eu-2", affinit
 | `affinityHeader` | none | the header that carries a call's `affinity`. Required to pass one, and it must be allow-listed for the method on the server |
 | `maxConnectionsPerEndpoint` | `2` | connections opened per endpoint at most |
 | `maxInflightPerConnection` | `1` | calls in flight per connection. A window above `1` needs `client.concurrency >= window + 1` on the server |
-| `maxQueued` | `64` | calls waiting for a slot, over all endpoints. Beyond it `rpc()` rejects with `limitExceeded`. A resend of a call already admitted is queued beyond it, and is bounded by `retries`. The queue is walked on every change of a connection, so keep it to tens of calls |
+| `maxQueued` | `64` | calls waiting for a slot, over all endpoints. Beyond it `rpc()` rejects with `limitExceeded`. A resend of a call already admitted is queued beyond it, and is bounded by `retries`. A change of a connection places only the calls waiting for its endpoint key, and stops at the first one it cannot place, so the bound does not multiply the work of an event |
 | `idleTimeout` | `60000` | a connection without calls closes after this many milliseconds; `0` keeps it open |
 | `retries` | `3` | resends of a call lost with its connection, refused with the `later` signal, or moved by `reroute`, counted together |
 | `reroute(error)` | none | returns the endpoint key a server error moves the call to, or `undefined` |
@@ -702,7 +702,7 @@ const result = await pool.rpc("part.write", chunk, {endpointKey: "eu-2", affinit
 | `maxRedirectsInflight` | `4` | redirect fetches in flight over the pool |
 | `fetch` | `globalThis.fetch` | the fetch function of redirects |
 
-`rpc(method, data, {endpointKey, affinity, headers, signal, timeout})` resolves with `{data, cached}` like `Centrifuge.rpc`. `timeout` defaults to the connection's `timeout` and covers the resends and the redirect fetch of the call. It is at most the connection's `timeout`, because a reply is bounded by that timeout: a longer call needs a larger `connection.timeout`. A `timeout` that is not a positive number, or is above the connection's, rejects with `badConfiguration` before the call is sent.
+`rpc(method, data, {endpointKey, affinity, headers, signal, timeout})` resolves with `{data, cached}` like `Centrifuge.rpc`. `timeout` defaults to the connection's `timeout` and covers the resends and the redirect fetch of the call. It is at most the connection's `timeout`, because a reply is bounded by that timeout: a longer call needs a larger `connection.timeout`. The redirect fetch counts in the same deadline, so a redirected body the link cannot carry in that time rejects with `timeout`: 16 MiB over a 2 Mbit/s link takes about 64 s, and a fleet which serves such bodies raises `connection.timeout` for its pool. A `timeout` that is not a positive number, or is above the connection's, rejects with `badConfiguration` before the call is sent.
 
 ### Plain calls
 
@@ -722,7 +722,7 @@ A move is an error the server answers, with the trailers the method lists in `er
 
 ### Redirects
 
-A redirect is a reply or an error the application recognises in `redirect`. The pool fetches the bytes within the call's deadline and at most `maxRedirectsInflight` at a time, and the promise resolves with `{data}` the way a socket reply does. The URL must be `https:`, or `http:` on a `ws:` endpoint. The URL is fetched as given, with no check of its host, so the application must validate the host of any URL it builds from request data. A redirect of the URL itself is not followed: a 3xx status rejects. A non-2xx status, a network failure or a body over `maxBytes` (16 MiB by default) rejects with `redirectFailed` (18). The pool does not fetch a redirect twice, because a presigned URL may be single-use. The hook is called with the outcome the server or the connection gave, not with the pool's own timeout or cancel.
+A redirect is a reply or an error the application recognises in `redirect`. The pool fetches the bytes within the call's deadline and at most `maxRedirectsInflight` at a time, and the promise resolves with `{data}` the way a socket reply does. The URL must be `https:`, or `http:` on a `ws:` endpoint. The URL is fetched as given, with no check of its host, so the application must validate the host of any URL it builds from request data. A redirect of the URL itself is not followed: a 3xx status rejects. The fetch asks the runtime for `redirect: 'manual'`, so a hop is refused before its request is sent in a runtime which honours it (browsers and undici do). A runtime whose fetch follows a redirect anyway has sent the hop when the pool sees the final URL, and the pool then refuses the response before its body is read; no check of the client can come earlier there. A non-2xx status, a network failure or a body over `maxBytes` (16 MiB by default) rejects with `redirectFailed` (18). The pool does not fetch a redirect twice, because a presigned URL may be single-use. The hook is called with the outcome the server or the connection gave, not with the pool's own timeout or cancel.
 
 ### Lifetime and state
 
