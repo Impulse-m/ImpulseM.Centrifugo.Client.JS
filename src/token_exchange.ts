@@ -692,8 +692,12 @@ export class TokenExchangeFlow {
   // refusal is thrown as a Refusal, which tells the caller whether the session is over: the horizon has passed, or the run
   // already presented an unchanged value again.
   private async exchangeRefresh(refreshToken: string, attempt: Attempt): Promise<string> {
+    let result: TokenExchangeResult;
     try {
-      return await this.exchangeWith(refreshToken, attempt);
+      result = await this.options.exchange({
+        refreshToken: refreshToken,
+        rpc: (method: string, data: any): Promise<RpcResult> => this.rpc(attempt, method, data),
+      });
     } catch (err: any) {
       if (!(err instanceof UnauthorizedError)) {
         throw err;
@@ -722,19 +726,17 @@ export class TokenExchangeFlow {
       }
       throw new Refusal(this.horizonPassed() || this.refusals >= maxRefusalRetries);
     }
+    return this.settle(refreshToken, result, attempt);
   }
 
 
-  // One exchange: the app's exchange callback, then the store of the rotated refresh token, awaited before the access
+  // The store step of an exchange the application returned: the rotated refresh token is stored, awaited before the access
   // token is used. Resolves with the access token. The access token of an attempt that timed out, or was abandoned, is
   // not used, but its rotated refresh token is stored (see storeRotated): the issuer has already consumed the pair.
   // An accepted exchange of a current attempt closes the refusal run and records its grace; a late one of an attempt that
-  // is no longer current drops its outcome, as the lead decision of the refusal run requires.
-  private async exchangeWith(refreshToken: string, attempt: Attempt): Promise<string> {
-    const result: TokenExchangeResult = await this.options.exchange({
-      refreshToken: refreshToken,
-      rpc: (method: string, data: any): Promise<RpcResult> => this.rpc(attempt, method, data),
-    });
+  // is no longer current drops its outcome, as the lead decision of the refusal run requires. The store step is outside
+  // the refusal handling of exchangeRefresh: an UnauthorizedError of its load() ends the session, it is not a refusal.
+  private async settle(refreshToken: string, result: TokenExchangeResult, attempt: Attempt): Promise<string> {
     const rotation: string | undefined = result ? result.refreshToken : undefined;
     if (rotation && rotation !== refreshToken) {
       await this.storeRotated(refreshToken, rotation);
@@ -770,12 +772,16 @@ export class TokenExchangeFlow {
   // still holds the token the attempt exchanged: a rotation made meanwhile by a newer exchange or by the application is
   // kept, so the late result of an old attempt never overwrites a newer token, and a logout meanwhile is not undone. A
   // failing read or store is reported, and the exchange goes on: the issuer already consumed the pair. A failing read
-  // skips the store, since it cannot tell whether the token is still the one used.
+  // skips the store, since it cannot tell whether the token is still the one used. An UnauthorizedError of the read is
+  // the application's word that the refresh token is gone for good: it is rethrown, and the session ends with it.
   private async storeRotated(used: string, rotated: string): Promise<void> {
     let held: string | null | undefined;
     try {
       held = await this.options.load();
     } catch (err: any) {
+      if (err instanceof UnauthorizedError) {
+        throw err;
+      }
       this.reportStoreFailure(err);
       return;
     }

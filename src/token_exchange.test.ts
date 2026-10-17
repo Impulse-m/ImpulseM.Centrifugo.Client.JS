@@ -1570,7 +1570,8 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       let loads: number = 0;
       const c: Centrifuge = create({
         load: (): string => {
-          if (loads++ === 0) {
+          // The bootstrap's load and the read of its store step return the token; the renewal's load is refused.
+          if (loads++ < 2) {
             return 'refresh-1';
           }
           throw new UnauthorizedError('refresh token deleted');
@@ -2107,6 +2108,88 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       expect(events).toContain('connected');
       expect(order.filter((step: string): boolean => step.startsWith('store:'))).toEqual([]);
       expect(stored).toBe('refresh-1');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('an UnauthorizedError from load in the store step of a bootstrap is terminal: disconnected with code 1, no store, no retry', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      let failRead: boolean = false;
+      let release: (result: TokenExchangeResult) => void = (): void => {};
+      const c: Centrifuge = create({
+        load: (): string => {
+          if (failRead) {
+            throw new UnauthorizedError('refresh token deleted');
+          }
+          return stored;
+        },
+        exchange: (): Promise<TokenExchangeResult> => {
+          calls++;
+          return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+            release = resolve;
+          });
+        },
+      });
+      const events: string[] = record(c);
+      c.connect();
+      await until((): boolean => calls === 1);
+
+      failRead = true;
+      release({ token: 'access-1', refreshToken: 'refresh-2' });
+      await until((): boolean => events.includes('disconnected:1'));
+      jest.advanceTimersByTime(60000);
+      await flush();
+
+      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual(['disconnected:1']);
+      expect(events).not.toContain('connected');
+      expect(order.filter((step: string): boolean => step.startsWith('store:'))).toEqual([]);
+      expect(commands('connect')).toHaveLength(1);
+      expect(commands('refresh')).toHaveLength(0);
+      expect(stored).toBe('refresh-1');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('an UnauthorizedError from load in the store step of a renewal is terminal: disconnected with code 1, no store, no retry', async (): Promise<void> => {
+    serve({ ttl: 10 });
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      let failRead: boolean = false;
+      const c: Centrifuge = create({
+        load: (): string => {
+          if (failRead) {
+            throw new UnauthorizedError('refresh token deleted');
+          }
+          return stored;
+        },
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          // The second exchange is the renewal: its own load() succeeded before it, and the load() of its store step is refused.
+          if (calls++ === 1) {
+            failRead = true;
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+
+      jest.advanceTimersByTime(9000);
+      await until((): boolean => events.includes('disconnected:1'));
+      jest.advanceTimersByTime(60000);
+      await flush();
+
+      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual(['disconnected:1']);
+      // Only the bootstrap stored its rotation; the renewal's store step was refused by load().
+      expect(order.filter((step: string): boolean => step.startsWith('store:'))).toEqual(['store:refresh-2']);
+      expect(stored).toBe('refresh-2');
+      expect(commands('connect')).toHaveLength(1);
+      expect(commands('refresh')).toHaveLength(1);
     } finally {
       jest.useRealTimers();
     }
