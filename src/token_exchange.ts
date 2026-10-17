@@ -362,7 +362,9 @@ export class TokenExchangeFlow {
       }
     }
     if (refused !== null) {
-      // A superseded or abandoned renewal drops its refusal: it spends no re-presentation and reports nothing.
+      // A superseded or abandoned renewal drops its refusal: it spends no re-presentation and ends no session. The fetch
+      // it fails is reported and retried by the refresh timer as any failed fetch of a connected client (centrifuge.ts
+      // _refresh); the token of the refresh(token) call that superseded it is the one in use.
       if (this.stale(attempt)) {
         throw this.closedError();
       }
@@ -726,7 +728,8 @@ export class TokenExchangeFlow {
   // One exchange: the app's exchange callback, then the store of the rotated refresh token, awaited before the access
   // token is used. Resolves with the access token. The access token of an attempt that timed out, or was abandoned, is
   // not used, but its rotated refresh token is stored (see storeRotated): the issuer has already consumed the pair.
-  // An accepted exchange closes the refusal run, whatever attempt it ran for.
+  // An accepted exchange of a current attempt closes the refusal run and records its grace; a late one of an attempt that
+  // is no longer current drops its outcome, as the lead decision of the refusal run requires.
   private async exchangeWith(refreshToken: string, attempt: Attempt): Promise<string> {
     const result: TokenExchangeResult = await this.options.exchange({
       refreshToken: refreshToken,
@@ -739,11 +742,11 @@ export class TokenExchangeFlow {
     if (!result || !result.token) {
       throw new Error('token exchange returned no token');
     }
-    this.recordGrace(result.grace);
-    this.closeRun();
     if (!attempt.current()) {
       throw this.closedError();
     }
+    this.recordGrace(result.grace);
+    this.closeRun();
     this.host.debug('connection token exchanged');
     return result.token;
   }
@@ -766,24 +769,40 @@ export class TokenExchangeFlow {
   // Stores a rotated refresh token the issuer issued. An abandoned attempt, or one a refresh(token) call superseded,
   // stores it only while the application still holds the token the attempt exchanged: a rotation made meanwhile by a
   // newer exchange or by the application is kept, so the late result of an old attempt never overwrites a newer token.
-  // A failing store is reported, and the exchange goes on. A failing load is not a store failure: it fails the exchange.
+  // A failing read or store is reported, and the exchange goes on: the issuer already consumed the pair. A failing read
+  // of an abandoned or superseded attempt skips the store, since it cannot tell whether the token is still the one used.
   private async storeRotated(used: string, rotated: string, attempt: Attempt): Promise<void> {
-    if ((!attempt.current() || attempt.superseded()) && (await this.options.load()) !== used) {
-      return;
+    if (!attempt.current() || attempt.superseded()) {
+      let held: string | null | undefined;
+      try {
+        held = await this.options.load();
+      } catch (err: any) {
+        this.reportStoreFailure(err);
+        return;
+      }
+      if (held !== used) {
+        return;
+      }
     }
     try {
       await this.options.store(rotated);
     } catch (err: any) {
-      try {
-        const ctx: any = {
-          type: 'tokenStore',
-          error: this.host.createError(errorCodes.clientRefreshToken, err?.toString() ?? ''),
-        };
-        this.host.emitError(ctx, (): void => {});
-      } catch (handlerErr: any) {
-        // Thrown by an error handler: reported, so the exchange still goes on with its access token.
-        this.host.reportDispatchError(handlerErr);
-      }
+      this.reportStoreFailure(err);
+    }
+  }
+
+
+  // Reports a failing read or store of a rotated refresh token as a tokenStore error. An error handler that throws is
+  // reported as a dispatch error, so the exchange still goes on with its access token.
+  private reportStoreFailure(err: any): void {
+    try {
+      const ctx: any = {
+        type: 'tokenStore',
+        error: this.host.createError(errorCodes.clientRefreshToken, err?.toString() ?? ''),
+      };
+      this.host.emitError(ctx, (): void => {});
+    } catch (handlerErr: any) {
+      this.host.reportDispatchError(handlerErr);
     }
   }
 

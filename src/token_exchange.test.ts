@@ -2000,6 +2000,44 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
+  test('a late rotation whose storage read fails is reported as tokenStore and not stored: the storage keeps the used token', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      let failRead: boolean = false;
+      let release: (result: TokenExchangeResult) => void = (): void => {};
+      const c: Centrifuge = create({
+        load: (): string => {
+          if (failRead) {
+            throw new Error('storage read failed');
+          }
+          return stored;
+        },
+        exchange: (): Promise<TokenExchangeResult> => {
+          calls++;
+          return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+            release = resolve;
+          });
+        },
+      });
+      const events: string[] = record(c);
+      c.connect();
+      await until((): boolean => calls === 1);
+
+      await advanceUntil((): boolean => events.includes('error:connectToken'));
+      failRead = true;
+      release({ token: 'late-access', refreshToken: 'refresh-2' });
+      await flush();
+
+      expect(events).toContain('error:tokenStore');
+      expect(order.filter((step: string): boolean => step.startsWith('store:'))).toEqual([]);
+      expect(stored).toBe('refresh-1');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a renewal refusal that arrives after the connection was lost and reconnected is dropped: no error is reported, the session goes on', async (): Promise<void> => {
     serve({
       ttl: 100,
