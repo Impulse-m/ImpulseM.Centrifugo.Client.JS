@@ -89,6 +89,8 @@ export class TokenSource {
     this.attach();
     return new Promise<SourcedToken>((resolve: (sourced: SourcedToken) => void, reject: (error: any) => void): void => {
       const waiter: Waiter = { refused: refused, resolve: resolve, reject: reject };
+      // The request it replaces settles, so that no promise of the requester is left pending.
+      this.waiting.get(requester)?.reject(new UnauthorizedError('unauthorized'));
       this.waiting.set(requester, waiter);
       this.step(requester, waiter);
     });
