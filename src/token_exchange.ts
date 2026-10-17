@@ -5,13 +5,16 @@ import type { CallRejectContext, CallResolveContext } from './rpc_tracker';
 import { refreshRetries } from './refresh_slot';
 import type { Error as ServerError, Options, RpcResult, ServerErrorFields } from './types';
 import { UnauthorizedError } from './unauthorized_error';
-import { backoff, ttlMilliseconds } from './utils';
+import { backoff, randomInt, ttlMilliseconds } from './utils';
 import { writeCommands } from './write_commands';
 
 // The grace of a refusal run when neither the issuer nor the option sets one, in seconds.
 const defaultGrace: number = 30;
 // The longest grace a refusal run honours, in seconds: a misconfigured issuer cannot make a dead client poll for long.
 const maxGrace: number = 300;
+// The re-presentations of an unchanged refresh token a refusal run allows: the issuer's answer to the same token does not
+// change, so one is enough to pick up a late store of another client.
+const maxRefusalRetries: number = 1;
 // The message of a refusal inside the grace horizon: it names the cause, and never a token.
 const refusedMessage: string = 'refresh token refused, retrying within the grace';
 
@@ -52,8 +55,8 @@ export interface TokenExchange {
   store: (refreshToken: string) => void | Promise<void>;
   /** Exchanges the refresh token for an access token. Throw `UnauthorizedError` (or rethrow the
    * `TokenExchangeRefusedError` of `ctx.rpc`) when the issuer refused the refresh token: the SDK presents the token the
-   * storage holds again, with backoff, until the grace horizon has passed, and only then ends the session. Any other
-   * rejection is reported and retried with backoff. */
+   * storage holds again once, at a random moment inside the grace horizon, picks up a newer stored token at once, and
+   * ends the session at the next refusal or at the horizon. Any other rejection is reported and retried with backoff. */
   exchange: (ctx: TokenExchangeContext) => Promise<TokenExchangeResult>;
   /** Server error names (`appType`) that mean the issuer refused the refresh token. A `ctx.rpc` rejected with one of them
    * rejects with `TokenExchangeRefusedError`. Exact string match; codes are never consulted. Default: none. */
@@ -78,8 +81,8 @@ export class TokenExchangeRefusedError extends UnauthorizedError {
 
 /**
  * A refusal of the issuer that the refusal run decides on, thrown by the exchange of a refresh token. The session is over
- * (`terminal`) when the storage holds no refresh token any more, or when the grace horizon has passed. Otherwise the
- * attempt is retried.
+ * (`terminal`) when the storage holds no refresh token any more, when the grace horizon has passed, or when the run
+ * already presented an unchanged value again. Otherwise the attempt is retried.
  */
 class Refusal extends UnauthorizedError {
   terminal: boolean;
@@ -164,7 +167,7 @@ export class TokenExchangeFlow {
   private grace: number;
   // The monotonic time (performance.now, milliseconds) of the first refusal of the open refusal run; null without one.
   private refusedSince: number | null = null;
-  // The bootstrap retries of the open refusal run: the backoff of their delays.
+  // The refused attempts of the open refusal run whose re-read found the value unchanged: one retry is allowed per run.
   private refusals: number = 0;
   private expiry: ExpiryRecord | null = null;
   private bootstrap: Bootstrap | null = null;
@@ -311,20 +314,25 @@ export class TokenExchangeFlow {
 
 
   // The token of a renewal on the connected transport it was requested for. A refresh token the application no longer
-  // holds ends the session; a refusal inside the grace horizon fails the fetch, which the refresh timer retries.
+  // holds ends the session; a refusal inside the grace horizon fails the fetch once, which the refresh timer retries, and
+  // the next refusal of an unchanged value ends the session.
   private async renewalToken(attempt: Attempt): Promise<string> {
-    let token: string | null;
+    let token: string | null = null;
+    let refused: boolean = false;
     try {
       token = await this.loadAndExchange(attempt);
     } catch (err: any) {
       // A refusal inside the horizon fails the fetch whether its attempt is still current or not: the session goes on.
       if (err instanceof Refusal && !err.terminal) {
-        throw new Error(refusedMessage);
-      }
-      if (!(err instanceof UnauthorizedError) || !attempt.current()) {
+        refused = true;
+      } else if (!(err instanceof UnauthorizedError) || !attempt.current()) {
         throw err;
       }
-      token = null;
+    }
+    if (refused) {
+      // The retry of the refresh timer is the one re-presentation of the run.
+      this.refusals++;
+      throw new Error(refusedMessage);
     }
     if (token === null) {
       this.closeRun();
@@ -504,16 +512,18 @@ export class TokenExchangeFlow {
   }
 
 
-  // Reports a refusal inside the grace horizon, and runs the bootstrap again on the same connection after a backoff that
-  // ends no later than the horizon. The horizon is checked again once the report is handled: a session that ends meanwhile
-  // is ended, not retried.
+  // Reports a refusal inside the grace horizon, and runs the bootstrap again once on the same connection, at a uniformly
+  // random moment inside the remaining horizon, so a fleet refused together spreads its second attempts over the grace.
+  // A second refusal of an unchanged value is the verdict (exchangeRefresh). The horizon is checked again once the report
+  // is handled: a session that ends meanwhile is ended, not retried.
   private refused(bootstrap: Bootstrap, result: any, resume: (result: any) => void): void {
     this.reported(bootstrap, 'connectToken', this.host.createError(errorCodes.clientConnectToken, refusedMessage), (): void => {
       if (this.horizonPassed()) {
         this.endSession();
         return;
       }
-      this.after(bootstrap, Math.min(backoff(this.refusals++, 1000, 8000), this.horizon() - performance.now()), (): void => {
+      this.refusals++;
+      this.after(bootstrap, randomInt(0, Math.max(0, this.horizon() - performance.now())), (): void => {
         this.start(bootstrap, result, resume);
       });
     });
@@ -623,7 +633,8 @@ export class TokenExchangeFlow {
   // Exchanges a refresh token. The first refusal opens the refusal run, which starts the clock of the grace horizon. The
   // storage is read again at once: a different token is presented in the same attempt, once (another client of the
   // installation rotated it meanwhile), and an empty storage ends the session. Any other refusal is thrown as a Refusal,
-  // which tells the caller whether the session is over: the horizon has passed, or the refusal came after the retry.
+  // which tells the caller whether the session is over: the horizon has passed, or the run already presented an unchanged
+  // value again.
   private async exchangeRefresh(refreshToken: string, attempt: Attempt, retried: boolean): Promise<string> {
     try {
       return await this.exchangeWith(refreshToken, attempt);
@@ -649,7 +660,7 @@ export class TokenExchangeFlow {
           return this.exchangeRefresh(current, attempt, true);
         }
       }
-      throw new Refusal(this.horizonPassed());
+      throw new Refusal(this.horizonPassed() || this.refusals >= maxRefusalRetries);
     }
   }
 

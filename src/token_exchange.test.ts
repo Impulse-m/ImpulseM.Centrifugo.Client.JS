@@ -23,8 +23,8 @@ function commandKind(cmd: any): string {
  * Advances the fake clock in steps of half a second until the condition holds. Between the steps the socket gets its
  * real turns, so a reconnect opens within the connect timeout of the fake clock.
  */
-async function advanceUntil(condition: () => boolean): Promise<void> {
-  for (let step: number = 0; step < 200 && !condition(); step++) {
+async function advanceUntil(condition: () => boolean, maxSteps: number = 200): Promise<void> {
+  for (let step: number = 0; step < maxSteps && !condition(); step++) {
     jest.advanceTimersByTime(500);
     for (let turn: number = 0; turn < 200 && !condition(); turn++) {
       await new Promise<void>((resolve: () => void): void => {
@@ -388,37 +388,118 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     expect(commands('rpc')).toHaveLength(0);
   });
 
-  test('a refused refresh token is presented again with backoff until the grace horizon, then the session ends', async (): Promise<void> => {
+  test('a refused refresh token is presented again once, at a random moment inside the grace, then the session ends', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      const delays: number[] = [];
+      for (let run: number = 0; run < 20; run++) {
+        const presented: string[] = [];
+        let firstRefusal: number = -1;
+        let verdict: number = -1;
+        const c: Centrifuge = create({
+          grace: 10,
+          exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+            presented.push(ctx.refreshToken);
+            throw new UnauthorizedError('refused');
+          },
+        });
+        const events: string[] = record(c);
+        c.on('error', (): void => {
+          if (firstRefusal < 0) {
+            firstRefusal = Date.now();
+          }
+        });
+        c.on('disconnected', (ctx: any): void => {
+          if (ctx.code === 1) {
+            verdict = Date.now();
+          }
+        });
+        c.connect();
+        await advanceUntil((): boolean => c.state === State.Disconnected);
+        await flush();
+
+        // The first refusal, and one re-presentation of the same token: a second refusal of it is the verdict.
+        expect(presented).toEqual(['refresh-1', 'refresh-1']);
+        expect(events.filter((entry: string): boolean => entry === 'error:connectToken')).toHaveLength(1);
+        expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual(['disconnected:1']);
+        expect(order.filter((entry: string): boolean => entry.startsWith('store:'))).toEqual([]);
+        // The verdict comes inside the grace, measured from the first refusal of the run.
+        expect(verdict - firstRefusal).toBeGreaterThanOrEqual(0);
+        expect(verdict - firstRefusal).toBeLessThanOrEqual(10000);
+        delays.push(verdict - firstRefusal);
+      }
+      // The moment of the re-presentation is random: the verdicts do not all fall at one time.
+      expect(new Set(delays).size).toBeGreaterThan(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a changed refresh token is presented at once after the one re-presentation of the unchanged one', async (): Promise<void> => {
     serve();
     useFakeClock();
     try {
       const presented: string[] = [];
+      let loads: number = 0;
       const c: Centrifuge = create({
-        grace: 10,
+        // The first three reads hold refresh-1; the read after the second refusal finds the token another client rotated.
+        load: (): string => {
+          loads++;
+          return loads <= 3 ? 'refresh-1' : 'refresh-2';
+        },
+        exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          presented.push(ctx.refreshToken);
+          if (ctx.refreshToken === 'refresh-1') {
+            throw new UnauthorizedError('refused');
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      c.connect();
+      await advanceUntil((): boolean => c.state === State.Connected);
+
+      expect(presented).toEqual(['refresh-1', 'refresh-1', 'refresh-2']);
+      expect(events).not.toContain('disconnected:1');
+      expect(c.state).toBe(State.Connected);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a second refusal of an unchanged refresh token is the verdict, before the grace horizon', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      const presented: string[] = [];
+      const start: number = Date.now();
+      let verdict: number = -1;
+      const c: Centrifuge = create({
+        grace: 300,
         exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
           presented.push(ctx.refreshToken);
           throw new UnauthorizedError('refused');
         },
       });
       const events: string[] = record(c);
+      c.on('disconnected', (ctx: any): void => {
+        if (ctx.code === 1) {
+          verdict = Date.now();
+        }
+      });
       c.connect();
-      await advanceUntil((): boolean => c.state === State.Disconnected);
+      await advanceUntil((): boolean => c.state === State.Disconnected, 1200);
       await flush();
 
-      // The same token each time, retried with backoff; the last attempt is the one at the horizon, which ends the session.
-      expect(presented.length).toBeGreaterThan(1);
-      expect(presented.length).toBeLessThanOrEqual(10);
-      expect(presented.every((token: string): boolean => token === 'refresh-1')).toBe(true);
-      expect(events.filter((entry: string): boolean => entry === 'error:connectToken')).toHaveLength(presented.length - 1);
-      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual(['disconnected:1']);
-      expect(commands('connect')).toHaveLength(1);
-      expect(order.filter((entry: string): boolean => entry.startsWith('store:'))).toEqual([]);
+      expect(presented).toEqual(['refresh-1', 'refresh-1']);
+      expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(1);
+      expect(verdict - start).toBeLessThanOrEqual(300000);
 
-      // No timer is left after the verdict: no further exchange.
-      const attempts: number = presented.length;
-      jest.advanceTimersByTime(60000);
+      // No timer is left after the verdict: the retry timer is not armed again.
+      jest.advanceTimersByTime(600000);
       await flush();
-      expect(presented).toHaveLength(attempts);
+      expect(presented).toHaveLength(2);
     } finally {
       jest.useRealTimers();
     }
@@ -596,6 +677,8 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
   test('the application disconnect closes the refusal run, so the next connect has a fresh horizon', async (): Promise<void> => {
     serve();
     useFakeClock();
+    // The re-presentation lands on the horizon, so the verdict shows where the horizon of the run is.
+    const random: jest.SpyInstance = jest.spyOn(Math, 'random').mockReturnValue(0.999999);
     try {
       const c: Centrifuge = create({
         grace: 10,
@@ -609,37 +692,54 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       jest.advanceTimersByTime(5000);
       c.disconnect();
 
+      let refusedAt: number = -1;
+      let verdictAt: number = -1;
+      c.on('error', (ctx: any): void => {
+        if (ctx.type === 'connectToken' && refusedAt < 0) {
+          refusedAt = performance.now();
+        }
+      });
+      c.on('disconnected', (ctx: any): void => {
+        if (ctx.code === 1) {
+          verdictAt = performance.now();
+        }
+      });
       c.connect();
-      const restarted: number = performance.now();
       await advanceUntil((): boolean => c.state === State.Disconnected);
 
-      // The horizon runs from the refusal after the new connect, not from the one before the disconnect.
-      expect(performance.now() - restarted).toBeGreaterThanOrEqual(10000);
+      // The horizon runs from the refusal after the new connect, not from the one before the disconnect: that one would
+      // have ended the session 5 seconds after this connect.
+      expect(verdictAt - refusedAt).toBeGreaterThanOrEqual(9990);
+      expect(verdictAt - refusedAt).toBeLessThanOrEqual(10010);
       expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(1);
     } finally {
+      random.mockRestore();
       jest.useRealTimers();
     }
   });
 
-  test('a transport loss keeps the refusal run: the reconnect continues it, and the horizon still ends the session', async (): Promise<void> => {
+  test('a transport loss keeps the refusal run: the reconnect presents the token again, and its refusal is the verdict', async (): Promise<void> => {
     serve();
     useFakeClock();
     try {
+      const presented: string[] = [];
       const c: Centrifuge = create({
         grace: 10,
-        exchange: async (): Promise<TokenExchangeResult> => {
+        exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          presented.push(ctx.refreshToken);
           throw new UnauthorizedError('refused');
         },
       });
       const events: string[] = record(c);
       c.connect();
       await until((): boolean => events.includes('error:connectToken'));
+      // The connection ends before the re-presentation fires: its timer is cleared, and the reconnect presents the token.
       server.closeConnection();
-      await advanceUntil((): boolean => commands('connect').length >= 2);
       await advanceUntil((): boolean => c.state === State.Disconnected);
 
+      expect(presented).toEqual(['refresh-1', 'refresh-1']);
       expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(1);
-      expect(commands('connect').length).toBeLessThanOrEqual(10);
+      expect(commands('connect')).toHaveLength(2);
     } finally {
       jest.useRealTimers();
     }
@@ -662,10 +762,9 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       jest.setSystemTime(Date.now() - 3600 * 1000);
       await advanceUntil((): boolean => c.state === State.Disconnected);
 
-      const run: number = attempts[attempts.length - 1] - attempts[0];
-      expect(run).toBeGreaterThanOrEqual(10000);
-      expect(run).toBeLessThan(10500);
-      expect(attempts.length).toBeLessThanOrEqual(10);
+      // The re-presentation and the verdict fall inside the horizon of the run, which the wall-clock step does not move.
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1] - attempts[0]).toBeLessThanOrEqual(10000);
     } finally {
       jest.useRealTimers();
     }
@@ -735,6 +834,79 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       // The retry, 5 to 10 seconds on, exchanges again and is accepted: the connection stays connected with the new token.
       await advanceUntil((): boolean => commands('refresh').length === 2);
       expect(commands('refresh')[1].refresh.token).toBe('access-2');
+      expect(c.state).toBe(State.Connected);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a renewal refusal whose retry is refused too, with the storage unchanged, ends the session at that retry', async (): Promise<void> => {
+    serve({ ttl: 100 });
+    useFakeClock();
+    try {
+      let exchanges: number = 0;
+      let refusedAt: number = -1;
+      let verdictAt: number = -1;
+      const c: Centrifuge = create({
+        exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          exchanges++;
+          if (exchanges === 2 || exchanges === 3) {
+            throw new UnauthorizedError('refused');
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      c.on('error', (ctx: any): void => {
+        if (ctx.type === 'refreshToken' && refusedAt < 0) {
+          refusedAt = Date.now();
+        }
+      });
+      c.on('disconnected', (ctx: any): void => {
+        if (ctx.code === 1) {
+          verdictAt = Date.now();
+        }
+      });
+      await connectClient(c);
+      await advanceUntil((): boolean => c.state === State.Disconnected);
+
+      // The bootstrap, the refused renewal and its refused retry: the verdict comes at the retry, 5 to 10 seconds after the
+      // refusal, not at the 30 second horizon.
+      expect(exchanges).toBe(3);
+      expect(events.filter((entry: string): boolean => entry === 'error:refreshToken')).toHaveLength(1);
+      expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(1);
+      expect(verdictAt - refusedAt).toBeLessThanOrEqual(10500);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a renewal refusal whose retry finds a newer stored token presents it, and the session goes on', async (): Promise<void> => {
+    serve({ ttl: 100 });
+    useFakeClock();
+    try {
+      const presented: string[] = [];
+      const c: Centrifuge = create({
+        exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          presented.push(ctx.refreshToken);
+          if (presented.length === 2) {
+            throw new UnauthorizedError('refused');
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      c.on('error', (ctx: any): void => {
+        // Another client of the installation rotated the token after the re-read of this refusal: the retry finds it.
+        if (ctx.type === 'refreshToken') {
+          stored = 'refresh-9';
+        }
+      });
+      await connectClient(c);
+      await advanceUntil((): boolean => commands('refresh').length === 2);
+
+      expect(presented).toEqual(['refresh-1', 'refresh-2', 'refresh-9']);
+      expect(events).not.toContain('disconnected:1');
       expect(c.state).toBe(State.Connected);
     } finally {
       jest.useRealTimers();
@@ -1302,8 +1474,10 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
         exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
           calls++;
           if (calls === 2) {
-            return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void, reject: (err: any) => void): void => {
-              refuse = reject;
+            return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult | PromiseLike<TokenExchangeResult>) => void): void => {
+              refuse = (err: any): void => {
+                resolve(Promise.reject(err));
+              };
             });
           }
           return issue(ctx);
