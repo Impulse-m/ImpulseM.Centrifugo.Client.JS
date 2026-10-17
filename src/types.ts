@@ -1,3 +1,7 @@
+import type { TokenExchange } from './token_exchange';
+
+export type { TokenExchange, TokenExchangeContext, TokenExchangeResult } from './token_exchange';
+
 /** EventMap */
 export type EventMap = {
   [key: string]: (...args: any[]) => void
@@ -186,6 +190,9 @@ export interface Options {
   /** Maximum number of rpc calls tracked for retransmit at once, sent or waiting for a
    * connection. An rpc() beyond it rejects with errorCodes.limitExceeded. Default: 32. */
   maxPendingRpc?: number;
+  /** Lets the client obtain and renew its connection token itself, over the connection, from a refresh token the
+   * application persists. Exclusive with `getToken`: setting both throws at construction. Default null. */
+  tokenExchange?: TokenExchange | null;
 }
 
 /**
@@ -233,7 +240,8 @@ export interface AuthContext {
 
 /** Context for the client 'error' event. */
 export interface ErrorContext {
-  /** Category of the error (e.g. 'transport', 'token', 'connect'). */
+  /** Category of the error (e.g. 'transport', 'token', 'connect'). 'tokenStore': the tokenExchange store callback failed
+   * (code clientRefreshToken, 6); the exchange goes on. */
   type: string;
   /** The error details. */
   error: Error;

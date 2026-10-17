@@ -36,6 +36,8 @@ export interface RefreshSlotHost {
   sendCommand(command: any): Promise<CallResolveContext>;
   hasGetToken(): boolean;
   getToken(): Promise<string>;
+  /** Whether a token fetched by the token exchange, read at the generation given, was superseded by a refresh(token) call. */
+  tokenSuperseded(generation: number): boolean;
   token(): string;
   setToken(token: string): void;
   debug(message: string, ...args: any[]): void;
@@ -65,6 +67,10 @@ export class RefreshSlot {
   private calls: number = 0;
   // Moves on with each refresh() call started and each token accepted, see sendTimer.
   private generationCount: number = 0;
+  // Moves on with each refresh() call that brings a token, see currentTokenGeneration.
+  private tokenGenerationCount: number = 0;
+  // The generation at which the last refresh() call that brings a token started, see tokenCallSince.
+  private tokenCallAt: number = 0;
   // The generation of the last token accepted.
   private acceptedGeneration: number = 0;
 
@@ -77,6 +83,24 @@ export class RefreshSlot {
   /** The generation of the refreshes: it moves on with each refresh() call started and each token accepted. */
   currentGeneration(): number {
     return this.generationCount;
+  }
+
+
+  /**
+   * The generation of the refresh() calls that bring a token: it moves on with those only, so a refresh() that fetches
+   * its token does not supersede a token exchange in progress.
+   */
+  currentTokenGeneration(): number {
+    return this.tokenGenerationCount;
+  }
+
+
+  /**
+   * Whether a refresh(token) call started after the generation given (see currentGeneration). A refresh() that
+   * fetches its own token does not count: it does not supersede a timer refresh that fetched its token before it.
+   */
+  tokenCallSince(generation: number): boolean {
+    return this.tokenCallAt > generation;
   }
 
 
@@ -95,6 +119,10 @@ export class RefreshSlot {
     }
     this.calls++;
     this.generationCount++;
+    if (token !== undefined) {
+      this.tokenGenerationCount++;
+      this.tokenCallAt = this.generationCount;
+    }
     const refresh: Promise<AuthContext> = pending === null
       ? this.run(token)
       : pending.then((): Promise<AuthContext> => this.run(token), (): Promise<AuthContext> => this.run(token));
@@ -123,7 +151,13 @@ export class RefreshSlot {
       if (!this.host.hasGetToken()) {
         throw this.host.createError(errorCodes.badConfiguration, 'refresh needs a token: pass one to refresh() or set getToken');
       }
+      const generation: number = this.currentTokenGeneration();
       newToken = await this.host.getToken();
+      // A refresh(token) call made while the token was fetched by the token exchange supersedes it: the token fetched is
+      // not sent, and the call's own token follows in turn. The caller gets the identity the connection has meanwhile.
+      if (this.host.tokenSuperseded(generation)) {
+        return this.host.identity().context(0);
+      }
     }
     if (!newToken) {
       throw this.host.createError(errorCodes.clientRefreshToken, 'refresh token is empty');

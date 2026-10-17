@@ -13,6 +13,37 @@ export interface ClientHost extends RpcHost, RefreshSlotHost, WriteHost {
 }
 
 /**
+ * The members the token exchange flow adds to the host, created by createTokenExchangeHost only when the tokenExchange
+ * option is set: a client without the option holds none of them.
+ */
+export interface TokenExchangeHost extends ClientHost {
+  /** Whether the server asked for a fresh connection token (a 109 at the last connect). */
+  refreshRequired(): boolean;
+  /** Resets the request for a fresh connection token, once the connect goes out without one. */
+  clearRefreshRequired(): void;
+  /** The id of the transport the client currently uses. */
+  transportId(): number;
+  /** Whether the client is in the connecting state. */
+  isConnecting(): boolean;
+  /** Writes a plain command on the current transport, without waiting for the connected state. */
+  sendPlainCommand(command: any): Promise<CallResolveContext>;
+  /** The client timeout, in milliseconds. */
+  timeout(): number;
+  /** The session and node of the connection, as the commands of the connection are written with them. */
+  route(): { session: string; node: string };
+  /** Reports an error to the application, then runs the continuation (see the client's emitError). */
+  emitError(ctx: any, next: () => void): void;
+  /** Ends the connection with a code and a reason, reconnecting or not (see the client's disconnect). */
+  disconnect(code: number, reason: string, reconnect: boolean): void;
+  /** Ends the session as unauthorized, with no reconnect. */
+  failUnauthorized(): void;
+  /** Reports an exception a handler threw while the flow ran. */
+  reportDispatchError(err: any): void;
+  /** The generation of the connection token: moves on with every refresh(token) call. */
+  tokenGeneration(): number;
+}
+
+/**
  * The host of the rpc tracker, of the refresh slot and of the write of commands: the state and the commands of a
  * client, as they use them. The members of the client read here are its private ones, reached by name: the client
  * keeps them out of its API, and this is the one place that uses them for the rpc, refresh and write machinery.
@@ -21,7 +52,8 @@ export interface ClientHost extends RpcHost, RefreshSlotHost, WriteHost {
  * _isConnected, _createErrorObject, _config, _refreshSlot, _callPromise, _nextCommandId, _addCommand,
  * _callbacks, _rpcOptionsSupported, _methodCall, _call, _getToken, _token, _debug, _getRefreshRetryDelay,
  * _clearRefreshTimeout, _refreshTimeout, _refresh, _client, _identity, _dispatchFailed, _rpc, _codec, _transport,
- * _disconnect.
+ * _disconnect, _tokenExchange, _refreshRequired, _transportId, _isConnecting, _session, _node, _emitError,
+ * _failUnauthorized, _reportDispatchError.
  * Accepted by the wave's contract (section 10); the bracket reads are not counted as uses by noUnusedLocals.
  */
 export function createClientHost(client: Centrifuge): ClientHost {
@@ -48,7 +80,7 @@ export function createClientHost(client: Centrifuge): ClientHost {
     rpcOptionsSupported: (): boolean => client['_rpcOptionsSupported'],
     waitConnected: (timeout: number | null, signal?: AbortSignal): Promise<void> => client['_methodCall'](timeout, signal),
     sendCommand: (command: any): Promise<CallResolveContext> => client['_call'](command, false),
-    hasGetToken: (): boolean => !!client['_config'].getToken,
+    hasGetToken: (): boolean => !!client['_config'].getToken || client['_tokenExchange'] !== null,
     getToken: (): Promise<string> => client['_getToken'](),
     token: (): string => client['_token'],
     setToken: (token: string): void => {
@@ -60,6 +92,7 @@ export function createClientHost(client: Centrifuge): ClientHost {
       scheduleRefresh(client['_getRefreshRetryDelay'](), (): void => client['_refresh']());
     },
     applyReply: (result: any): void => {
+      client['_tokenExchange']?.tokenAccepted();
       client['_clearRefreshTimeout']();
       if (result.expires) {
         // The client id of the connection only changes if the reply carries one — and
@@ -69,7 +102,7 @@ export function createClientHost(client: Centrifuge): ClientHost {
         if (result.client) {
           client['_client'] = result.client;
         }
-        scheduleRefresh(ttlMilliseconds(result.ttl), (): void => client['_refresh']());
+        scheduleRefresh(client['_tokenExchange']?.expiryDelay(result.ttl) ?? ttlMilliseconds(result.ttl), (): void => client['_refresh']());
       }
       client['_identity'].applyRefresh(result);
     },
@@ -100,5 +133,40 @@ export function createClientHost(client: Centrifuge): ClientHost {
     disconnectWriteFailed: (): void => {
       client['_disconnect'](connectingCodes.transportClosed, 'transport write error', true);
     },
+    tokenSuperseded: (generation: number): boolean => client['_tokenExchange'] !== null
+      && client['_refreshSlot'].currentTokenGeneration() !== generation,
+  };
+}
+
+
+/**
+ * The host of the token exchange flow: the host of createClientHost plus the members only the flow uses. Called only when
+ * the tokenExchange option is set, so a client without the option allocates none of them.
+ */
+export function createTokenExchangeHost(client: Centrifuge, host: ClientHost): TokenExchangeHost {
+  return {
+    ...host,
+    refreshRequired: (): boolean => client['_refreshRequired'],
+    clearRefreshRequired: (): void => {
+      client['_refreshRequired'] = false;
+    },
+    transportId: (): number => client['_transportId'],
+    isConnecting: (): boolean => client['_isConnecting'](),
+    sendPlainCommand: (command: any): Promise<CallResolveContext> => client['_call'](command, true),
+    timeout: (): number => client['_config'].timeout as number,
+    route: (): { session: string; node: string } => ({ session: client['_session'], node: client['_node'] }),
+    emitError: (ctx: any, next: () => void): void => {
+      client['_emitError'](ctx, next);
+    },
+    disconnect: (code: number, reason: string, reconnect: boolean): void => {
+      client['_disconnect'](code, reason, reconnect);
+    },
+    failUnauthorized: (): void => {
+      client['_failUnauthorized']();
+    },
+    reportDispatchError: (err: any): void => {
+      client['_reportDispatchError'](err);
+    },
+    tokenGeneration: (): number => client['_refreshSlot'].currentTokenGeneration(),
   };
 }

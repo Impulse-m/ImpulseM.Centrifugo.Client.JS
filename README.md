@@ -660,6 +660,12 @@ While the client is disconnected, the refresh is sent on the next connect, howev
 
 Deploy the server before the clients that use the identity fields: a server that does not send `user` and `auth_class` in its refresh replies makes each refresh read as an anonymous connection.
 
+A `refresh()` without a token that a `refresh(token)` call superseded resolves with the identity the connection holds, and `ttl` 0: the token it fetched was not sent.
+
+#### Token exchange over the connection
+
+The `tokenExchange` option lets the SDK obtain and renew the connection token over the connection itself, from a refresh token the application persists. Its callbacks, the flow, the refusal run and grace, the events and the server requirements are described in [docs/token_exchange.md](docs/token_exchange.md).
+
 ## RPC pool for large payloads
 
 `RpcPool` carries calls with large payloads (chunks of a few hundred KiB to a few MiB) over several connections, so that one transfer does not hold up the others. It is an ordinary client on a server configured for large frames: see the server's large-payload fleet. The pool speaks protobuf only, so it is exported from the protobuf entry (`@impulsem/centrifuge/build/protobuf`) and not from the JSON entry: a pool needs the protobuf entry, and the JSON entry does not load the protobuf codec for an application that creates no pool.

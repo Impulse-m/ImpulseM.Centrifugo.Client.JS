@@ -30,10 +30,12 @@ import { normaliseRpcOptions, loggedConfig } from './rpc_options';
 
 import { addWaiter, CallTimer, callTimer } from './call_timer';
 import { CallRejectContext, CallResolveContext, RpcTracker } from './rpc_tracker';
-import { ClientHost, createClientHost } from './client_host';
+import { ClientHost, createClientHost, createTokenExchangeHost } from './client_host';
 import { writeCommands } from './write_commands';
 import { RefreshSlot, refreshKeepsConnection, refreshRetries } from './refresh_slot';
 import { ConnectionIdentity } from './identity';
+import { TokenExchangeFlow, createTokenExchangeFlow } from './token_exchange';
+import { UnauthorizedError } from './unauthorized_error';
 
 import {
   State, Options, SubscriptionState, ClientEvents, AuthContext,
@@ -106,12 +108,7 @@ interface serverSubscription {
   subscribed?: boolean;
 }
 
-export class UnauthorizedError extends Error {
-  constructor(message: any) {
-    super(message);
-    this.name = this.constructor.name;
-  }
-}
+export { UnauthorizedError };
 
 /** Centrifuge is a Centrifuge/Centrifugo bidirectional client. */
 export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<ClientEvents>) {
@@ -168,6 +165,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _refreshSlot: RefreshSlot;
   private _rpc: RpcTracker;
   private _host: ClientHost;
+  private _tokenExchange: TokenExchangeFlow | null = null;
 
   private _debugEnabled: boolean;
   private _config: Options;
@@ -716,6 +714,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
     this._codec = new JsonCodec();
     this._formatOverride();
+    this._tokenExchange = this._config.tokenExchange
+      ? createTokenExchangeFlow(createTokenExchangeHost(this, this._host), this._config)
+      : null;
 
     if (this._config.debug === true || localStorageItem('centrifuge.debug')) {
       this._debugEnabled = true;
@@ -1336,6 +1337,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     // it. Not the transport id: _initializeTransport changes it too, and its
     // exceptions must still reach the error handlers below.
     const disconnects = this._disconnects;
+    this._tokenExchange?.beforeConnect();
     const emptyToken = this._token === '';
     const needTokenRefresh = this._refreshRequired || (emptyToken && this._config.getToken !== null);
     // Whether the token or data promise resolved: an error caught after that was thrown
@@ -1803,7 +1805,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       // client has (or none) and reconnect with it. The server rejects it if
       // it's no longer valid, instead of the client stopping on a local
       // configuration error.
-      if (this._config.getToken !== null) {
+      if (this._config.getToken !== null || this._tokenExchange !== null) {
         this._token = '';
         this._refreshRequired = true;
       }
@@ -1882,6 +1884,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       this._deviceWentOffline = false;
     }
 
+    this._tokenExchange?.reset(reconnect);
     const ctx = {
       code: code,
       reason: reason
@@ -1927,6 +1930,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   private _getToken(): Promise<string> {
     this._debug('get connection token');
+    if (this._tokenExchange) {
+      return this._tokenExchange.fetchToken();
+    }
     if (!this._config.getToken) {
       try {
         this.emit('error', {
@@ -2010,7 +2016,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         }
       });
     }).catch(function (e) {
-      if (clientId !== self._client || !self._isConnected()) {
+      if (clientId !== self._client || !self._isConnected() || self._refreshSlot.tokenCallSince(generation)) {
         if (tokenResolved) {
           self._reportDispatchError(e);
         }
@@ -2197,6 +2203,12 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     // Connected again: a later online event must not take the device for having been
     // offline and abort a transport that works.
     this._deviceWentOffline = false;
+    if (this._tokenExchange?.intercept(result, (merged: any): void => this._connectResponse(merged))) {
+      // A bootstrap's anonymous connection is pinged too: its pong settings apply now, the timer is armed once connected.
+      this._serverPing = result.ping > 0 ? result.ping * 1000 : 0;
+      this._sendPong = result.ping > 0 && result.pong === true;
+      return;
+    }
 
     if (this._isConnected()) {
       return;
@@ -2212,7 +2224,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
     this._clearRefreshTimeout();
     if (result.expires) {
-      this._host.scheduleRefresh(ttlMilliseconds(result.ttl), () => this._refresh());
+      this._host.scheduleRefresh(this._tokenExchange?.expiryDelay(result.ttl) ?? ttlMilliseconds(result.ttl), () => this._refresh());
     }
 
     this._session = result.session;
@@ -2627,6 +2639,10 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   }
 
   private _handlePush(data: any, next: any) {
+    if (this._tokenExchange?.holdPush(data)) {
+      next();
+      return;
+    }
     const channel = data.channel;
     const id = data.id;
     if (data.pub) {

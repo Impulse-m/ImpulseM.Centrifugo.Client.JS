@@ -1,65 +1,9 @@
 import { errorCodes } from './codes';
-import { refreshKeepsConnection, refreshRetries, RefreshSlot, RefreshSlotHost } from './refresh_slot';
+import { refreshKeepsConnection, refreshRetries, RefreshSlot } from './refresh_slot';
+import { FakeRefreshHost } from './testing/refresh_slot_host';
 
 // The policy of a timer-driven refresh for each server error: retried, kept, or disconnected. An explicit
 // refresh() is never retried, so it does not use this policy.
-
-// A host of the refresh slot that records the commands sent and the retries armed. The connection state is a flag
-// the test sets: a flag set right after a send() call runs in the microtask gap between the claim of the command
-// slot and the write of the command, where nothing else of the client runs.
-class FakeRefreshHost implements RefreshSlotHost {
-  connected: boolean = true;
-  sent: any[] = [];
-  armed: number = 0;
-  private tokenValue: string = 'old';
-
-  isConnected(): boolean {
-    return this.connected;
-  }
-
-  waitConnected(): Promise<void> {
-    return this.connected ? Promise.resolve() : new Promise<void>((): void => {});
-  }
-
-  createError(code: number, message: string): any {
-    return { code: code, message: message };
-  }
-
-  sendCommand(command: any): Promise<any> {
-    this.sent.push(command);
-    return Promise.resolve({ reply: { refresh: { ttl: 60 } }, next: (): void => {} });
-  }
-
-  hasGetToken(): boolean {
-    return false;
-  }
-
-  getToken(): Promise<string> {
-    return Promise.resolve('fetched');
-  }
-
-  token(): string {
-    return this.tokenValue;
-  }
-
-  setToken(token: string): void {
-    this.tokenValue = token;
-  }
-
-  debug(): void {}
-
-  applyReply(): void {}
-
-  armRefreshRetry(): void {
-    this.armed++;
-  }
-
-  identity(): any {
-    return { context: (ttl: number): any => ({ ttl: ttl }) };
-  }
-
-  dispatchFailed(): void {}
-}
 
 describe('a refresh command that finds the client disconnected after its slot is claimed', (): void => {
   test('send() releases the slot and rejects as unsent, without writing the command', async (): Promise<void> => {
