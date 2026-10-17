@@ -690,12 +690,13 @@ const result = await pool.rpc("part.write", chunk, {endpointKey: "eu-2", affinit
 | Option | Default | Meaning |
 |---|---|---|
 | `endpoints(key)` | required | the endpoint or endpoints of a key; `''` is the key of a call without one. May return a promise. Resolved once per key, until `close()`; a failed resolution is resolved again by the next call. Keys are kept for the life of the pool, so use a bounded set (clusters, regions), not one key per object |
-| `connection` | none | the options of each connection: `token`, `getToken`, `headers`, `name`, `version`, `timeout`, `websocket`, `minReconnectDelay`, `maxReconnectDelay`, `maxServerPingDelay`, `debug`. Any other option, `instance` in particular, throws `badConfiguration` |
+| `connection` | none | the options of each connection: `token`, `getToken`, `headers`, `name`, `version`, `timeout`, `websocket`, `minReconnectDelay`, `maxReconnectDelay`, `maxServerPingDelay`, `debug`. Any other option, `instance` in particular, throws `badConfiguration`. `tokenExchange` is refused: see [Tokens](#tokens) |
+| `tokenFrom` | none | the `Centrifuge` client which owns the access token of the connections. The pool lends the client's token to each connection and renews it through that client. Exclusive with `connection.token` and `connection.getToken` |
 | `affinityHeader` | none | the header that carries a call's `affinity`. Required to pass one, and it must be allow-listed for the method on the server |
 | `maxConnectionsPerEndpoint` | `2` | connections opened per endpoint at most |
 | `maxInflightPerConnection` | `1` | calls in flight per connection. A window above `1` needs `client.concurrency >= window + 1` on the server |
 | `maxQueued` | `64` | calls waiting for a slot, over all endpoints. Beyond it `rpc()` rejects with `limitExceeded`. A resend of a call already admitted is queued beyond it, and is bounded by `retries`. A change of a connection places only the calls waiting for its endpoint key, and stops at the first one it cannot place, so the bound does not multiply the work of an event |
-| `idleTimeout` | `60000` | a connection without calls closes after this many milliseconds; `0` keeps it open |
+| `idleTimeout` | `60000` | a connection without calls closes after this many milliseconds, at most `2147483647` (the longest timer; a larger value throws `badConfiguration`); `0` keeps it open |
 | `retries` | `3` | resends of a call lost with its connection, refused with the `later` signal, or moved by `reroute`, counted together |
 | `reroute(error)` | none | returns the endpoint key a server error moves the call to, or `undefined` |
 | `redirect(reply, error)` | none | returns `{url, headers?, maxBytes?}` when the bytes of the call are served elsewhere, or `undefined` |
@@ -703,6 +704,19 @@ const result = await pool.rpc("part.write", chunk, {endpointKey: "eu-2", affinit
 | `fetch` | `globalThis.fetch` | the fetch function of redirects |
 
 `rpc(method, data, {endpointKey, affinity, headers, signal, timeout})` resolves with `{data, cached}` like `Centrifuge.rpc`. `timeout` defaults to the connection's `timeout` and covers the resends and the redirect fetch of the call. It is at most the connection's `timeout`, because a reply is bounded by that timeout: a longer call needs a larger `connection.timeout`. The redirect fetch counts in the same deadline, so a redirected body the link cannot carry in that time rejects with `timeout`: 16 MiB over a 2 Mbit/s link takes about 64 s, and a fleet which serves such bodies raises `connection.timeout` for its pool. A `timeout` that is not a positive number, or is above the connection's, rejects with `badConfiguration` before the call is sent.
+
+### Tokens
+
+With `tokenFrom` the pool takes its token from the client that owns it, which is the one way to give a pool a token that renews. Pass the client itself:
+
+```javascript
+const client = new Centrifuge(url, {tokenExchange: {load, store, exchange}});
+const pool = new RpcPool({endpoints, tokenFrom: client, connection: {websocket: WebSocket}});
+```
+
+The pool never runs an exchange and never calls an application getter for its connections. Each connection is given the client's current token. When a connection's token expires or is refused, the pool asks the client, and the client renews its own token once for it; a renewal the client has already started is shared, so two refused connections cause one renewal. The client's own renewal timer keeps the token ahead of the connections, so in steady state the pool causes no renewal. `tokenFrom` works with every token mode of the client: `tokenExchange`, `getToken` (one call for the client instead of one per connection), and a static `token`, which is not renewed. `connection.token` and `connection.getToken` stay for applications without a client, and `connection.tokenExchange` is refused with `badConfiguration`.
+
+The pool follows the client's session. While the client is connected, a connection waits for a token only as long as the client needs to renew it. A connection of a client which is connecting waits for the connect. When the client's session ends as unauthorized (for example, the application's `load` returns nothing at a renewal), `rpc()` rejects at once with `clientDisconnected` and the message `unauthorized`, and no connection opens until the client connects again. A call is never sent under an identity other than the one of its connection: when the client's user or auth class changes, the connections of the old identity take no new call, complete the calls in flight, and close. A call lost with a connection that ends as unauthorized, or is retired, is not sent again. An application which cancels its transfers when the user changes should do so itself: calls already in flight complete under the old identity.
 
 ### Plain calls
 
@@ -722,7 +736,7 @@ A move is an error the server answers, with the trailers the method lists in `er
 
 ### Redirects
 
-A redirect is a reply or an error the application recognises in `redirect`. The pool fetches the bytes within the call's deadline and at most `maxRedirectsInflight` at a time, and the promise resolves with `{data}` the way a socket reply does. The URL must be `https:`, or `http:` on a `ws:` endpoint. The URL is fetched as given, with no check of its host, so the application must validate the host of any URL it builds from request data. A redirect of the URL itself is not followed: a 3xx status rejects. The fetch asks the runtime for `redirect: 'manual'`, so a hop is refused before its request is sent in a runtime which honours it (browsers and undici do). A runtime whose fetch follows a redirect anyway has sent the hop when the pool sees the final URL, and the pool then refuses the response before its body is read; no check of the client can come earlier there. A non-2xx status, a network failure or a body over `maxBytes` (16 MiB by default) rejects with `redirectFailed` (18). The pool does not fetch a redirect twice, because a presigned URL may be single-use. The hook is called with the outcome the server or the connection gave, not with the pool's own timeout or cancel.
+A redirect is a reply or an error the application recognises in `redirect`. The pool fetches the bytes within the call's deadline and at most `maxRedirectsInflight` at a time, and the promise resolves with `{data}` the way a socket reply does. The URL must be `https:`, or `http:` on a `ws:` endpoint. The URL is fetched as given, with no check of its host, so the application must validate the host of any URL it builds from request data. A redirect of the URL itself is not followed: a 3xx status rejects. On a secure endpoint (`wss:` or `https:`) the fetch asks the runtime for `redirect: 'error'`: a redirect fails the fetch before any hop is sent, because a browser's `'manual'` gives an opaque response no hop can be checked on. The hook names the final URL, and that URL is the one fetched. On an insecure endpoint the fetch asks for `redirect: 'manual'`, and a hop is refused before its request is sent in a runtime which honours it (browsers and undici do). A runtime whose fetch follows a redirect anyway has sent the hop when the pool sees the final URL, and the pool then refuses the response before its body is read; no check of the client can come earlier there. A non-2xx status, a network failure or a body over `maxBytes` (16 MiB by default) rejects with `redirectFailed` (18). The pool does not fetch a redirect twice, because a presigned URL may be single-use. The hook is called with the outcome the server or the connection gave, not with the pool's own timeout or cancel.
 
 ### Lifetime and state
 

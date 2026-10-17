@@ -2,6 +2,10 @@ Unreleased
 ==========
 
 * Add `RpcPool` for calls with large payloads: several connections per endpoint with a window of calls in flight each, a bounded wait queue, endpoint keys resolved by the application, a per-call affinity header, a `reroute` hook for server moves, a `redirect` hook whose bytes the pool fetches within the call's deadline, and a `stats()` view. It is exported from the protobuf entry only, so the JSON entry does not load the protobuf codec. Its calls are plain requests, retried after a lost connection, on a `later` refusal and on a move, within one `retries` count. A connection closed for message size settles its calls without a resend. Documented in the README section "RPC pool for large payloads".
+* Add `tokenFrom` to `RpcPool`: the pool takes its token from the client that owns it, lends the client's current token to each connection, and renews it through that client. It works with `tokenExchange`, `getToken` and a static token; `connection.tokenExchange` is refused with `badConfiguration`. Documented in the README section "Tokens" of the pool. A client never used as `tokenFrom` holds no pool state.
+* The pool's calls wait in one line per endpoint key: a change of a connection places only the calls of its key, and stops at the first one it cannot place. Nothing is copied or walked per event.
+* `RpcPool` `idleTimeout` is at most `2147483647` milliseconds; a larger value throws `badConfiguration`.
+* A redirect fetch from a secure endpoint (`wss:` or `https:`) asks the runtime for `redirect: 'error'`, so a redirect fails before any hop is sent; the hook names the final URL. An insecure endpoint keeps `redirect: 'manual'`.
 * Add error code `18` (`redirectFailed`): a redirect of a pool call could not be fetched. Codes 15 to 19 are still reserved for client-local errors.
 * The retry signal, the count of later attempts and the later delay of the rpc tracker are exported for the pool, with no change of behaviour.
 * Add the `tokenExchange` option: the client obtains and renews its connection token over the connection from a refresh token the application persists. See [docs/token_exchange.md](docs/token_exchange.md).
