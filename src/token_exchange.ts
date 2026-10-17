@@ -183,6 +183,8 @@ export class TokenExchangeFlow {
   private failures: number = 0;
   // Set while a connect reply is resumed: that reply is not intercepted again.
   private resuming: boolean = false;
+  // Whether the connect being set up sent the access token: only then does a reply with a user accept it.
+  private connectSentToken: boolean = false;
 
 
   constructor(host: ClientHost, options: TokenExchange) {
@@ -203,6 +205,7 @@ export class TokenExchangeFlow {
       this.host.setToken('');
       this.host.clearRefreshRequired();
     }
+    this.connectSentToken = this.host.token() !== '';
   }
 
 
@@ -218,7 +221,7 @@ export class TokenExchangeFlow {
       return false;
     }
     if (result.user) {
-      if (this.host.token() !== '') {
+      if (this.connectSentToken) {
         this.tokenAccepted();
       }
       return false;
