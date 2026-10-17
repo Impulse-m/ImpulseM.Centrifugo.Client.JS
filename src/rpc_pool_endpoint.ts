@@ -1,5 +1,6 @@
 import type { Centrifuge } from './centrifuge';
 import type { CallTimer } from './call_timer';
+import type { PendingCall } from './rpc_pool';
 
 /** A connection of an rpc pool: its client, the calls it carries and whether its connect is still in flight. */
 export interface PoolConnection {
@@ -24,6 +25,11 @@ export interface PoolConnection {
 /** The connections of one endpoint key, over the endpoints its resolver gave. */
 export class RpcPoolEndpoint {
   readonly urls: string[];
+  /**
+   * The calls of the key waiting for a slot, first come first served. A call settled while it waits stays in the line
+   * until it reaches the head, where it is dropped: the pool does not search the line to remove it.
+   */
+  readonly waiting: PendingCall[] = [];
   private connections: PoolConnection[] = [];
 
 

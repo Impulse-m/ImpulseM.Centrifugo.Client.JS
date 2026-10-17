@@ -1,7 +1,7 @@
 import { Readable } from 'stream';
 import WebSocket from 'ws';
 import { errorCodes, disconnectedCodes } from './codes';
-import { ProtobufCentrifuge } from './protobuf';
+import { Centrifuge as ProtobufCentrifuge } from './protobuf';
 import { RpcPool, RpcPoolOptions } from './rpc_pool';
 import { fetchRedirect } from './rpc_pool_redirect';
 import { RpcResult } from './types';
@@ -152,6 +152,45 @@ describe('RpcPool', () => {
       expect(pool.stats().queued).toBe(1);
     });
 
+    test('a release places the calls of its own key, and a call settled while it waits is dropped at the head', async (): Promise<void> => {
+      const serverA: WaitableFakeServer = await startServer();
+      const serverB: WaitableFakeServer = await startServer();
+      const heldA: any[] = [];
+      const heldB: any[] = [];
+      serverA.onCommand = (cmd: any): any => (isCall(cmd) ? (heldA.push(cmd), holdReply) : undefined);
+      serverB.onCommand = (cmd: any): any => (isCall(cmd) ? (heldB.push(cmd), holdReply) : undefined);
+      const pool: RpcPool = createPool((key: string): string => (key === 'a' ? serverA.url : serverB.url), {
+        maxConnectionsPerEndpoint: 1,
+        maxQueued: 8,
+      });
+      const first: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 }), { endpointKey: 'a' }));
+      quiet(pool.rpc('work', bytes({ n: 2 }), { endpointKey: 'a' }));
+      const controller: AbortController = new AbortController();
+      const aborted: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 3 }), { endpointKey: 'a', signal: controller.signal }));
+      quiet(pool.rpc('work', bytes({ n: 4 }), { endpointKey: 'a' }));
+      const other: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 5 }), { endpointKey: 'b' }));
+      expect(await until((): boolean => heldA.length === 1 && heldB.length === 1)).toBe(true);
+      expect(pool.stats()).toEqual({ connections: 2, inflight: 2, queued: 3, redirects: 0 });
+
+      controller.abort();
+      await expect(aborted).rejects.toMatchObject({ code: errorCodes.cancelled });
+      expect(pool.stats().queued).toBe(2);
+
+      // The release of key b places nothing of key a: its line keeps the calls waiting for the slot of key a.
+      reply(serverB, heldB[0], { n: 5 });
+      expect(fromBytes((await other).data)).toEqual({ n: 5 });
+      await sleep(50);
+      expect(heldA.length).toBe(1);
+      expect(pool.stats().queued).toBe(2);
+
+      // The release of key a sends the second call, drops the settled third and keeps the fourth in its line.
+      reply(serverA, heldA[0], { n: 1 });
+      expect(fromBytes((await first).data)).toEqual({ n: 1 });
+      expect(await until((): boolean => heldA.length === 2)).toBe(true);
+      expect(fromBytes(heldA[1].rpc.data)).toEqual({ n: 2 });
+      expect(pool.stats()).toEqual({ connections: 2, inflight: 1, queued: 1, redirects: 0 });
+    });
+
     test('a burst opens one connection while it connects', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
       let connectCmd: any = null;
@@ -189,6 +228,19 @@ describe('RpcPool', () => {
       expect(pool.stats().connections).toBe(0);
       expect(fromBytes((await pool.rpc('work', bytes({ n: 2 }))).data)).toEqual({ n: 2 });
       expect(connectsOf(server).length).toBe(2);
+    });
+
+    test('an idleTimeout beyond the longest timer arms no loop: the check waits for the bound, in a period', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = echo;
+      const pool: RpcPool = createPool((): string => server.url, { idleTimeout: 3000000000 });
+      expect(fromBytes((await pool.rpc('work', bytes({ n: 1 }))).data)).toEqual({ n: 1 });
+      const timers: jest.SpyInstance = jest.spyOn(global, 'setTimeout');
+      await sleep(300);
+      // The sleep is one timer of its own; a check re-armed in a loop would add one per millisecond.
+      expect(timers.mock.calls.length).toBeLessThanOrEqual(2);
+      expect(pool.stats().connections).toBe(1);
+      timers.mockRestore();
     });
 
     test('idleTimeout 0 keeps the connection open', async (): Promise<void> => {

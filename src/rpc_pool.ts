@@ -1,4 +1,4 @@
-import { ProtobufCentrifuge } from './protobuf';
+import { CentrifugeProtobuf } from './protobuf_client';
 import { disconnectedCodes, errorCodes } from './codes';
 import { callTimer } from './call_timer';
 import type { CallTimer } from './call_timer';
@@ -45,9 +45,10 @@ export interface RpcPoolOptions {
    */
   maxInflightPerConnection?: number;
   /**
-   * Calls waiting for a slot at most, over all endpoints. Beyond it rpc() rejects with limitExceeded. Default 64. The
-   * queue is walked on every change of a connection, so keep it small: tens of calls, not thousands. A resend of a call
-   * already admitted (lost connection, later, move) is queued beyond this bound, and is bounded by retries instead.
+   * Calls waiting for a slot at most, over all endpoints. Beyond it rpc() rejects with limitExceeded. Default 64. A change
+   * of a connection places only the calls waiting for its endpoint key, so the bound does not multiply the work of an
+   * event. A resend of a call already admitted (lost connection, later, move) is queued beyond this bound, and is bounded
+   * by retries instead.
    */
   maxQueued?: number;
   /** Closes a connection without calls for this long, in milliseconds. 0 keeps it open. Default 60000. */
@@ -113,7 +114,7 @@ export interface RpcPoolStats {
 }
 
 // A call of the pool from rpc() until it settles.
-interface PendingCall {
+export interface PendingCall {
   method: string;
   data: Uint8Array;
   headers: Record<string, string> | undefined;
@@ -126,6 +127,8 @@ interface PendingCall {
   settled: boolean;
   // True while the call holds a slot of a connection: from its send until its reply or its error.
   sent: boolean;
+  // True while the call is in the line of its endpoint key, counted in RpcPool.queued.
+  queued: boolean;
   timer: CallTimer | null;
   resend: CallTimer | null;
   // Removes the abort listener of the signal, if the call has one.
@@ -143,9 +146,12 @@ const defaultMaxInflightPerConnection: number = 1;
 const defaultMaxQueued: number = 64;
 const defaultIdleTimeout: number = 60000;
 const defaultMaxRedirectsInflight: number = 4;
+// The longest delay a timer runs for, as ttlMilliseconds in utils.ts: a later due time is checked at this bound.
+const maxTimerDelay: number = 2147483647;
 // Codes from this one up are the server's errors; the ones below are the client's own, see errorCodes.
 const serverErrorFloor: number = 100;
 const noop: () => void = (): void => {};
+const noData: Uint8Array = new Uint8Array(0);
 
 
 /**
@@ -172,12 +178,13 @@ export class RpcPool {
   private readonly groups: Map<string, RpcPoolEndpoint> = new Map();
   // The calls not settled yet, so that close() settles them all.
   private readonly calls: Set<PendingCall> = new Set();
-  // The calls waiting for a slot, first come first served over all endpoints.
-  private readonly queue: PendingCall[] = [];
+  // The groups whose waiting calls may be placed now: a pass over a group is started by the event that frees its room.
+  private readonly dirty: Set<RpcPoolEndpoint> = new Set();
+  // The calls in the lines of the groups, counted for maxQueued; a settled call leaves the count when it settles.
+  private queued: number = 0;
   private readonly errorListeners: Array<(ctx: { endpoint: string; error: any }) => void> = [];
   private closed: boolean = false;
   private dispatching: boolean = false;
-  private dispatchAgain: boolean = false;
 
 
   constructor(options: RpcPoolOptions) {
@@ -239,6 +246,7 @@ export class RpcPool {
         laterResends: 0,
         settled: false,
         sent: false,
+        queued: false,
         timer: null,
         resend: null,
         detach: noop,
@@ -268,7 +276,7 @@ export class RpcPool {
         inflight += conn.inflight;
       }
     }
-    return { connections: connections, inflight: inflight, queued: this.queue.length, redirects: this.redirects.inflight };
+    return { connections: connections, inflight: inflight, queued: this.queued, redirects: this.redirects.inflight };
   }
 
 
@@ -284,6 +292,7 @@ export class RpcPool {
         conn.idle = null;
         conn.client.disconnect();
       }
+      group.waiting.length = 0;
     }
     for (const call of Array.from(this.calls)) {
       // A call whose reply carried a redirect was served already: it is in flight until its fetch ends.
@@ -390,11 +399,13 @@ export class RpcPool {
         if (this.assign(call, group)) {
           return;
         }
-        if (fresh && this.queue.length >= this.maxQueued) {
+        if (fresh && this.queued >= this.maxQueued) {
           this.fail(call, poolError(errorCodes.limitExceeded, 'too many rpc calls waiting for a connection'));
           return;
         }
-        this.queue.push(call);
+        call.queued = true;
+        this.queued++;
+        group.waiting.push(call);
       } catch (e) {
         this.fail(call, e);
       }
@@ -434,7 +445,7 @@ export class RpcPool {
 
   // Opens a connection to an endpoint. Its connect is in flight until its first connected event.
   private open(group: RpcPoolEndpoint, url: string): PoolConnection {
-    const client: ProtobufCentrifuge = new ProtobufCentrifuge(url, this.connectionOptions);
+    const client: CentrifugeProtobuf = new CentrifugeProtobuf(url, this.connectionOptions);
     const conn: PoolConnection = {
       url: url,
       group: group,
@@ -447,7 +458,7 @@ export class RpcPool {
     };
     client.on('connected', (): void => {
       conn.connecting = false;
-      this.dispatch();
+      this.dispatch(group);
     });
     client.on('disconnected', (ctx: any): void => {
       this.lost(conn, ctx);
@@ -467,7 +478,7 @@ export class RpcPool {
     conn.idle?.clear();
     conn.idle = null;
     conn.group.remove(conn);
-    this.dispatch();
+    this.dispatch(conn.group);
     if (ctx.code !== disconnectedCodes.disconnectCalled) {
       for (const listener of this.errorListeners) {
         listener({ endpoint: conn.url, error: ctx });
@@ -498,25 +509,27 @@ export class RpcPool {
   }
 
 
-  // A slot became free: a connection left without calls is marked as used now, and the queue takes the free slot.
+  // A slot became free: a connection left without calls is marked as used now, and the line of its key takes the slot.
   private released(conn: PoolConnection): void {
     if (conn.inflight === 0) {
       conn.lastUse = Date.now();
       this.armIdle(conn);
     }
-    this.dispatch();
+    this.dispatch(conn.group);
   }
 
 
   // Arms the idle check of a connection when none is pending. Nothing runs without the option, nor on a connection
   // which ended: its calls may settle after it left the group, and close() would not reach a timer armed then. The
   // check is not cancelled when a call starts: it reads lastUse when it is due, so a busy connection arms no timer per
-  // call, and a connection has at most one check pending.
+  // call, and a connection has at most one check pending. A due time beyond the longest timer is checked at that bound
+  // and armed again then, so an idleTimeout of any size arms one timer per period at most.
   private armIdle(conn: PoolConnection): void {
     if (this.idleTimeout === 0 || this.closed || conn.closeCode !== null || conn.idle !== null) {
       return;
     }
-    conn.idle = callTimer(conn.lastUse + this.idleTimeout, (): void => this.idleDue(conn));
+    const due: number = Math.min(conn.lastUse + this.idleTimeout, Date.now() + maxTimerDelay);
+    conn.idle = callTimer(due, (): void => this.idleDue(conn));
   }
 
 
@@ -662,7 +675,8 @@ export class RpcPool {
   }
 
 
-  // Settles a call: no timer, no signal listener, not queued, and a redirect fetch is cancelled. False when it settled.
+  // Settles a call: no timer, no signal listener, not waiting, and a redirect fetch is cancelled. False when it settled.
+  // A call waiting in a line stays there until it reaches the head, where dispatch drops it: no search of the line here.
   private settle(call: PendingCall): boolean {
     if (call.settled) {
       return false;
@@ -675,54 +689,73 @@ export class RpcPool {
     call.resend = null;
     call.detach();
     call.controller?.abort();
-    const index: number = this.queue.indexOf(call);
-    if (index >= 0) {
-      this.queue.splice(index, 1);
+    if (call.queued) {
+      call.queued = false;
+      this.queued--;
     }
+    call.data = noData;
     return true;
   }
 
 
-  // Places the queued calls on the connections with room, first come first served. A call that cannot be placed keeps
-  // its place. A connection event during a pass (it may open or end a connection) asks for one more pass instead.
-  private dispatch(): void {
+  // Places the waiting calls of a group on its connections, first come first served. A pass is started for the group
+  // whose room changed, and only that group is walked: a call's placement depends on its group alone, so the pass stops
+  // at the first call which cannot be placed. An event during a pass (it may open or end a connection) marks its group
+  // for one more pass, which the running pass takes after its own.
+  private dispatch(group: RpcPoolEndpoint): void {
     if (this.closed) {
       return;
     }
+    this.dirty.add(group);
     if (this.dispatching) {
-      this.dispatchAgain = true;
       return;
     }
     this.dispatching = true;
     try {
-      do {
-        this.dispatchAgain = false;
-        for (const call of this.queue.slice(0)) {
-          const group: RpcPoolEndpoint | undefined = this.groups.get(call.key);
-          if (!call.settled && group !== undefined) {
-            this.place(call, group);
-          }
+      while (this.dirty.size > 0) {
+        const next: RpcPoolEndpoint | undefined = this.dirty.values().next().value;
+        if (next === undefined) {
+          break;
         }
-      } while (this.dispatchAgain);
+        this.dirty.delete(next);
+        this.drain(next);
+      }
     } finally {
       this.dispatching = false;
     }
   }
 
 
-  // Takes a queued call off the queue when a connection takes it. A failure to open a connection fails the call.
-  private place(call: PendingCall, group: RpcPoolEndpoint): void {
-    try {
-      if (!this.assign(call, group)) {
-        return;
+  // Places the calls at the head of a group's line while the group has room for them. A settled call is dropped, and a
+  // call the placement fails is failed with its error, as a call which cannot open its connection.
+  private drain(group: RpcPoolEndpoint): void {
+    while (group.waiting.length > 0) {
+      const head: PendingCall = group.waiting[0];
+      if (head.settled) {
+        group.waiting.shift();
+        continue;
       }
-    } catch (e) {
-      this.fail(call, e);
+      try {
+        if (!this.assign(head, group)) {
+          return;
+        }
+      } catch (e) {
+        this.leave(group, head);
+        this.fail(head, e);
+        continue;
+      }
+      this.leave(group, head);
     }
-    const index: number = this.queue.indexOf(call);
-    if (index >= 0) {
-      this.queue.splice(index, 1);
+  }
+
+
+  // Takes a call off the head of its line: it holds a slot, or it failed.
+  private leave(group: RpcPoolEndpoint, call: PendingCall): void {
+    if (group.waiting[0] === call) {
+      group.waiting.shift();
     }
+    call.queued = false;
+    this.queued--;
   }
 }
 
