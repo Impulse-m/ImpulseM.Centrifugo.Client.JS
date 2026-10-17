@@ -744,7 +744,7 @@ describe('RpcPool', () => {
       expect(arrayBuffer).not.toHaveBeenCalled();
     });
 
-    test('a body with no stream and no declared length is refused without being buffered', async (): Promise<void> => {
+    test('a body with no stream is refused without being buffered, declared length or not', async (): Promise<void> => {
       const arrayBuffer: jest.Mock = jest.fn();
       const response: any = { ok: true, status: 200, headers: new Headers(), body: {}, arrayBuffer: arrayBuffer };
       await expect(fetchRedirect(
@@ -859,6 +859,14 @@ describe('RpcPool', () => {
       await expect(fetchRedirect(fetchFunction as any, 'wss://edge.example/connection/websocket', {
         url: 'http://cdn.example/y',
       }, new AbortController().signal)).rejects.toMatchObject({ code: errorCodes.redirectFailed });
+    });
+
+    test('an http URL is refused on an https endpoint, which is a secure scheme, and nothing is fetched', async (): Promise<void> => {
+      const fetchFunction: jest.Mock = jest.fn();
+      await expect(fetchRedirect(fetchFunction as any, 'https://edge.example/connection/websocket', {
+        url: 'http://cdn.example/part/1',
+      }, new AbortController().signal)).rejects.toMatchObject({ code: errorCodes.redirectFailed });
+      expect(fetchFunction).not.toHaveBeenCalled();
     });
 
     test('an abort cancels a redirect fetch in progress', async (): Promise<void> => {

@@ -139,7 +139,7 @@ function redirectUrl(endpoint: string, target: string): string {
   if (parsed.protocol === 'https:') {
     return parsed.href;
   }
-  if (parsed.protocol === 'http:' && !/^wss:/i.test(endpoint)) {
+  if (parsed.protocol === 'http:' && /^ws:/i.test(endpoint)) {
     return parsed.href;
   }
   throw redirectFailure('redirect URL scheme is not allowed for the endpoint');
@@ -147,8 +147,8 @@ function redirectUrl(endpoint: string, target: string): string {
 
 
 // The body as bytes, read chunk by chunk so that a body over the limit is cut off as it arrives. A declared length over
-// the limit is refused before the body is read. A body with no stream is buffered whole, which is allowed only when its
-// length is declared: otherwise the limit would apply once the body is in memory, which is too late.
+// the limit is refused before the body is read. A body with no stream is refused, since its size cannot be bounded while
+// it arrives: only an absent body is buffered, and it is empty.
 async function readBounded(response: any, maxBytes: number): Promise<Uint8Array> {
   const declared: number | undefined = declaredLength(response);
   if (declared !== undefined && declared > maxBytes) {
@@ -157,7 +157,7 @@ async function readBounded(response: any, maxBytes: number): Promise<Uint8Array>
   }
   const source: ChunkSource | null = chunkSource(response.body);
   if (source === null) {
-    if (response.body !== null && response.body !== undefined && declared === undefined) {
+    if (response.body !== null && response.body !== undefined) {
       discardBody(response);
       throw redirectFailure('redirect body cannot be bounded');
     }
