@@ -1289,6 +1289,54 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
+  test('a renewal refusal that arrives after the connection was lost and reconnected stays inside the horizon: the session goes on', async (): Promise<void> => {
+    serve({
+      ttl: 100,
+      connect: (cmd: any): any => (cmd.connect.token ? { id: cmd.id, connect: { ...server.connectResult, user: 'alice' } } : undefined),
+    });
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      let refuse: (err: any) => void = (): void => {};
+      const c: Centrifuge = create({
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 2) {
+            return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void, reject: (err: any) => void): void => {
+              refuse = reject;
+            });
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+      expect(calls).toBe(1);
+
+      // The renewal runs at 70 to 90 seconds; its exchange is in flight when the connection is lost. The kept token is still valid.
+      await advanceUntil((): boolean => calls === 2);
+      server.closeConnection();
+      await advanceUntil((): boolean => commands('connect').length === 2 && c.state === State.Connected);
+      expect(commands('connect').map((cmd: any): string => cmd.connect.token ?? '')).toEqual(['', 'access-1']);
+
+      // The issuer refuses the token on the old connection. A refusal inside the horizon fails the fetch, and the session goes on.
+      refuse(new UnauthorizedError('refused'));
+      await advanceUntil((): boolean => events.includes('error:refreshToken'));
+      expect(events).not.toContain('disconnected:1');
+      expect(c.state).toBe(State.Connected);
+
+      // The refresh timer retries with a new exchange, which succeeds on the connection.
+      jest.advanceTimersByTime(10000);
+      await until((): boolean => commands('refresh').length === 2);
+      expect(calls).toBe(3);
+      expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1', 'access-2']);
+      expect(events).not.toContain('disconnected:1');
+      expect(c.state).toBe(State.Connected);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a refresh(token) made while a renewal waits in the exchange queue supersedes that renewal: the storage keeps the application token', async (): Promise<void> => {
     serve();
     useFakeClock();

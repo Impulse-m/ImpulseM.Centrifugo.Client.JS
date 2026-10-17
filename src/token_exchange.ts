@@ -314,18 +314,17 @@ export class TokenExchangeFlow {
   // holds ends the session; a refusal inside the grace horizon fails the fetch, which the refresh timer retries.
   private async renewalToken(attempt: Attempt): Promise<string> {
     let token: string | null;
-    let refused: boolean = false;
     try {
       token = await this.loadAndExchange(attempt);
     } catch (err: any) {
+      // A refusal inside the horizon fails the fetch whether its attempt is still current or not: the session goes on.
+      if (err instanceof Refusal && !err.terminal) {
+        throw new Error(refusedMessage);
+      }
       if (!(err instanceof UnauthorizedError) || !attempt.current()) {
         throw err;
       }
-      refused = err instanceof Refusal && !err.terminal;
       token = null;
-    }
-    if (refused) {
-      throw new Error(refusedMessage);
     }
     if (token === null) {
       this.closeRun();
@@ -635,7 +634,8 @@ export class TokenExchangeFlow {
       // A refusal counts even when its attempt has already ended: the horizon is measured from the first refusal.
       this.openRun();
       if (!attempt.current()) {
-        throw err;
+        // The attempt ran on a connection that is gone: the refusal still counts against the horizon, and does not end the session.
+        throw new Refusal(this.horizonPassed());
       }
       if (!retried) {
         const current: string | null | undefined = await this.options.load();
