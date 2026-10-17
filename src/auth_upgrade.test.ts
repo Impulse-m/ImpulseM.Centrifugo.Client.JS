@@ -672,6 +672,56 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
     expect(refreshCommands().map((cmd: any): string => cmd.refresh.token)).toEqual(['t2', 't3']);
   });
 
+  test('a timer refresh whose getToken fails while a refresh() without a token fetches its own reports the failure and retries', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated', expires: true, ttl: 1 };
+    server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? {
+      id: cmd.id,
+      refresh: { expires: true, ttl: 60 },
+    } : undefined);
+    const errors: string[] = [];
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      let fetches: number = 0;
+      let failTimer: (err: Error) => void = (): void => {};
+      const getToken: () => Promise<string> = (): Promise<string> => {
+        fetches++;
+        if (fetches === 2) {
+          return new Promise<string>((resolve: (token: Promise<string>) => void): void => {
+            failTimer = (err: Error): void => {
+              resolve(Promise.reject(err));
+            };
+          });
+        }
+        return Promise.resolve('t' + fetches);
+      };
+      const c: Centrifuge = create({ getToken: getToken });
+      c.on('error', (ctx: any): void => {
+        errors.push(ctx.type);
+      });
+      await connect(c);
+
+      // The connect fetches 't1', the timer then fetches its token and waits. The app's refresh() without a token
+      // fetches 't3' meanwhile, and that call accepts it. The timer fetch then fails: a refresh() without a token
+      // supersedes no renewal, so the failure is reported and retried.
+      jest.advanceTimersByTime(1000);
+      expect(await until((): boolean => fetches === 2)).toBe(true);
+      await c.refresh();
+      failTimer(new Error('network down'));
+      expect(await until((): boolean => errors.includes('refreshToken'))).toBe(true);
+      expect(c.state).toBe(State.Connected);
+
+      // The failed renewal is retried by the timer, which fetches 't4' and sends it.
+      jest.advanceTimersByTime(20000);
+      expect(await until((): boolean => fetches === 4)).toBe(true);
+      await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 2);
+    } finally {
+      jest.useRealTimers();
+    }
+
+    expect(errors.filter((type: string): boolean => type === 'refreshToken')).toHaveLength(1);
+    expect(refreshCommands().map((cmd: any): string => cmd.refresh.token)).toEqual(['t3', 't4']);
+  });
+
   test('an auth handler that throws on a refresh does not fail the refresh, whose token is accepted', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated' };
     server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? {

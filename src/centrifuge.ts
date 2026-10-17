@@ -2016,7 +2016,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         }
       });
     }).catch(function (e) {
-      if (clientId !== self._client || !self._isConnected() || self._refreshSlot.currentGeneration() !== generation) {
+      if (clientId !== self._client || !self._isConnected() || self._refreshSlot.tokenCallSince(generation)) {
         if (tokenResolved) {
           self._reportDispatchError(e);
         }

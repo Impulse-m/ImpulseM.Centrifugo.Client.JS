@@ -69,6 +69,8 @@ export class RefreshSlot {
   private generationCount: number = 0;
   // Moves on with each refresh() call that brings a token, see currentTokenGeneration.
   private tokenGenerationCount: number = 0;
+  // The generation at which the last refresh() call that brings a token started, see tokenCallSince.
+  private tokenCallAt: number = 0;
   // The generation of the last token accepted.
   private acceptedGeneration: number = 0;
 
@@ -94,6 +96,15 @@ export class RefreshSlot {
 
 
   /**
+   * Whether a refresh(token) call started after the generation given (see currentGeneration). A refresh() that
+   * fetches its own token does not count: it does not supersede a timer refresh that fetched its token before it.
+   */
+  tokenCallSince(generation: number): boolean {
+    return this.tokenCallAt > generation;
+  }
+
+
+  /**
    * Runs a refresh() call with the token given, or with none. The call runs at once when no other
    * is in progress, else after the one in flight. Rejects with errorCodes.limitExceeded when
    * maxRefreshCalls calls are in progress already.
@@ -110,6 +121,7 @@ export class RefreshSlot {
     this.generationCount++;
     if (token !== undefined) {
       this.tokenGenerationCount++;
+      this.tokenCallAt = this.generationCount;
     }
     const refresh: Promise<AuthContext> = pending === null
       ? this.run(token)
