@@ -231,6 +231,17 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     expect(commands('refresh')).toHaveLength(1);
   });
 
+  test('an anonymous connect reply bootstraps even when the connect sent a seeded token, which the reply refused', async (): Promise<void> => {
+    serve();
+    const c: Centrifuge = create({}, { token: 'seed-access' });
+    await connectClient(c);
+
+    expect(order).toEqual(['connect', 'rpc:exchange', 'store:refresh-2', 'refresh']);
+    expect(commands('connect').map((cmd: any): string => cmd.connect.token ?? '')).toEqual(['seed-access']);
+    expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1']);
+    expect(c.state).toBe(State.Connected);
+  });
+
   test('an expired access token is dropped on the reconnect, which then bootstraps again', async (): Promise<void> => {
     serve({ ttl: 10 });
     useFakeClock();
