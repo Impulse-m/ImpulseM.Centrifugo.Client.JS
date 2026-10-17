@@ -12,20 +12,19 @@ interface RedirectWaiter {
 
 
 /**
- * Bounds the redirect fetches in flight over one pool. A fetch waits for a slot, at most maxWaiters of them; a waiter
- * whose signal aborts leaves the line without taking one. No timer: a waiter waits for a release only.
+ * Bounds the redirect fetches in flight over one pool. A fetch waits for a slot in arrival order; a waiter whose signal
+ * aborts leaves the line without taking one. No timer: a waiter waits for a release only. The pool bounds the waiters
+ * with its own maxQueued, which counts them with the calls waiting for a connection.
  */
 export class RedirectGate {
   private limit: number;
-  private maxWaiters: number;
   private running: number = 0;
   // The waiters in arrival order: a Set keeps the order, and an abort removes its waiter in O(1).
   private waiters: Set<RedirectWaiter> = new Set<RedirectWaiter>();
 
 
-  constructor(limit: number, maxWaiters: number) {
+  constructor(limit: number) {
     this.limit = limit;
-    this.maxWaiters = maxWaiters;
   }
 
 
@@ -46,12 +45,6 @@ export class RedirectGate {
     return new Promise<() => void>((resolve: (release: () => void) => void, reject: (error: any) => void): void => {
       if (signal.aborted) {
         reject(poolError(errorCodes.cancelled, 'cancelled'));
-        return;
-      }
-      // A fetch which would wait beyond the bound is refused, as a call beyond maxQueued is. A fetch which gets a slot
-      // at once waits for nothing, so a zero bound still lets one fetch run.
-      if (this.full && this.waiters.size >= this.maxWaiters) {
-        reject(poolError(errorCodes.limitExceeded, 'too many redirects waiting for a fetch slot'));
         return;
       }
       const waiter: RedirectWaiter = {

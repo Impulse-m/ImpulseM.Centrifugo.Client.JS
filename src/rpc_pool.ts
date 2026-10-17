@@ -198,7 +198,7 @@ export class RpcPool {
       throw poolError(errorCodes.badConfiguration, `idleTimeout must be at most ${maxTimerDelay} milliseconds`);
     }
     this.retries = integerOption('retries', options.retries, maxLaterResends, 0);
-    this.redirects = new RedirectGate(integerOption('maxRedirectsInflight', options.maxRedirectsInflight, defaultMaxRedirectsInflight, 1), this.maxQueued);
+    this.redirects = new RedirectGate(integerOption('maxRedirectsInflight', options.maxRedirectsInflight, defaultMaxRedirectsInflight, 1));
     this.rerouteHook = options.reroute;
     this.redirectHook = options.redirect;
     this.fetchOption = options.fetch;
@@ -765,14 +765,18 @@ export class RpcPool {
 
   // Fetches a redirect for a call, once a redirect slot is free. The call settles with the bytes or with the failure.
   private fetchInto(call: PendingCall, endpoint: string, redirect: RpcPoolRedirect): void {
-    // A fetch which would wait for a slot waits in the pool-wide count of maxQueued, like a call waiting for a connection.
-    if (this.redirects.full && this.queued >= this.maxQueued) {
+    // A fetch which gets a free slot waits for nothing: it is not counted, and a zero maxQueued does not refuse it. A fetch
+    // which would wait is counted in the pool-wide queued, like a call waiting for a connection, and refused beyond it.
+    const waits: boolean = this.redirects.full;
+    if (waits && this.queued >= this.maxQueued) {
       this.fail(call, poolError(errorCodes.limitExceeded, 'too many redirects waiting for a fetch slot'));
       return;
     }
     const controller: AbortController = new AbortController();
     call.controller = controller;
-    this.count(call);
+    if (waits) {
+      this.count(call);
+    }
     this.redirects.acquire(controller.signal).then((release: () => void): void => {
       this.uncount(call);
       fetchRedirect(this.fetchOf(), endpoint, redirect, controller.signal).then(

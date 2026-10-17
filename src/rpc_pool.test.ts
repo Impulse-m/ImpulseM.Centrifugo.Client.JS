@@ -9,6 +9,21 @@ import {
   WaitableFakeServer, bytes, fromBytes, holdReply, rpcOptionsWireFlag, until,
 } from './testing/codecs';
 
+// Polls a condition over real time, for a state which waits for the round trips of the fake server; false when the
+// budget runs out first.
+async function within(condition: () => boolean, budgetMs: number): Promise<boolean> {
+  const started: number = Date.now();
+  while (!condition()) {
+    if (Date.now() - started > budgetMs) {
+      return false;
+    }
+    await new Promise<void>((resolve: () => void): void => {
+      setTimeout(resolve, 10);
+    });
+  }
+  return true;
+}
+
 // The RPC pool against fake servers: the scheduling of connections and calls, the routing by endpoint key and
 // affinity, the server's moves (reroute, redirect), the retries, the signal and the close. The pool speaks protobuf,
 // so every fake server speaks protobuf too. No live server is needed.
@@ -795,11 +810,28 @@ describe('RpcPool', () => {
         return error;
       }));
       // One fetch holds the slot, two wait for it, and the fourth call is refused: the waiting fetches are in maxQueued.
-      expect(await until((): boolean => refused.length === 1 && pool.stats().redirects === 1 && pool.stats().queued === 2)).toBe(true);
+      expect(await within((): boolean => refused.length === 1 && pool.stats().redirects === 1 && pool.stats().queued === 2, 5000)).toBe(true);
       expect(refused[0]).toMatchObject({ code: errorCodes.limitExceeded });
       pool.close();
       const outcomes: any[] = await Promise.all(settled);
       expect(outcomes.filter((outcome: any): boolean => outcome.code === errorCodes.connectionClosed)).toHaveLength(3);
+    });
+
+    test('a fetch which gets a free slot is not counted in queued', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, rpc: { data: bytes({}) } } : undefined);
+      const fetchFunction: jest.Mock = hangingFetch();
+      const pool: RpcPool = createPool((): string => server.url, {
+        maxQueued: 1,
+        maxRedirectsInflight: 1,
+        fetch: fetchFunction as any,
+        redirect: (): any => ({ url: 'https://cdn.example/x' }),
+      });
+      const first: Promise<any> = pool.rpc('work', bytes({ n: 1 })).then((): string => 'resolved', (error: any): any => error);
+      expect(await until((): boolean => pool.stats().redirects === 1)).toBe(true);
+      expect(pool.stats().queued).toBe(0);
+      pool.close();
+      await first;
     });
 
     test('a hook which returns null, as undefined does, is not a redirect', async (): Promise<void> => {
