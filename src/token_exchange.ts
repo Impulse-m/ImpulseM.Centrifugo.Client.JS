@@ -345,7 +345,8 @@ export class TokenExchangeFlow {
       throw new Error(refusedMessage);
     }
     if (token === null) {
-      this.closeRun();
+      // The application removed the refresh token: the session is over, whatever asked for the token.
+      this.endSession();
       throw new UnauthorizedError('');
     }
     return token;
@@ -766,9 +767,10 @@ export class TokenExchangeFlow {
   }
 
 
-  // Whether the grace horizon of the open refusal run has passed: a refusal from then on ends the session.
+  // Whether the grace horizon of the open refusal run has passed: a refusal from then on ends the session. Without an
+  // open run no horizon has started, so none has passed.
   private horizonPassed(): boolean {
-    return performance.now() >= this.horizon();
+    return this.refusedSince !== null && performance.now() >= this.horizon();
   }
 
 

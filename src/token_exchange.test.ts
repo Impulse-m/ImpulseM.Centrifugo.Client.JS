@@ -2,7 +2,8 @@ import { Centrifuge, UnauthorizedError } from './centrifuge';
 import { errorCodes } from './codes';
 import { CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, holdReply, until } from './testing/codecs';
 import { Options, State, TokenExchange, TokenExchangeContext, TokenExchangeResult } from './types';
-import { TokenExchangeRefusedError } from './token_exchange';
+import type { ClientHost } from './client_host';
+import { TokenExchangeFlow, TokenExchangeRefusedError } from './token_exchange';
 
 // The token exchange of the tokenExchange option, over both codecs. The fake issuer answers the exchange rpc, and every
 // exchange rotates the refresh token: the app starts with refresh-1, and the n-th exchange issues access-n and
@@ -22,10 +23,14 @@ function commandKind(cmd: any): string {
 // The per-test timeout of this file: the waits below are bounded by their own budgets, and a slow runner must not fail them.
 jest.setTimeout(20000);
 
+// The real timer, kept before any test switches the clock to a fake one: the socket's round trips need real time.
+const realSetTimeout: typeof setTimeout = setTimeout;
+
 /**
  * Advances the fake clock in steps of stepMs (half a second by default) until the condition holds. Between the steps the
- * socket gets a few real turns, so a reconnect opens within the connect timeout of the fake clock. The turns are few on
- * purpose: a wait of a minute and a half of fake time is about 180 steps, and every step's turns are real time.
+ * socket gets a few real turns and a short real wait, so a reconnect opens within the connect timeout of the fake clock
+ * and a round trip of the socket settles before the next step: the fake clock moves only while the socket is idle. The
+ * waits are few on purpose: a wait of a minute and a half of fake time is about 180 steps, and every step's waits are real time.
  */
 async function advanceUntil(condition: () => boolean, maxSteps: number = 200, stepMs: number = 500): Promise<void> {
   for (let step: number = 0; step < maxSteps && !condition(); step++) {
@@ -33,6 +38,11 @@ async function advanceUntil(condition: () => boolean, maxSteps: number = 200, st
     for (let turn: number = 0; turn < 20 && !condition(); turn++) {
       await new Promise<void>((resolve: () => void): void => {
         setImmediate(resolve);
+      });
+    }
+    if (!condition()) {
+      await new Promise<void>((resolve: () => void): void => {
+        realSetTimeout(resolve, 2);
       });
     }
   }
@@ -1347,6 +1357,23 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
+  test('an explicit refresh() after the refresh token was removed ends the session: disconnected with code 1, no reconnect', async (): Promise<void> => {
+    serve();
+    let removed: boolean = false;
+    const c: Centrifuge = create({ load: (): string | null => (removed ? null : 'refresh-1') });
+    const events: string[] = record(c);
+    await connectClient(c);
+
+    removed = true;
+    await expect(c.refresh()).rejects.toThrow();
+    await until((): boolean => events.includes('disconnected:1'));
+    await flush();
+
+    expect(c.state).toBe(State.Disconnected);
+    expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual(['disconnected:1']);
+    expect(commands('connect')).toHaveLength(1);
+  });
+
   test('a failing store reports tokenStore, and the bootstrap completes', async (): Promise<void> => {
     serve();
     const c: Centrifuge = create({
@@ -2120,6 +2147,25 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       await refreshed;
 
       expect(stored).toBe('refresh-3');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+describe('TokenExchangeFlow horizon', (): void => {
+  test('without an open refusal run no horizon has passed, however long the page has been open', (): void => {
+    jest.useFakeTimers();
+    try {
+      // The page is older than the default grace of 30 seconds, and no refusal has opened a run.
+      jest.advanceTimersByTime(60000);
+      const flow: TokenExchangeFlow = new TokenExchangeFlow({} as ClientHost, {
+        load: (): string => 'refresh-1',
+        store: (): void => {},
+        exchange: (): Promise<TokenExchangeResult> => Promise.reject(new Error('not called')),
+      });
+
+      expect((flow as any).horizonPassed()).toBe(false);
     } finally {
       jest.useRealTimers();
     }
