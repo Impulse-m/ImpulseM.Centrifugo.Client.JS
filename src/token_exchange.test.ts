@@ -49,16 +49,6 @@ async function advanceUntil(condition: () => boolean, maxSteps: number = 200, st
   expect(condition()).toBe(true);
 }
 
-/** Polls the condition every 10 milliseconds of real time, for the tests whose timers are real: up to 15 seconds. */
-async function poll(condition: () => boolean): Promise<void> {
-  for (let turn: number = 0; turn < 1500 && !condition(); turn++) {
-    await new Promise<void>((resolve: () => void): void => {
-      setTimeout(resolve, 10);
-    });
-  }
-  expect(condition()).toBe(true);
-}
-
 /** Records the events of a client as strings: the kind, and the type, channel or code the event carries. */
 function record(c: Centrifuge): string[] {
   const events: string[] = [];
@@ -707,6 +697,41 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       random.mockRestore();
       jest.useRealTimers();
     }
+  });
+
+  test('a connect reply with a user to a connect that sent no token does not close the refusal run: the next refusal is the verdict', async (): Promise<void> => {
+    let proxy: boolean = false;
+    serve({
+      connect: (cmd: any): any => (proxy && !cmd.connect.token ? { id: cmd.id, connect: { ...server.connectResult, user: 'proxy-user' } } : undefined),
+    });
+    let calls: number = 0;
+    const c: Centrifuge = create({
+      exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+        calls++;
+        if (calls <= 2) {
+          throw new UnauthorizedError('refused');
+        }
+        return issue(ctx);
+      },
+    });
+    useFakeClock();
+    const events: string[] = record(c);
+    c.connect();
+    await advanceUntil((): boolean => events.includes('error:connectToken'));
+
+    // The connection is lost with the refusal run open. The connect proxy authenticates the connection with a user, and the
+    // connect sent no token, so the server accepted nothing: the run stays open.
+    proxy = true;
+    server.closeConnection();
+    await advanceUntil((): boolean => commands('connect').length === 2 && c.state === State.Connected);
+    await flush();
+    expect(events).not.toContain('disconnected:1');
+
+    // A refresh that the issuer refuses again, with the storage unchanged, is the verdict of the open run.
+    c.refresh();
+    await advanceUntil((): boolean => events.includes('disconnected:1'));
+    expect(calls).toBe(2);
+    expect(commands('connect')).toHaveLength(2);
   });
 
   test('an accepted refresh(token) closes the refusal run: a later refusal starts its own run, and does not end the session at once', async (): Promise<void> => {
@@ -1484,6 +1509,46 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
+  test('an empty refresh token read by a renewal whose connection was lost ends the session: no reconnect with the kept token', async (): Promise<void> => {
+    serve({
+      ttl: 100,
+      connect: (cmd: any): any => (cmd.connect.token ? { id: cmd.id, connect: { ...server.connectResult, user: 'alice' } } : undefined),
+    });
+    useFakeClock();
+    try {
+      let loads: number = 0;
+      let removed: (token: string | null) => void = (): void => {};
+      const c: Centrifuge = create({
+        load: (): string | null | Promise<string | null> => {
+          loads++;
+          if (loads === 1) {
+            return 'refresh-1';
+          }
+          return new Promise<string | null>((resolve: (token: string | null) => void): void => {
+            removed = resolve;
+          });
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+      await advanceUntil((): boolean => loads === 2);
+
+      // The connection is lost while the renewal reads the storage, and the application removes the refresh token meanwhile.
+      server.closeConnection();
+      expect(await until((): boolean => c.state !== State.Connected)).toBe(true);
+      removed(null);
+      expect(await until((): boolean => c.state === State.Disconnected)).toBe(true);
+
+      // The reconnect the kept access token would have made, were the session not over, does not come.
+      jest.advanceTimersByTime(60000);
+      await flush();
+      expect(commands('connect')).toHaveLength(1);
+      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual(['disconnected:1']);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('an explicit refresh() after the refresh token was removed ends the session: disconnected with code 1, no reconnect', async (): Promise<void> => {
     serve();
     let removed: boolean = false;
@@ -1910,8 +1975,9 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
         return issue(ctx);
       },
     });
+    useFakeClock();
     await connectClient(c);
-    await poll((): boolean => calls === 2);
+    await advanceUntil((): boolean => calls === 2);
 
     stored = 'refresh-b';
     await c.refresh('access-b');
@@ -2028,12 +2094,13 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
         return issue(ctx);
       },
     });
+    useFakeClock();
     await connectClient(c);
-    await poll((): boolean => calls === 2);
+    await advanceUntil((): boolean => calls === 2);
 
     const refreshed: Promise<any> = c.refresh();
     await new Promise<void>((resolve: () => void): void => {
-      setTimeout(resolve, 50);
+      realSetTimeout(resolve, 50);
     });
     expect(calls).toBe(2);
 
@@ -2062,26 +2129,27 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
         return issue(ctx);
       },
     });
-    await connectClient(c);
-    await poll((): boolean => calls === 2);
+    useFakeClock();
+    try {
+      await connectClient(c);
+      await advanceUntil((): boolean => calls === 2);
 
-    // The access token of the one-second ttl expires, so the reconnect bootstraps instead of connecting with it.
-    await new Promise<void>((resolve: () => void): void => {
-      setTimeout(resolve, 1200);
-    });
-    const reconnected: Promise<void> = nextConnected(c);
-    server.closeConnection();
-    await poll((): boolean => commands('connect').length === 2);
-    await new Promise<void>((resolve: () => void): void => {
-      setTimeout(resolve, 50);
-    });
-    expect(calls).toBe(2);
+      // The access token of the one-second ttl expires, so the reconnect bootstraps instead of connecting with it.
+      jest.advanceTimersByTime(1200);
+      const reconnected: Promise<void> = nextConnected(c);
+      server.closeConnection();
+      await advanceUntil((): boolean => commands('connect').length === 2);
+      await flush();
+      expect(calls).toBe(2);
 
-    release({ token: 'access-stale', refreshToken: 'refresh-2b' });
-    await reconnected;
+      release({ token: 'access-stale', refreshToken: 'refresh-2b' });
+      await reconnected;
 
-    expect(used).toEqual(['refresh-1', 'refresh-2', 'refresh-2b']);
-    expect(stored).toBe('refresh-3');
+      expect(used).toEqual(['refresh-1', 'refresh-2', 'refresh-2b']);
+      expect(stored).toBe('refresh-3');
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('a connect reply that already carries a user is not bootstrapped: no exchange, connected with that user', async (): Promise<void> => {
