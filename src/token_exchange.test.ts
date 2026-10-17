@@ -2038,6 +2038,136 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
+  test('a failing load in the store step of a bootstrap that a refresh(token) call superseded reports tokenStore, and the bootstrap completes', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      let failRead: boolean = false;
+      let release: (result: TokenExchangeResult) => void = (): void => {};
+      const c: Centrifuge = create({
+        load: (): string => {
+          if (failRead) {
+            throw new Error('storage read failed');
+          }
+          return stored;
+        },
+        exchange: (): Promise<TokenExchangeResult> => {
+          calls++;
+          return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+            release = resolve;
+          });
+        },
+      });
+      const events: string[] = record(c);
+      const connected: Promise<void> = nextConnected(c);
+      c.connect();
+      await until((): boolean => calls === 1);
+
+      // A bootstrap is decided by its connection alone: the call supersedes its exchange only for the rotation store.
+      c.refresh('access-b').then((): void => {}, (): void => {});
+      await flush();
+      failRead = true;
+      release({ token: 'access-1', refreshToken: 'refresh-2' });
+      await connected;
+      await flush();
+
+      expect(events).toContain('error:tokenStore');
+      expect(events).toContain('connected');
+      expect(order.filter((step: string): boolean => step.startsWith('store:'))).toEqual([]);
+      expect(stored).toBe('refresh-1');
+      expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toContain('access-1');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a renewal that fails after a refresh(token) call superseded it reports nothing and does not end the session', async (): Promise<void> => {
+    // The access token of the connection renews every 2 seconds, but the one a refresh(token) call sets lasts 900.
+    serve({ refresh: (cmd: any): any => refreshReply(cmd, cmd.refresh.token === 'access-b' ? 900 : 2) });
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      let fail: (err: any) => void = (): void => {};
+      const c: Centrifuge = create({
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 2) {
+            return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult | PromiseLike<TokenExchangeResult>) => void): void => {
+              fail = (err: any): void => {
+                resolve(Promise.reject(err));
+              };
+            });
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+      await advanceUntil((): boolean => calls === 2);
+
+      c.refresh('access-b').then((): void => {}, (): void => {});
+      await flush();
+      fail(new Error('exchange failed'));
+      await flush();
+
+      expect(events).not.toContain('error:refreshToken');
+      expect(c.state).toBe(State.Connected);
+
+      jest.advanceTimersByTime(10000);
+      await flush();
+      expect(calls).toBe(2);
+      expect(events).not.toContain('error:refreshToken');
+      expect(events).not.toContain('disconnected:1');
+      expect(c.state).toBe(State.Connected);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a refusal at renewal that a refresh(token) call superseded reports nothing and does not end the session', async (): Promise<void> => {
+    // The access token of the connection renews every 2 seconds, but the one a refresh(token) call sets lasts 900.
+    serve({ refresh: (cmd: any): any => refreshReply(cmd, cmd.refresh.token === 'access-b' ? 900 : 2) });
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      let refuse: (err: any) => void = (): void => {};
+      const c: Centrifuge = create({
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 2) {
+            return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult | PromiseLike<TokenExchangeResult>) => void): void => {
+              refuse = (err: any): void => {
+                resolve(Promise.reject(err));
+              };
+            });
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+      await advanceUntil((): boolean => calls === 2);
+
+      c.refresh('access-b').then((): void => {}, (): void => {});
+      await flush();
+      refuse(new UnauthorizedError('refused'));
+      await flush();
+
+      expect(events).not.toContain('error:refreshToken');
+      expect(events).not.toContain('disconnected:1');
+      expect(c.state).toBe(State.Connected);
+
+      jest.advanceTimersByTime(10000);
+      await flush();
+      expect(calls).toBe(2);
+      expect(events).not.toContain('error:refreshToken');
+      expect(c.state).toBe(State.Connected);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a renewal refusal that arrives after the connection was lost and reconnected is dropped: no error is reported, the session goes on', async (): Promise<void> => {
     serve({
       ttl: 100,
