@@ -659,6 +659,133 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     }
   });
 
+  test('an accepted reconnect with the cached access token closes the refusal run: a later refusal starts its own run', async (): Promise<void> => {
+    serve({
+      ttl: 100,
+      connect: (cmd: any): any => (cmd.connect.token ? { id: cmd.id, connect: { ...server.connectResult, user: 'alice', expires: true, ttl: 100 } } : undefined),
+    });
+    useFakeClock();
+    // The renewal is due 80 seconds on, and every refusal here comes with the storage unchanged.
+    const random: jest.SpyInstance = jest.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      let calls: number = 0;
+      const c: Centrifuge = create({
+        grace: 10,
+        exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 2 || calls === 3) {
+            throw new UnauthorizedError('refused');
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+      await advanceUntil((): boolean => calls === 2);
+      await flush();
+      expect(events).toContain('error:refreshToken');
+
+      // The connection is lost with the refusal run open. The reconnect carries the access token, and the server accepts it.
+      server.closeConnection();
+      await advanceUntil((): boolean => commands('connect').length === 2 && c.state === State.Connected);
+      await flush();
+      expect(events).not.toContain('disconnected:1');
+
+      // The next renewal, 80 seconds after the reconnect, is refused: that starts a run of its own, so the refusal is not the verdict.
+      await advanceUntil((): boolean => calls === 3, 400);
+      await flush();
+      expect(c.state).toBe(State.Connected);
+      expect(events).not.toContain('disconnected:1');
+
+      // Its retry gets the token, and the session goes on.
+      await advanceUntil((): boolean => calls === 4, 100);
+      await flush();
+      expect(c.state).toBe(State.Connected);
+      expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(0);
+      expect(events.filter((entry: string): boolean => entry === 'error:refreshToken')).toHaveLength(2);
+    } finally {
+      random.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  test('an accepted refresh(token) closes the refusal run: a later refusal starts its own run, and does not end the session at once', async (): Promise<void> => {
+    serve({ ttl: 100 });
+    useFakeClock();
+    // The renewal is due 80 seconds on, and every refusal here comes with the storage unchanged.
+    const random: jest.SpyInstance = jest.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      let calls: number = 0;
+      const c: Centrifuge = create({
+        grace: 10,
+        exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 2 || calls === 3) {
+            throw new UnauthorizedError('refused');
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+      await advanceUntil((): boolean => calls === 2);
+      await flush();
+      expect(events).toContain('error:refreshToken');
+
+      // The application hands the connection a token the server accepts: the session is valid, so the refusal run is over.
+      await c.refresh('fresh-token');
+      expect(c.state).toBe(State.Connected);
+
+      // The next renewal, 80 seconds after the accepted refresh, is refused: that starts a run of its own, so it is not the verdict.
+      await advanceUntil((): boolean => calls === 3, 400);
+      await flush();
+      expect(c.state).toBe(State.Connected);
+      expect(events).not.toContain('disconnected:1');
+
+      // Its retry gets the token, and the session goes on.
+      await advanceUntil((): boolean => calls === 4, 100);
+      await flush();
+      expect(c.state).toBe(State.Connected);
+      expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(0);
+    } finally {
+      random.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  test('an empty refresh token at the retry of a refused renewal ends the session at that retry: no exchange, disconnected with code 1', async (): Promise<void> => {
+    serve({ ttl: 100 });
+    useFakeClock();
+    try {
+      let removed: boolean = false;
+      let exchanges: number = 0;
+      const c: Centrifuge = create({
+        load: (): string | null => (removed ? null : stored),
+        exchange: async (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          exchanges++;
+          if (exchanges === 2) {
+            throw new UnauthorizedError('refused');
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+      await advanceUntil((): boolean => events.includes('error:refreshToken'));
+
+      // The application removes the refresh token while the refused renewal waits for its retry.
+      removed = true;
+      await advanceUntil((): boolean => c.state === State.Disconnected);
+      await flush();
+
+      expect(exchanges).toBe(2);
+      expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(1);
+      expect(commands('connect')).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('the grace an accepted exchange publishes sets the next run horizon; an invalid one keeps the grace in use', async (): Promise<void> => {
     serve({ ttl: 100 });
     useFakeClock();

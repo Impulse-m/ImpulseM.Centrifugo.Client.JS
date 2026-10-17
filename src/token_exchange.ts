@@ -208,11 +208,16 @@ export class TokenExchangeFlow {
   /**
    * Called with a connect reply before the connected state. Returns true when it took over the connect and will
    * resume it with the merged reply later, false when the connect goes on at once (a reply that already carries a
-   * user, a resumed reply). An anonymous reply bootstraps whether the connect sent a token or not: a token it sent
-   * was refused, so none is kept.
+   * user, a resumed reply). A reply with a user is the server accepting the access token the connect sent: the
+   * session is valid, so an open refusal run is over. An anonymous reply bootstraps whether the connect sent a token
+   * or not: a token it sent was refused, so none is kept.
    */
   intercept(result: any, resume: (result: any) => void): boolean {
-    if (this.resuming || !!result.user) {
+    if (this.resuming) {
+      return false;
+    }
+    if (result.user) {
+      this.tokenAccepted();
       return false;
     }
     this.host.setToken('');
@@ -305,6 +310,16 @@ export class TokenExchangeFlow {
     if (!reconnect) {
       this.closeRun();
     }
+  }
+
+
+  /**
+   * Called when the server accepted the access token of the connection: a connect reply with a user, or a refresh reply
+   * (of refresh(token) or of a renewal). The session is valid then, so an open refusal run is over, and a later refusal
+   * starts a run of its own with a fresh horizon.
+   */
+  tokenAccepted(): void {
+    this.closeRun();
   }
 
 

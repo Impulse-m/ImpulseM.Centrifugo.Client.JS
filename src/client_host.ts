@@ -91,6 +91,7 @@ export function createClientHost(client: Centrifuge): ClientHost {
       scheduleRefresh(client['_getRefreshRetryDelay'](), (): void => client['_refresh']());
     },
     applyReply: (result: any): void => {
+      client['_tokenExchange']?.tokenAccepted();
       client['_clearRefreshTimeout']();
       if (result.expires) {
         // The client id of the connection only changes if the reply carries one — and
