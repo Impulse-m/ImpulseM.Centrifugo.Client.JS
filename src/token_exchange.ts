@@ -123,6 +123,7 @@ interface ExpiryRecord {
 /** The token fetch of a renewal in progress, and the transport it runs on. */
 interface Fetch {
   transportId: number;
+  generation: number;
   token: Promise<string>;
 }
 
@@ -247,12 +248,13 @@ export class TokenExchangeFlow {
       await this.host.waitConnected(null);
     }
     const transportId: number = this.host.transportId();
-    const running: Fetch | null = this.fetching;
-    if (running !== null && running.transportId === transportId) {
-      return running.token;
-    }
     // Read now, not when the turn starts: a refresh(token) call made while this fetch waits in the queue supersedes it.
     const generation: number = this.host.tokenGeneration();
+    const running: Fetch | null = this.fetching;
+    // A fetch joins a running one only when no refresh(token) call came since it started: its token may be superseded.
+    if (running !== null && running.transportId === transportId && running.generation === generation) {
+      return running.token;
+    }
     const token: Promise<string> = this.serialised((): Turn<string> => {
       const attempt: Attempt = this.attempt(
         (): Route => this.host.route(),
@@ -261,7 +263,7 @@ export class TokenExchangeFlow {
       );
       return this.bounded(this.renewalToken(attempt), attempt);
     });
-    const fetch: Fetch = { transportId: transportId, token: token };
+    const fetch: Fetch = { transportId: transportId, generation: generation, token: token };
     this.fetching = fetch;
     // Cleared as soon as the fetch settles, before the continuations of its callers run: a refresh() in that gap must
     // not join a fetch that is already over.
