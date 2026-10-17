@@ -82,7 +82,7 @@ export class RedirectGate {
 
 
 /**
- * Fetches the bytes of a redirect within the signal. The URL must be https, or http with a ws endpoint (development).
+ * Fetches the bytes of a redirect within the signal. The URL must be https, or http from an insecure endpoint (development).
  * A non-2xx status, a network failure or a body over maxBytes rejects with redirectFailed; the pool does not retry.
  */
 export async function fetchRedirect(
@@ -101,8 +101,10 @@ export async function fetchRedirect(
   }
   let response: any;
   try {
-    // A redirect of the server is not followed: its target would be fetched without the check of its scheme.
-    response = await fetchFunction(url, { headers: redirect.headers, signal: signal, redirect: 'manual' });
+    // A redirect of a secure endpoint is not followed by the runtime: it fails the fetch, before any hop is sent, since a
+    // browser's 'manual' gives an opaque response no hop can be checked on. The hook names the final URL instead. An
+    // insecure endpoint is fetched with 'manual', and its response is checked below.
+    response = await fetchFunction(url, { headers: redirect.headers, signal: signal, redirect: secureEndpoint(endpoint) ? 'error' : 'manual' });
   } catch (e) {
     throw redirectFailure('redirect fetch failed');
   }
@@ -110,8 +112,8 @@ export async function fetchRedirect(
     discardBody(response);
     throw redirectFailure('redirect fetch status ' + response.status);
   }
-  // A runtime which followed a redirect anyway (it ignores 'manual') is refused before its body is read. The URL of a
-  // response has no fragment, so the fragment of the requested URL is left out of the comparison.
+  // A runtime which followed a redirect anyway (it ignores 'error' or 'manual') is refused before its body is read. The
+  // URL of a response has no fragment, so the fragment of the requested URL is left out of the comparison.
   const requested: string = url.split('#')[0];
   if (typeof response.url === 'string' && response.url !== '' && response.url !== requested) {
     discardBody(response);
@@ -129,7 +131,7 @@ export async function fetchRedirect(
 
 
 // The URL of a redirect, checked against the scheme of the endpoint it came from. A secure endpoint (wss: or https:)
-// takes only an https: URL; an http: URL is allowed only on a ws: endpoint, and a ws: URL is never fetched.
+// takes only an https: URL; an http: URL is allowed only from an insecure endpoint, and a ws: URL is never fetched.
 function redirectUrl(endpoint: string, target: string): string {
   let parsed: URL;
   try {
@@ -140,10 +142,16 @@ function redirectUrl(endpoint: string, target: string): string {
   if (parsed.protocol === 'https:') {
     return parsed.href;
   }
-  if (parsed.protocol === 'http:' && /^ws:/i.test(endpoint)) {
+  if (parsed.protocol === 'http:' && !secureEndpoint(endpoint)) {
     return parsed.href;
   }
   throw redirectFailure('redirect URL scheme is not allowed for the endpoint');
+}
+
+
+// Whether an endpoint is secure: wss: or https:. Any other endpoint is not, and an insecure one may redirect to http:.
+function secureEndpoint(endpoint: string): boolean {
+  return /^(wss|https):/i.test(endpoint);
 }
 
 

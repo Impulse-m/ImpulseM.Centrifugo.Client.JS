@@ -19,6 +19,12 @@ export interface PoolConnection {
   lastUse: number;
   /** The pending idle check, at most one per connection, see RpcPool. */
   idle: CallTimer | null;
+  /** The token the connection was given last, '' before its first; only with tokenFrom, see TokenSource. */
+  token: string;
+  /** The identity generation of the connection's token, null before its first token; only with tokenFrom. */
+  generation: number | null;
+  /** True once the connection is retired: it takes no new call, and it closes when its calls settle. */
+  retired: boolean;
 }
 
 
@@ -66,6 +72,17 @@ export class RpcPoolEndpoint {
       }
       if (!connecting && count < perEndpoint) {
         return url;
+      }
+    }
+    return null;
+  }
+
+
+  /** The first connection of the key whose token belongs to another identity than the generation, null when there is none. */
+  staleOf(generation: number): PoolConnection | null {
+    for (const conn of this.connections) {
+      if (conn.generation !== null && conn.generation !== generation) {
+        return conn;
       }
     }
     return null;

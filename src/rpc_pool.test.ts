@@ -230,10 +230,20 @@ describe('RpcPool', () => {
       expect(connectsOf(server).length).toBe(2);
     });
 
-    test('an idleTimeout beyond the longest timer arms no loop: the check waits for the bound, in a period', async (): Promise<void> => {
+    test('an idleTimeout beyond the longest timer is refused with badConfiguration', (): void => {
+      let thrown: any;
+      try {
+        createPool((): string => 'ws://127.0.0.1:1', { idleTimeout: 2147483648 });
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toMatchObject({ code: errorCodes.badConfiguration });
+    });
+
+    test('an idleTimeout at the longest timer arms one check per period, not a loop', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
       server.onCommand = echo;
-      const pool: RpcPool = createPool((): string => server.url, { idleTimeout: 3000000000 });
+      const pool: RpcPool = createPool((): string => server.url, { idleTimeout: 2147483647 });
       expect(fromBytes((await pool.rpc('work', bytes({ n: 1 }))).data)).toEqual({ n: 1 });
       const timers: jest.SpyInstance = jest.spyOn(global, 'setTimeout');
       await sleep(300);
@@ -922,7 +932,7 @@ describe('RpcPool', () => {
         url: 'https://cdn.example/part/1',
       }, new AbortController().signal)).rejects.toMatchObject({ code: errorCodes.redirectFailed });
       expect(fetchFunction).toHaveBeenCalledTimes(1);
-      expect(fetchFunction).toHaveBeenCalledWith('https://cdn.example/part/1', expect.objectContaining({ redirect: 'manual' }));
+      expect(fetchFunction).toHaveBeenCalledWith('https://cdn.example/part/1', expect.objectContaining({ redirect: 'error' }));
       expect(cancel).toHaveBeenCalledTimes(1);
     });
 
@@ -983,7 +993,7 @@ describe('RpcPool', () => {
         url: 'https://cdn.example/part/1',
       }, new AbortController().signal);
       expect(Array.from(body)).toEqual([8]);
-      expect(fetchFunction).toHaveBeenCalledWith('https://cdn.example/part/1', expect.objectContaining({ redirect: 'manual' }));
+      expect(fetchFunction).toHaveBeenCalledWith('https://cdn.example/part/1', expect.objectContaining({ redirect: 'error' }));
     });
 
     test('a redirect followed to an http URL on an https endpoint is refused, and its body is not read', async (): Promise<void> => {

@@ -1,3 +1,4 @@
+import { Centrifuge } from './centrifuge';
 import { CentrifugeProtobuf } from './protobuf_client';
 import { disconnectedCodes, errorCodes } from './codes';
 import { callTimer } from './call_timer';
@@ -7,6 +8,9 @@ import { RpcPoolEndpoint } from './rpc_pool_endpoint';
 import type { PoolConnection } from './rpc_pool_endpoint';
 import { fetchRedirect, RedirectGate } from './rpc_pool_redirect';
 import { poolError } from './rpc_pool_error';
+import { tokenSourceOf } from './token_source';
+import type { SourcedToken, TokenSource } from './token_source';
+import { UnauthorizedError } from './unauthorized_error';
 import type { Options, RpcOptions, RpcResult } from './types';
 
 // The connection options a pool passes on to its clients. The type of RpcPoolOptions.connection and the check of
@@ -19,6 +23,13 @@ type ConnectionOptionName = typeof connectionOptionNames[number];
 
 /** The options of a pool call's client a pool accepts: nothing else of the client options is taken. */
 export interface RpcPoolOptions {
+  /**
+   * The client which owns the access token of the pool's connections. The pool lends the client's current token to each
+   * connection, and renews it through that client when the token is refused or expires: the pool runs no exchange and
+   * calls no getter of its own. Exclusive with connection.token and connection.getToken; connection.tokenExchange is
+   * refused. It works with every token mode of the client, and needs no change of the client.
+   */
+  tokenFrom?: Centrifuge;
   /**
    * Endpoints of an endpoint key. '' is the key of a call without one. The key is whatever the server answered the
    * application (a cluster, a region); the pool does not interpret it. Resolved once per key, until close(); a resolution
@@ -51,7 +62,10 @@ export interface RpcPoolOptions {
    * by retries instead.
    */
   maxQueued?: number;
-  /** Closes a connection without calls for this long, in milliseconds. 0 keeps it open. Default 60000. */
+  /**
+   * Closes a connection without calls for this long, in milliseconds, at most 2147483647 (the longest timer). 0 keeps it
+   * open. Default 60000.
+   */
   idleTimeout?: number;
   /**
    * Resends of a call lost with its connection, refused with the later signal, or moved by reroute, counted together.
@@ -146,7 +160,7 @@ const defaultMaxInflightPerConnection: number = 1;
 const defaultMaxQueued: number = 64;
 const defaultIdleTimeout: number = 60000;
 const defaultMaxRedirectsInflight: number = 4;
-// The longest delay a timer runs for, as ttlMilliseconds in utils.ts: a later due time is checked at this bound.
+// The longest delay a timer runs for, as ttlMilliseconds in utils.ts: the idleTimeout may not be longer.
 const maxTimerDelay: number = 2147483647;
 // Codes from this one up are the server's errors; the ones below are the client's own, see errorCodes.
 const serverErrorFloor: number = 100;
@@ -174,8 +188,12 @@ export class RpcPool {
   private readonly idleTimeout: number;
   private readonly retries: number;
   private readonly redirects: RedirectGate;
+  // The token source of tokenFrom, null without it: a pool which takes no token from a client holds none.
+  private readonly source: TokenSource | null;
   private readonly resolved: Map<string, Promise<string[]>> = new Map();
   private readonly groups: Map<string, RpcPoolEndpoint> = new Map();
+  // The connections retired while they carry calls: they close when their last call settles, see retire.
+  private readonly retiring: Set<PoolConnection> = new Set();
   // The calls not settled yet, so that close() settles them all.
   private readonly calls: Set<PendingCall> = new Set();
   // The groups whose waiting calls may be placed now: a pass over a group is started by the event that frees its room.
@@ -202,11 +220,16 @@ export class RpcPool {
     this.maxInflightPerConnection = integerOption('maxInflightPerConnection', options.maxInflightPerConnection, defaultMaxInflightPerConnection, 1);
     this.maxQueued = integerOption('maxQueued', options.maxQueued, defaultMaxQueued, 0);
     this.idleTimeout = integerOption('idleTimeout', options.idleTimeout, defaultIdleTimeout, 0);
+    if (this.idleTimeout > maxTimerDelay) {
+      throw poolError(errorCodes.badConfiguration, 'idleTimeout must be at most 2147483647 milliseconds');
+    }
     this.retries = integerOption('retries', options.retries, maxLaterResends, 0);
     this.redirects = new RedirectGate(integerOption('maxRedirectsInflight', options.maxRedirectsInflight, defaultMaxRedirectsInflight, 1));
     this.rerouteHook = options.reroute;
     this.redirectHook = options.redirect;
     this.fetchOption = options.fetch;
+    // Last: a pool which fails a check above leaves no listener on the client it names.
+    this.source = tokenSourceFrom(options.tokenFrom, this.connectionOptions);
   }
 
 
@@ -220,6 +243,11 @@ export class RpcPool {
     return new Promise<RpcResult>((resolve: (result: RpcResult) => void, reject: (error: any) => void): void => {
       if (this.closed) {
         reject(poolError(errorCodes.clientClosed, 'rpc pool is closed'));
+        return;
+      }
+      // The session of the client ended as unauthorized: no connection is opened, and the call is not sent.
+      if (this.source?.ended() === true) {
+        reject(poolError(errorCodes.clientDisconnected, 'unauthorized'));
         return;
       }
       const signal: AbortSignal | undefined = opts?.signal;
@@ -276,6 +304,10 @@ export class RpcPool {
         inflight += conn.inflight;
       }
     }
+    for (const conn of this.retiring) {
+      connections++;
+      inflight += conn.inflight;
+    }
     return { connections: connections, inflight: inflight, queued: this.queued, redirects: this.redirects.inflight };
   }
 
@@ -294,6 +326,12 @@ export class RpcPool {
       }
       group.waiting.length = 0;
     }
+    for (const conn of Array.from(this.retiring)) {
+      conn.idle?.clear();
+      conn.idle = null;
+      conn.client.disconnect();
+    }
+    this.retiring.clear();
     for (const call of Array.from(this.calls)) {
       // A call whose reply carried a redirect was served already: it is in flight until its fetch ends.
       if (!call.sent && call.controller === null) {
@@ -417,6 +455,7 @@ export class RpcPool {
 
   // Sends a call on a connection of its group, if there is one with room or one may be opened.
   private assign(call: PendingCall, group: RpcPoolEndpoint): boolean {
+    this.retireStale(group);
     const roomy: PoolConnection | null = group.roomy(this.maxInflightPerConnection);
     if (roomy !== null) {
       this.send(call, roomy);
@@ -445,17 +484,26 @@ export class RpcPool {
 
   // Opens a connection to an endpoint. Its connect is in flight until its first connected event.
   private open(group: RpcPoolEndpoint, url: string): PoolConnection {
-    const client: CentrifugeProtobuf = new CentrifugeProtobuf(url, this.connectionOptions);
+    const source: TokenSource | null = this.source;
+    // The connection exists before its client: the token getter of the client is bound to it.
     const conn: PoolConnection = {
       url: url,
       group: group,
-      client: client,
+      client: undefined as unknown as CentrifugeProtobuf,
       inflight: 0,
       connecting: true,
       closeCode: null,
       lastUse: Date.now(),
       idle: null,
+      token: '',
+      generation: null,
+      retired: false,
     };
+    const options: Partial<Options> = source === null
+      ? this.connectionOptions
+      : { ...this.connectionOptions, getToken: (): Promise<string> => this.tokenOf(conn, source) };
+    const client: CentrifugeProtobuf = new CentrifugeProtobuf(url, options);
+    conn.client = client;
     client.on('connected', (): void => {
       conn.connecting = false;
       this.dispatch(group);
@@ -470,6 +518,68 @@ export class RpcPool {
   }
 
 
+  // The token of a connection from the source. A token request after the first means the connection's last token is
+  // no longer usable. A connection which is given the token of another identity is retired, and fails as unauthorized:
+  // its calls are never sent under the identity of another connection.
+  private tokenOf(conn: PoolConnection, source: TokenSource): Promise<string> {
+    if (conn.generation !== null && conn.generation !== source.generation()) {
+      this.retire(conn);
+      return Promise.reject(new UnauthorizedError('unauthorized'));
+    }
+    return source.token(conn, conn.token).then((sourced: SourcedToken): string => {
+      if (conn.generation === null) {
+        conn.generation = sourced.generation;
+      } else if (conn.generation !== sourced.generation) {
+        this.retire(conn);
+        throw new UnauthorizedError('unauthorized');
+      }
+      conn.token = sourced.token;
+      return sourced.token;
+    });
+  }
+
+
+  // Takes a connection out of its group: it takes no new call, and it does not count against the endpoint's connections.
+  // It closes at once when it carries no call; else it waits in retiring, and closes when its last call settles, so
+  // its calls complete under the identity they were sent with.
+  private retire(conn: PoolConnection): void {
+    if (conn.retired) {
+      return;
+    }
+    conn.retired = true;
+    conn.group.remove(conn);
+    if (conn.inflight > 0) {
+      this.retiring.add(conn);
+      return;
+    }
+    this.closeRetired(conn);
+  }
+
+
+  // Closes a retired connection. The close reports no error: its code is disconnectCalled.
+  private closeRetired(conn: PoolConnection): void {
+    this.retiring.delete(conn);
+    conn.idle?.clear();
+    conn.idle = null;
+    conn.client.disconnect();
+  }
+
+
+  // Retires the connections of a group whose token belongs to another identity than the current one. A pass over the
+  // group, not over the pool: the calls of other groups are not looked at.
+  private retireStale(group: RpcPoolEndpoint): void {
+    if (this.source === null) {
+      return;
+    }
+    const generation: number = this.source.generation();
+    let stale: PoolConnection | null = group.staleOf(generation);
+    while (stale !== null) {
+      this.retire(stale);
+      stale = group.staleOf(generation);
+    }
+  }
+
+
   // A connection ended for good. It leaves its group; the calls waiting take the other connections, and the
   // application hears of the end unless it asked for it.
   private lost(conn: PoolConnection, ctx: any): void {
@@ -478,6 +588,8 @@ export class RpcPool {
     conn.idle?.clear();
     conn.idle = null;
     conn.group.remove(conn);
+    this.retiring.delete(conn);
+    this.source?.forget(conn);
     this.dispatch(conn.group);
     if (ctx.code !== disconnectedCodes.disconnectCalled) {
       for (const listener of this.errorListeners) {
@@ -509,9 +621,16 @@ export class RpcPool {
   }
 
 
-  // A slot became free: a connection left without calls is marked as used now, and the line of its key takes the slot.
+  // A slot became free: a retired connection left without calls closes now, a stale one is retired, and a connection
+  // left without calls is marked as used now. The line of its key takes the slot.
   private released(conn: PoolConnection): void {
-    if (conn.inflight === 0) {
+    if (conn.retired) {
+      if (conn.inflight === 0) {
+        this.closeRetired(conn);
+      }
+    } else if (this.source !== null && conn.generation !== null && conn.generation !== this.source.generation()) {
+      this.retire(conn);
+    } else if (conn.inflight === 0) {
       conn.lastUse = Date.now();
       this.armIdle(conn);
     }
@@ -522,14 +641,13 @@ export class RpcPool {
   // Arms the idle check of a connection when none is pending. Nothing runs without the option, nor on a connection
   // which ended: its calls may settle after it left the group, and close() would not reach a timer armed then. The
   // check is not cancelled when a call starts: it reads lastUse when it is due, so a busy connection arms no timer per
-  // call, and a connection has at most one check pending. A due time beyond the longest timer is checked at that bound
-  // and armed again then, so an idleTimeout of any size arms one timer per period at most.
+  // call, and a connection has at most one check pending. The idleTimeout is at most the longest timer (see the
+  // constructor), so one check per period is one timer.
   private armIdle(conn: PoolConnection): void {
     if (this.idleTimeout === 0 || this.closed || conn.closeCode !== null || conn.idle !== null) {
       return;
     }
-    const due: number = Math.min(conn.lastUse + this.idleTimeout, Date.now() + maxTimerDelay);
-    conn.idle = callTimer(due, (): void => this.idleDue(conn));
+    conn.idle = callTimer(conn.lastUse + this.idleTimeout, (): void => this.idleDue(conn));
   }
 
 
@@ -550,12 +668,15 @@ export class RpcPool {
 
 
   // The error of a call on a connection. A connection the server closed for message size settles its calls without
-  // a resend: the failure is the same on every attempt. A lost connection or a later refusal is retried; a server error
-  // may move the call by reroute, and the later signal is retried as the main client does.
+  // a resend: the failure is the same on every attempt. So does a connection closed as unauthorized, or retired, since
+  // its identity is gone: the call would be sent under the same identity. A lost connection or a later refusal is
+  // retried; a server error may move the call by reroute, and the later signal is retried as the main client does.
   private failed(call: PendingCall, conn: PoolConnection, error: any): void {
     const code: number | undefined = error?.code;
     if (code === errorCodes.connectionClosed || code === errorCodes.clientDisconnected) {
-      if (conn.closeCode === disconnectedCodes.messageSizeLimit) {
+      if (conn.closeCode === disconnectedCodes.messageSizeLimit
+        || conn.closeCode === disconnectedCodes.unauthorized
+        || conn.retired) {
         this.finish(call, conn.url, error, null);
         return;
       }
@@ -703,7 +824,8 @@ export class RpcPool {
   // at the first call which cannot be placed. An event during a pass (it may open or end a connection) marks its group
   // for one more pass, which the running pass takes after its own.
   private dispatch(group: RpcPoolEndpoint): void {
-    if (this.closed) {
+    // A release with no waiting call has nothing to place: it returns before any allocation.
+    if (this.closed || group.waiting.length === 0) {
       return;
     }
     this.dirty.add(group);
@@ -760,6 +882,22 @@ export class RpcPool {
 }
 
 
+// The token source of tokenFrom, or null without it. The client must be a Centrifuge, and the connection of the pool
+// holds no token of its own: the token is the client's.
+function tokenSourceFrom(client: Centrifuge | undefined, connection: Partial<Options>): TokenSource | null {
+  if (client === undefined) {
+    return null;
+  }
+  if (!(client instanceof Centrifuge)) {
+    throw poolError(errorCodes.badConfiguration, 'tokenFrom must be a Centrifuge client');
+  }
+  if (connection.token !== undefined || connection.getToken !== undefined) {
+    throw poolError(errorCodes.badConfiguration, 'tokenFrom is exclusive with connection.token and connection.getToken');
+  }
+  return tokenSourceOf(client);
+}
+
+
 // The options of a client a pool passes on: only the names of connectionOptionNames are taken.
 function connectionOptionsOf(connection: Partial<Options> | undefined): Partial<Options> {
   const taken: Record<string, any> = {};
@@ -767,6 +905,9 @@ function connectionOptionsOf(connection: Partial<Options> | undefined): Partial<
     return taken;
   }
   for (const name of Object.keys(connection)) {
+    if (name === 'tokenExchange') {
+      throw poolError(errorCodes.badConfiguration, 'tokenExchange is not accepted by the rpc pool: pass the client which owns the token as tokenFrom');
+    }
     if ((connectionOptionNames as readonly string[]).indexOf(name) < 0) {
       throw poolError(errorCodes.badConfiguration, 'connection option ' + name + ' is not accepted by the rpc pool');
     }
