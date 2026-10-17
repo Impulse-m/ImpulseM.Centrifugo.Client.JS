@@ -3,6 +3,7 @@ import { connectingCodes, errorCodes } from './codes';
 import type { RefreshSlotHost } from './refresh_slot';
 import type { CallResolveContext, RpcCallbacks, RpcHost } from './rpc_tracker';
 import type { ConnectionIdentity } from './identity';
+import type { State } from './types';
 import type { WriteHost } from './write_commands';
 import { ttlMilliseconds } from './utils';
 
@@ -10,6 +11,29 @@ import { ttlMilliseconds } from './utils';
 export interface ClientHost extends RpcHost, RefreshSlotHost, WriteHost {
   /** Arms the refresh timer in place of the one armed before: refresh runs after the delay in milliseconds. */
   scheduleRefresh(delay: number, refresh: () => void): void;
+  /** Called after a refresh reply is applied, so the listener sees the new token and identity. Null without a listener. */
+  onRefreshAccepted: (() => void) | null;
+}
+
+/**
+ * The host of the token source of an RPC pool (see token_source.ts): the token, identity and state of a client, and the
+ * one renewal it may start. Reached through createTokenSourceHost, which no client creates for itself.
+ */
+export interface TokenSourceHost {
+  /** The connection token the client holds. */
+  token(): string;
+  /** The user and auth class the server confirmed for the connection. */
+  identity(): ConnectionIdentity;
+  /** The state of the client. */
+  state(): State;
+  /** Whether a token is the access token of a reply whose ttl has run out. */
+  tokenExpired(token: string): boolean;
+  /** Whether the client can renew its token: it has getToken or tokenExchange. */
+  canRenew(): boolean;
+  /** Starts one renewal of the token now, through the client's own refresh. */
+  renewNow(): void;
+  /** Sets the listener of the accepted refresh replies, or removes it with null. */
+  setRefreshAccepted(listener: (() => void) | null): void;
 }
 
 /**
@@ -53,7 +77,7 @@ export interface TokenExchangeHost extends ClientHost {
  * _callbacks, _rpcOptionsSupported, _methodCall, _call, _getToken, _token, _debug, _getRefreshRetryDelay,
  * _clearRefreshTimeout, _refreshTimeout, _refresh, _client, _identity, _dispatchFailed, _rpc, _codec, _transport,
  * _disconnect, _tokenExchange, _refreshRequired, _transportId, _isConnecting, _session, _node, _emitError,
- * _failUnauthorized, _reportDispatchError.
+ * _failUnauthorized, _reportDispatchError, _host (createTokenSourceHost).
  * Accepted by the wave's contract (section 10); the bracket reads are not counted as uses by noUnusedLocals.
  */
 export function createClientHost(client: Centrifuge): ClientHost {
@@ -62,7 +86,8 @@ export function createClientHost(client: Centrifuge): ClientHost {
     client['_clearRefreshTimeout']();
     client['_refreshTimeout'] = setTimeout(refresh, delay);
   };
-  return {
+  const host: ClientHost = {
+    onRefreshAccepted: null,
     isConnected: (): boolean => client['_isConnected'](),
     createError: (code: number, message: string): any => client['_createErrorObject'](code, message),
     hasInstance: (): boolean => !!client['_config'].instance,
@@ -105,6 +130,7 @@ export function createClientHost(client: Centrifuge): ClientHost {
         scheduleRefresh(client['_tokenExchange']?.expiryDelay(result.ttl) ?? ttlMilliseconds(result.ttl), (): void => client['_refresh']());
       }
       client['_identity'].applyRefresh(result);
+      host.onRefreshAccepted?.();
     },
     identity: (): ConnectionIdentity => client['_identity'],
     dispatchFailed: (err: any): void => client['_dispatchFailed'](err),
@@ -135,6 +161,28 @@ export function createClientHost(client: Centrifuge): ClientHost {
     },
     tokenSuperseded: (generation: number): boolean => client['_tokenExchange'] !== null
       && client['_refreshSlot'].currentTokenGeneration() !== generation,
+  };
+  return host;
+}
+
+
+/**
+ * The host of the token source of an RPC pool, over the client whose token the pool lends. Made only for the client a
+ * pool names as tokenFrom, so a client never used so holds none of its members.
+ */
+export function createTokenSourceHost(client: Centrifuge): TokenSourceHost {
+  return {
+    token: (): string => client['_token'],
+    identity: (): ConnectionIdentity => client['_identity'],
+    state: (): State => client.state,
+    tokenExpired: (token: string): boolean => client['_tokenExchange']?.tokenExpired(token) ?? false,
+    canRenew: (): boolean => client['_host'].hasGetToken(),
+    renewNow: (): void => {
+      client['_host'].scheduleRefresh(0, (): void => client['_refresh']());
+    },
+    setRefreshAccepted: (listener: (() => void) | null): void => {
+      client['_host'].onRefreshAccepted = listener;
+    },
   };
 }
 

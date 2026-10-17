@@ -197,14 +197,17 @@ export class TokenExchangeFlow {
 
   /** Called at the start of every connect attempt: an access token that is expired, or refused, is cleared. */
   beforeConnect(): void {
-    const token: string = this.host.token();
-    const expired: boolean = token !== '' && this.expiry !== null && this.expiry.token === token
-      && Date.now() >= this.expiry.expiresAt;
-    if (this.host.refreshRequired() || expired) {
+    if (this.host.refreshRequired() || this.tokenExpired(this.host.token())) {
       this.host.setToken('');
       this.host.clearRefreshRequired();
     }
     this.connectSentToken = this.host.token() !== '';
+  }
+
+
+  /** Whether a token is the access token of a reply whose ttl has run out, as the flow knows it. */
+  tokenExpired(token: string): boolean {
+    return token !== '' && this.expiry !== null && this.expiry.token === token && Date.now() >= this.expiry.expiresAt;
   }
 
 
