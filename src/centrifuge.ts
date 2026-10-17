@@ -2204,6 +2204,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     // offline and abort a transport that works.
     this._deviceWentOffline = false;
     if (this._tokenExchange?.intercept(result, (merged: any): void => this._connectResponse(merged))) {
+      // A bootstrap's anonymous connection is pinged too: its pong settings apply now, the timer is armed once connected.
+      this._serverPing = result.ping > 0 ? result.ping * 1000 : 0;
+      this._sendPong = result.ping > 0 && result.pong === true;
       return;
     }
 

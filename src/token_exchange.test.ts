@@ -2042,13 +2042,14 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       c.refresh('access-b').then((): void => {}, (): void => {});
       await flush();
 
+      // The superseded renewal drops its outcome before it exchanges: its refresh token is the one the app replaced, so it is
+      // not presented to the issuer at all.
       releases[0]({ token: 'access-stalled' });
-      await until((): boolean => calls === 3);
-      // The application stores its own token while the second renewal's exchange is in flight.
+      await flush();
       stored = 'refresh-b';
-      releases[1]({ token: 'access-f', refreshToken: 'refresh-4' });
       await flush();
 
+      expect(calls).toBe(2);
       expect(order.filter((entry: string): boolean => entry === 'store:refresh-4')).toHaveLength(0);
       expect(stored).toBe('refresh-b');
       expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).not.toContain('access-f');
@@ -2196,9 +2197,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     await advanceUntil((): boolean => calls === 2);
 
     const refreshed: Promise<any> = c.refresh();
-    await new Promise<void>((resolve: () => void): void => {
-      realSetTimeout(resolve, 50);
-    });
+    await flush();
     expect(calls).toBe(2);
 
     release({ token: 'access-joined', refreshToken: 'refresh-3' });
@@ -2207,6 +2206,152 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     expect(calls).toBe(2);
     expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1', 'access-joined']);
     expect(stored).toBe('refresh-3');
+  });
+
+  test('an empty refresh token read by a renewal that a refresh(token) call superseded does not end the session', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      let calls: number = 0;
+      const releases: ((result: TokenExchangeResult) => void)[] = [];
+      const c: Centrifuge = create({
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          calls++;
+          if (calls === 2) {
+            return new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+              releases.push(resolve);
+            });
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      await connectClient(c);
+
+      // The first renewal stalls past the client timeout; its exchange stays in the queue until it settles.
+      let timedOut: boolean = false;
+      c.refresh().then((): void => {}, (): void => {
+        timedOut = true;
+      });
+      await until((): boolean => calls === 2);
+      await advanceUntil((): boolean => timedOut);
+
+      // A second renewal waits behind the stalled exchange. The application logs in: it clears the old refresh token and
+      // calls refresh(token), which supersedes the waiting renewal.
+      c.refresh().then((): void => {}, (): void => {});
+      await flush();
+      stored = '';
+      c.refresh('access-b').then((): void => {}, (): void => {});
+      releases[0]({ token: 'access-stalled' });
+      expect(await until((): boolean => commands('refresh').some((cmd: any): boolean => cmd.refresh.token === 'access-b'))).toBe(true);
+
+      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual([]);
+      expect(c.state).toBe(State.Connected);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a refused refresh token whose storage changes on every read is presented again only inside the grace horizon, then the session ends', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      let reads: number = 0;
+      let presented: number = 0;
+      const c: Centrifuge = create({
+        load: (): string => {
+          reads++;
+          return `refresh-${reads}`;
+        },
+        exchange: (): Promise<TokenExchangeResult> => {
+          presented++;
+          // Each refusal takes a second of fake time: the grace of 30 seconds is spent after 30 presentations.
+          jest.advanceTimersByTime(1000);
+          return Promise.reject(new UnauthorizedError('refused'));
+        },
+      });
+      const events: string[] = record(c);
+      c.connect();
+
+      await advanceUntil((): boolean => events.includes('disconnected:1'));
+      expect(presented).toBeGreaterThan(1);
+      expect(presented).toBeLessThanOrEqual(35);
+      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual(['disconnected:1']);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a first refusal on a page open longer than the grace opens a run: the refused token is presented again', async (): Promise<void> => {
+    serve();
+    useFakeClock();
+    try {
+      // The page is older than the default grace of 30 seconds, and no refusal has opened a run.
+      jest.advanceTimersByTime(60000);
+      let presented: number = 0;
+      const c: Centrifuge = create({
+        exchange: (ctx: TokenExchangeContext): Promise<TokenExchangeResult> => {
+          presented++;
+          if (presented === 1) {
+            return Promise.reject(new UnauthorizedError('refused'));
+          }
+          return issue(ctx);
+        },
+      });
+      const events: string[] = record(c);
+      c.connect();
+      await advanceUntil((): boolean => c.state === State.Connected);
+
+      expect(presented).toBe(2);
+      expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual([]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a bootstrap that outlasts the server ping interval answers the server ping with a pong', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25, pong: true };
+    serve();
+    let started: boolean = false;
+    let release: (result: TokenExchangeResult) => void = (): void => {};
+    const c: Centrifuge = create({
+      exchange: (): Promise<TokenExchangeResult> => new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+        started = true;
+        release = resolve;
+      }),
+    });
+    c.connect();
+    expect(await until((): boolean => started)).toBe(true);
+
+    // The server pings the anonymous connection while the exchange runs: the client must answer with a pong.
+    server.send({});
+    expect(await until((): boolean => server.received.some((cmd: any): boolean => commandKind(cmd) === ''))).toBe(true);
+    expect(c.state).toBe(State.Connecting);
+
+    release({ token: 'access-1', refreshToken: 'refresh-2' });
+    expect(await until((): boolean => c.state === State.Connected)).toBe(true);
+  });
+
+  test('a refresh(token) call during a bootstrap does not end it: it completes with its own token and reports no error', async (): Promise<void> => {
+    serve();
+    let started: boolean = false;
+    let release: (result: TokenExchangeResult) => void = (): void => {};
+    const c: Centrifuge = create({
+      exchange: (): Promise<TokenExchangeResult> => new Promise<TokenExchangeResult>((resolve: (result: TokenExchangeResult) => void): void => {
+        started = true;
+        release = resolve;
+      }),
+    });
+    const events: string[] = record(c);
+    c.connect();
+    expect(await until((): boolean => started)).toBe(true);
+
+    // The application's own token arrives while the bootstrap's load and exchange are pending: the bootstrap is not superseded.
+    c.refresh('access-b').then((): void => {}, (): void => {});
+    release({ token: 'access-1', refreshToken: 'refresh-2' });
+    expect(await until((): boolean => c.state === State.Connected)).toBe(true);
+
+    expect(events.filter((entry: string): boolean => entry.startsWith('error:'))).toEqual([]);
   });
 
   test('a bootstrap that follows a renewal on a lost connection waits for the renewal exchange, and reads its rotation', async (): Promise<void> => {
