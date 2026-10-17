@@ -128,7 +128,8 @@ export async function fetchRedirect(
 }
 
 
-// The URL of a redirect, checked against the scheme of the endpoint it came from.
+// The URL of a redirect, checked against the scheme of the endpoint it came from. A secure endpoint (wss: or https:)
+// takes only an https: URL; an http: URL is allowed only on a ws: endpoint, and a ws: URL is never fetched.
 function redirectUrl(endpoint: string, target: string): string {
   let parsed: URL;
   try {
