@@ -740,7 +740,7 @@ The calls are plain requests: they carry no message id and no instance, so the s
 
 A call never goes out again after its timeout or its cancel, and a connection the server closes for message size (close code 1009) settles its calls with `connectionClosed` without a resend: the chunk is over the frame limit of the server, and every attempt would fail the same way. The pool then emits `error` with the disconnect, and the next call opens a new connection.
 
-A call lost with a connection that is retired, that ended as unauthorized, or that holds the identity of an earlier generation is not sent again either. Nor is a call lost while the client it takes its tokens from is connecting: its resend would run under the identity of the connect that follows, which may differ from the one the call was sent with. The retirement of a connection after an identity change emits no `error`, since the application made the change.
+A call lost with a connection that is retired, that ended as unauthorized, or that holds the identity of an earlier generation is not sent again either. A call lost while the client it takes its tokens from is connecting is sent again under the identity it was admitted under: it goes on a live connection of that identity, waits for the connect, or fails with `identity changed`, `client disconnected`, `unauthorized` or `token refused`, and it is never written under another identity. The retirement of a connection after an identity change emits no `error`, since the application made the change.
 
 ### Affinity and moves
 
