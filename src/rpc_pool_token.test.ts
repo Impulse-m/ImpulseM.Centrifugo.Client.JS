@@ -646,14 +646,16 @@ describe('RpcPool tokenFrom', () => {
     expect(fromBytes((await first).data)).toEqual({ n: 1 });
     expect(fromBytes((await second).data)).toEqual({ n: 2 });
     // Phase two: the renewed token is refused too, and the issuer gives it back. The renewal it asks for brings the refused
-    // token back (refusedAgain): both waiters fail as unauthorized, the source is spent (3.24), and it starts no second
-    // renewal. Both connections end as unauthorized, and no connection opens again.
+    // token back (refusedAgain): the token requests of both connections are answered unauthorized, the source is spent
+    // (3.24), and it starts no second renewal. Both connections end as unauthorized, one error each (R3.1), and no
+    // connection opens again.
     refusedToken = 'access-2';
     issued = 1;
     closeSocket(edgeA, 3000);
     closeSocket(edgeB, 3000);
     await eventually((): boolean => exchanges === 3, 8000);
     await eventually((): boolean => errors.filter((ctx: any): boolean => ctx.error?.code === disconnectedCodes.unauthorized).length === 2, 8000);
+    expect(errors.filter((ctx: any): boolean => ctx.error?.code === disconnectedCodes.unauthorized)).toHaveLength(2);
     expect(pool.stats().connections).toBe(0);
     const connectsBefore: number = connectsOf(edgeA).length;
     // A later call waits for no connection: it is refused at once, with no open and no token request.
@@ -1086,6 +1088,7 @@ describe('RpcPool tokenFrom', () => {
     answer(edgeA, held[0]);
     expect(fromBytes((await result).data)).toEqual({ n: 1 });
     expect(errors).toEqual([]);
+    expect(connectsOf(edgeA).at(-1).connect.token).toBe('access-2');
   });
 
   test('resendOfAnOldBindingFailsBeforeItJoinsALine', async (): Promise<void> => {
