@@ -222,6 +222,16 @@ export function createTokenSourceHost(client: Centrifuge): TokenSourceHost {
 
 
 /**
+ * The token a client presented at its last connect attempt that was not abandoned: the token of the connect its server
+ * accepted, or refused. The client stores it only when its token fetch was not abandoned, so a token answered for an
+ * attempt the client dropped is not presented, and a pool connection never names it as refused (rule R3.3 of the pool behaviour table).
+ */
+export function presentedTokenOf(client: Centrifuge): string {
+  return client['_token'];
+}
+
+
+/**
  * The host of the token exchange flow: the host of createClientHost plus the members only the flow uses. Called only when
  * the tokenExchange option is set, so a client without the option allocates none of them.
  */

@@ -95,8 +95,8 @@ export class TokenSource {
 
 
   /**
-   * The token for a connection of the pool, with the generation it belongs to. refused is the token the connection was
-   * given last, '' on its first request. The request is answered at once when the main client is connected and its
+   * The token for a connection of the pool, with the generation it belongs to. refused is the token the connection
+   * presented last, '' on its first request. The request is answered at once when the main client is connected and its
    * confirmed token is usable; it waits while the client connects, and while a renewal runs. It rejects with
    * UnauthorizedError when the session has ended or the client is disconnected.
    */

@@ -2,6 +2,7 @@ import { Centrifuge } from './centrifuge';
 import { CentrifugeProtobuf } from './protobuf_client';
 import { disconnectedCodes, errorCodes } from './codes';
 import { callTimer } from './call_timer';
+import { presentedTokenOf } from './client_host';
 import { laterResendDelay, maxLaterResends, retrySignal } from './rpc_tracker';
 import { RpcPoolEndpoint, RpcPoolLine } from './rpc_pool_endpoint';
 import type { PendingCall, PoolConnection } from './rpc_pool_endpoint';
@@ -765,7 +766,6 @@ export class RpcPool {
       closeCode: null,
       lastUse: Date.now(),
       idle: null,
-      token: '',
       generation: null,
       retired: false,
     };
@@ -805,20 +805,20 @@ export class RpcPool {
 
   // The token of a connection from the source (table 2.4, token request and token delivered). A request of a connection
   // stamped with an earlier generation retires it, and is answered unauthorized without asking the source. A token
-  // delivered of another generation than the stamp retires the connection too.
+  // delivered of another generation than the stamp retires the connection too. The request names the token the client
+  // presented last (R3.3): a token answered for an attempt the client dropped is not one it presented.
   private tokenOf(conn: PoolConnection, source: TokenSource): Promise<string> {
     if (conn.generation !== null && conn.generation !== source.generation()) {
       this.retire(conn);
       return Promise.reject(new UnauthorizedError('unauthorized'));
     }
-    return source.token(conn, conn.token).then((sourced: SourcedToken): string => {
+    return source.token(conn, presentedTokenOf(conn.client)).then((sourced: SourcedToken): string => {
       if (conn.generation === null) {
         conn.generation = sourced.generation;
       } else if (conn.generation !== sourced.generation) {
         this.retire(conn);
         throw new UnauthorizedError('unauthorized');
       }
-      conn.token = sourced.token;
       return sourced.token;
     });
   }
@@ -854,7 +854,7 @@ export class RpcPool {
     }
     if (!source.identityMatches(ctx.user, ctx.authClass)) {
       this.retire(conn);
-      source.unusable(conn.token);
+      source.unusable(presentedTokenOf(conn.client));
       this.emitError(conn.endpoint.url, { code: disconnectedCodes.unauthorized, reason: 'identity mismatch' });
       return;
     }
