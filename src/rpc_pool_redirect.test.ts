@@ -185,6 +185,20 @@ describe('fetchRedirect', () => {
     expect(cancelled).toBeGreaterThan(0);
   });
 
+  test('aRuntimeReportingNoResponseUrlIsAccepted', async (): Promise<void> => {
+    // Ruling R4.2: a runtime with an empty response URL (a fetch polyfill) is read, as a compliant runtime follows no hop.
+    const response: any = {
+      ok: true,
+      status: 200,
+      url: '',
+      headers: new Map<string, string>(),
+      body: null,
+      arrayBuffer: async (): Promise<ArrayBuffer> => new ArrayBuffer(0),
+    };
+    const data: Uint8Array = await fetchRedirect(async (): Promise<any> => response, 'wss://edge.example.test', { url: 'https://files.example.test/a' }, new AbortController().signal);
+    expect(data).toHaveLength(0);
+  });
+
   test('redirectBodyWithoutAStreamIsRefused', async (): Promise<void> => {
     let buffered: number = 0;
     const arrayBuffer: () => Promise<ArrayBuffer> = async (): Promise<ArrayBuffer> => {
