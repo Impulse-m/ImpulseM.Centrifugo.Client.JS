@@ -114,8 +114,8 @@ export async function fetchRedirect(
     // browser's 'manual' gives an opaque response no hop can be checked on. The hook names the final URL instead. An
     // insecure endpoint is fetched with 'manual', and its response is checked below.
     response = await fetchFunction(url, { headers: redirect.headers, signal: signal, redirect: secureEndpoint(endpoint) ? 'error' : 'manual' });
-  } catch (e) {
-    throw redirectFailure('redirect fetch failed');
+  } catch (e: any) {
+    throw redirectFailure('redirect fetch failed', e);
   }
   if (!response.ok) {
     discardBody(response);
@@ -134,7 +134,7 @@ export async function fetchRedirect(
     if (e?.code === errorCodes.redirectFailed) {
       throw e;
     }
-    throw redirectFailure('redirect body read failed');
+    throw redirectFailure('redirect body read failed', e);
   }
 }
 
@@ -185,7 +185,9 @@ async function readBounded(response: any, maxBytes: number): Promise<Uint8Array>
     }
     return whole;
   }
-  const chunks: Uint8Array[] = [];
+  // One buffer: allocated at the declared length when there is one (it is within the limit here), and grown geometrically
+  // otherwise, so that a body is never held twice at once.
+  let out: Uint8Array = new Uint8Array(declared !== undefined && declared >= 0 ? declared : 0);
   let total: number = 0;
   try {
     for (;;) {
@@ -193,24 +195,30 @@ async function readBounded(response: any, maxBytes: number): Promise<Uint8Array>
       if (step.done === true) {
         break;
       }
-      total += step.value.length;
+      const chunk: Uint8Array = step.value;
+      total += chunk.length;
       if (total > maxBytes) {
         throw redirectFailure('redirect body over the limit');
       }
-      chunks.push(step.value);
+      if (total > out.length) {
+        out = growBuffer(out, total, maxBytes);
+      }
+      out.set(chunk, total - chunk.length);
     }
   } catch (error: any) {
     // A body over the limit, or a read which failed mid-body: the stream is released now, not at garbage collection.
     source.cancel();
     throw error;
   }
-  const out: Uint8Array = new Uint8Array(total);
-  let offset: number = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
+  return out.length === total ? out : out.slice(0, total);
+}
+
+
+// A buffer of at least length bytes, holding the bytes of the old one: it doubles, and is capped at maxBytes.
+function growBuffer(old: Uint8Array, length: number, maxBytes: number): Uint8Array {
+  const grown: Uint8Array = new Uint8Array(Math.min(maxBytes, Math.max(length, old.length * 2, 65536)));
+  grown.set(old);
+  return grown;
 }
 
 
@@ -275,6 +283,12 @@ function discardBody(response: any): void {
 }
 
 
-function redirectFailure(message: string): any {
-  return poolError(errorCodes.redirectFailed, message);
+// The redirect failure of a fetch. The cause, when given, is the error the runtime or the body read raised: it is kept on
+// the error (as cause), so that a failure can be told apart (DNS, TLS, the stream) without a message per cause.
+function redirectFailure(message: string, cause?: any): any {
+  const error: any = poolError(errorCodes.redirectFailed, message);
+  if (cause !== undefined) {
+    error.cause = cause;
+  }
+  return error;
 }

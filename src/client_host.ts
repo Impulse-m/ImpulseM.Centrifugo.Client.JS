@@ -77,7 +77,8 @@ export interface TokenExchangeHost extends ClientHost {
  * _callbacks, _rpcOptionsSupported, _methodCall, _call, _getToken, _token, _debug, _getRefreshRetryDelay,
  * _clearRefreshTimeout, _refreshTimeout, _refresh, _client, _identity, _dispatchFailed, _rpc, _codec, _transport,
  * _disconnect, _tokenExchange, _refreshRequired, _transportId, _isConnecting, _session, _node, _emitError,
- * _failUnauthorized, _reportDispatchError, _host (createTokenSourceHost).
+ * _failUnauthorized, _reportDispatchError, _host (createTokenSourceHost), and the in-flight fields callInFlight and
+ * commandInFlight of _refreshSlot (createTokenSourceHost).
  * Accepted by the wave's contract (section 10); the bracket reads are not counted as uses by noUnusedLocals.
  */
 export function createClientHost(client: Centrifuge): ClientHost {
@@ -178,8 +179,9 @@ export function createTokenSourceHost(client: Centrifuge): TokenSourceHost {
     tokenExpired: (token: string): boolean => client['_tokenExchange']?.tokenExpired(token) ?? false,
     canRenew: (): boolean => client['_host'].hasGetToken(),
     renewNow: (): boolean => {
-      // A refresh in flight renews the token already: a second one would send the same token again, as Java does not.
-      if (client['_refreshSlot'].busy()) {
+      // A refresh in flight renews the token already: a second one would send the same token again, as the Java renewNow
+      // also avoids. The in-flight fields are read here, not through a method of the refresh slot.
+      if (client['_refreshSlot']['callInFlight'] !== null || client['_refreshSlot']['commandInFlight'] !== null) {
         return false;
       }
       client['_host'].scheduleRefresh(0, (): void => client['_refresh']());
