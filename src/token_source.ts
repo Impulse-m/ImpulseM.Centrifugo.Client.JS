@@ -141,6 +141,17 @@ export class TokenSource {
   }
 
 
+  /**
+   * The re-attach of a call of the pool. Only a request which waits is answered by an event of the client, so the listeners
+   * are looked at only while one waits: a call with no waiting request copies no listener array.
+   */
+  reattachWaiting(): void {
+    if (this.waiting.size > 0) {
+      this.reattach();
+    }
+  }
+
+
   // Keeps the listeners of the handlers on the client. True when one was missing and is attached now.
   private attach(): boolean {
     let attached: boolean = false;
@@ -227,11 +238,8 @@ export class TokenSource {
     if (token === '') {
       return;
     }
-    // The token a renewal was started for has come back, so a request refused it again starts a renewal of its own: each
-    // such renewal is driven by a refusal, not by an event, so it cannot loop.
-    if (this.renewedFor === token) {
-      this.renewedFor = null;
-    }
+    // A renewal already started for this token is not started again: the requests refused it wait for the next event of
+    // the client, as Java does, so the fleet costs one renewal per main token value per main connection.
     for (const [requester, waiter] of this.waiting) {
       if (waiter.refused === token) {
         this.fail(requester, waiter);

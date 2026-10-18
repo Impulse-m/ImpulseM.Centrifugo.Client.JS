@@ -571,4 +571,22 @@ describe('RpcPool tokenFrom', () => {
     expect(refreshesOf(main)).toHaveLength(1);
     expect(connectsOf(edgeA).every((cmd: any): boolean => cmd.connect.token === 'same-token')).toBe(true);
   });
+
+  test('a connection opened after a refused renewal which gave the token back starts no second renewal', async (): Promise<void> => {
+    const c: ProtobufCentrifuge = createMain({ getToken: async (): Promise<string> => 'same-token' }, false);
+    await connectClient(c);
+    refusedToken = 'same-token';
+    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url], maxConnectionsPerEndpoint: 1 });
+    const first: any = await pool.rpc('work', bytes({ n: 1 })).then((): string => 'resolved', (error: any): any => error);
+    expect(first.code).not.toBe(errorCodes.timeout);
+    expect(refreshesOf(main)).toHaveLength(1);
+    // A second connection is handed the same token the main client holds: the renewal it would start was made already.
+    quiet(pool.rpc('work', bytes({ n: 2 })));
+    expect(await until((): boolean => connectsOf(edgeA).length === 2)).toBe(true);
+    await new Promise<void>((resolve: () => void): void => {
+      setTimeout(resolve, 100);
+    });
+    expect(refreshesOf(main)).toHaveLength(1);
+    expect(connectsOf(edgeA).every((cmd: any): boolean => cmd.connect.token === 'same-token')).toBe(true);
+  });
 });

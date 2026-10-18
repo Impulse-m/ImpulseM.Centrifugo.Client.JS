@@ -197,6 +197,10 @@ export class RpcPool {
     if (this.idleTimeout > maxTimerDelay) {
       throw poolError(errorCodes.badConfiguration, `idleTimeout must be at most ${maxTimerDelay} milliseconds`);
     }
+    // Every call deadline is a timer of this span, so a longer one would fire at once.
+    if (this.timeout > maxTimerDelay) {
+      throw poolError(errorCodes.badConfiguration, `connection.timeout must be at most ${maxTimerDelay} milliseconds`);
+    }
     this.retries = integerOption('retries', options.retries, maxLaterResends, 0);
     this.redirects = new RedirectGate(integerOption('maxRedirectsInflight', options.maxRedirectsInflight, defaultMaxRedirectsInflight, 1));
     this.rerouteHook = options.reroute;
@@ -220,8 +224,9 @@ export class RpcPool {
         return;
       }
       // The session of the client ended as unauthorized, or no token can be lent and the client is not connecting: no
-      // connection is opened, and the call is not sent. A listener the application removed is put back first.
-      this.source?.reattach();
+      // connection is opened, and the call is not sent. Removed listeners are put back by the token requests, and by a
+      // call while a request waits for an event of the client, since only that event can answer the waiting request.
+      this.source?.reattachWaiting();
       if (this.source?.refuses() === true) {
         reject(poolError(errorCodes.clientDisconnected, 'unauthorized'));
         return;
@@ -406,10 +411,12 @@ export class RpcPool {
   // Places a call on a connection of its key, or queues it. A fresh call beyond maxQueued is refused; a call sent again
   // is queued whatever the bound, since it was admitted already. A call for a key not resolved yet is counted in
   // queued while it resolves, so the bound covers it too: a resolver which is slow cannot admit calls without a limit.
+  // The first such call is admitted at any bound, since its connection opens once the key resolves, as a call on a
+  // resolved key with a free slot is.
   private attempt(call: PendingCall, fresh: boolean): void {
     const resolving: boolean = !this.groups.has(call.key);
     if (resolving) {
-      if (fresh && this.queued >= this.maxQueued) {
+      if (fresh && this.queued > 0 && this.queued >= this.maxQueued) {
         this.fail(call, poolError(errorCodes.limitExceeded, 'too many rpc calls waiting for a connection'));
         return;
       }
@@ -595,7 +602,8 @@ export class RpcPool {
 
 
   // A connection ended for good. It leaves its group; the calls waiting take the other connections, and the
-  // application hears of the end unless it asked for it.
+  // application hears of the end unless it asked for it, or unless the end is the retirement of an identity change, which
+  // the application made itself (as Java does not report it either).
   private lost(conn: PoolConnection, ctx: any): void {
     conn.connecting = false;
     conn.closeCode = ctx.code;
@@ -605,7 +613,7 @@ export class RpcPool {
     this.retiring.delete(conn);
     this.source?.forget(conn);
     this.dispatch(conn.group);
-    if (ctx.code !== disconnectedCodes.disconnectCalled) {
+    if (ctx.code !== disconnectedCodes.disconnectCalled && !conn.retired) {
       for (const listener of this.errorListeners) {
         listener({ endpoint: conn.url, error: ctx });
       }

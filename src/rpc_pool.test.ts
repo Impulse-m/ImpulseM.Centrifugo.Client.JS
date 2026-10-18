@@ -279,6 +279,29 @@ describe('RpcPool', () => {
       expect(thrown).toMatchObject({ code: errorCodes.badConfiguration });
     });
 
+    test('a connection timeout beyond the longest timer is refused with badConfiguration', (): void => {
+      let thrown: any;
+      try {
+        createPool((): string => 'ws://127.0.0.1:1', { connection: { websocket: WebSocket, timeout: 2147483648 } });
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toMatchObject({ code: errorCodes.badConfiguration });
+    });
+
+    test('maxQueued 0 admits the first call of a key not resolved yet, and its connection opens once the key resolves', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = echo;
+      const pool: RpcPool = createPool((): Promise<string[]> => Promise.resolve([server.url]), { maxQueued: 0 });
+      expect(fromBytes((await pool.rpc('work', bytes({ n: 1 }))).data)).toEqual({ n: 1 });
+    });
+
+    test('maxQueued 0 refuses a second call for a key still resolving', async (): Promise<void> => {
+      const pool: RpcPool = createPool((): Promise<string[]> => new Promise<string[]>((): void => {}), { maxQueued: 0 });
+      quiet(pool.rpc('work', bytes({ n: 1 })));
+      await expect(pool.rpc('work', bytes({ n: 2 }))).rejects.toMatchObject({ code: errorCodes.limitExceeded });
+    });
+
     test('an idleTimeout at the longest timer arms one check per period, not a loop', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
       server.onCommand = echo;
