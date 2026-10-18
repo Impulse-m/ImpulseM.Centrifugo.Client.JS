@@ -58,6 +58,8 @@ export class TokenSource {
   private confirmed: string | null = null;
   // The token found unusable: a pool connection connected with it, and its server confirmed another identity (u).
   private unusableToken: string | null = null;
+  // The confirmed token the fleet refused and no renewal can replace before the next confirmation: the source is spent (d).
+  private spentToken: string | null = null;
   // The confirmed token a renewal was started for since the main client last connected (r), null after each connect.
   private renewedFor: string | null = null;
   // The identity recorded, and whether one was recorded at all.
@@ -141,9 +143,18 @@ export class TokenSource {
   }
 
 
-  /** Whether the pool may open a connection now: the main client is connected and its confirmed token is not unusable. */
+  /** Whether the pool may open a connection now: the main client is connected, and its confirmed token is neither unusable nor spent. */
   canLend(): boolean {
-    return this.confirmed !== null && this.confirmed !== this.unusableToken;
+    return this.mainState() === 'connected'
+      && this.confirmed !== null
+      && this.confirmed !== this.unusableToken
+      && this.confirmed !== this.spentToken;
+  }
+
+
+  /** Whether the main client is connected and its confirmed token is spent: the fleet refused it and no renewal replaces it. */
+  spent(): boolean {
+    return this.mainState() === 'connected' && this.confirmed !== null && this.confirmed === this.spentToken;
   }
 
 
@@ -238,25 +249,43 @@ export class TokenSource {
       return;
     }
     const confirmed: string = this.confirmed;
-    if (confirmed !== '' && confirmed !== waiter.refused && confirmed !== this.unusableToken && !this.host.tokenExpired(confirmed)) {
+    if (confirmed !== ''
+      && confirmed !== waiter.refused
+      && confirmed !== this.unusableToken
+      && confirmed !== this.spentToken
+      && !this.host.tokenExpired(confirmed)) {
       this.deliver(requester, waiter, confirmed);
       return;
     }
-    if (confirmed === this.unusableToken) {
+    // Found unusable and not spent: the next confirmation decides, a renewal would only repeat the mismatch.
+    if (confirmed === this.unusableToken && confirmed !== this.spentToken) {
       return;
     }
     if (confirmed === '') {
       this.deliver(requester, waiter, '');
       return;
     }
-    if (!this.host.canRenew()) {
+    // No renewal can replace the token, or it is spent already: the request is answered now, and the token is spent.
+    if (!this.host.canRenew() || confirmed === this.spentToken) {
       this.fail(requester, waiter);
+      this.spend(confirmed);
       return;
     }
     // One renewal per confirmed token and main connection: a renewal started for this token is not started again.
     if (this.renewedFor !== confirmed && this.host.renewNow()) {
       this.renewedFor = confirmed;
     }
+  }
+
+
+  // The confirmed token is spent: the fleet refused it and no renewal can replace it before the next confirmation. The
+  // pools hear of it, after the requests of the event are answered.
+  private spend(token: string): void {
+    if (this.spentToken === token) {
+      return;
+    }
+    this.spentToken = token;
+    this.notify();
   }
 
 
@@ -279,12 +308,14 @@ export class TokenSource {
   }
 
 
-  // The connect of the main client is confirmed: its token is the confirmed one, a renewal and an unusable mark are cleared.
+  // The connect of the main client is confirmed: its token is the confirmed one, a renewal, an unusable mark and a spent
+  // mark are cleared.
   private onConnected(): void {
     this.confirmedConnect = true;
     this.ended = false;
     this.renewedFor = null;
     this.unusableToken = null;
+    this.spentToken = null;
     this.confirmed = this.host.token();
     this.observe();
     this.settle();
@@ -293,38 +324,46 @@ export class TokenSource {
 
 
   // A refresh of the main client is accepted while it is connected: the accepted token is the confirmed one. The requests
-  // refused that token fail now, since a renewal gave it back; the others are evaluated again. The pools hear of it only
-  // when the identity changed or an unusable mark was cleared.
+  // refused that token fail now, since a renewal gave it back; a renewal that gave back the token it was started for, or
+  // that refused a request, spends the source. The others are evaluated again. The pools hear of it only when the identity
+  // changed, an unusable mark was cleared, or the spent mark changed.
   private onAccepted(): void {
     if (this.mainState() !== 'connected') {
       return;
     }
     const generation: number = this.generationCount;
     const cleared: boolean = this.unusableToken !== null;
+    const spentBefore: string | null = this.spentToken;
     this.confirmed = this.host.token();
     this.unusableToken = null;
+    this.spentToken = null;
     this.observe();
-    this.refusedAgain();
+    const refused: boolean = this.refusedAgain();
+    if (refused || this.confirmed === this.renewedFor) {
+      this.spentToken = this.confirmed;
+    }
     this.settle();
-    if (this.generationCount !== generation || cleared) {
+    if (this.generationCount !== generation || cleared || this.spentToken !== spentBefore) {
       this.notify();
     }
   }
 
 
   // A refresh failed while the main client is connected. A 103 for the renewal of the confirmed token is final: the main
-  // client keeps its connection and will not retry, so the requests wait no longer and fail. Else an explicit refresh
-  // re-evaluates the requests (it may leave a renewal to start), and a timer refresh refused with 103 does too; another
-  // timer refusal is the main client's own business: it retries or ends the connection.
+  // client keeps its connection and will not retry, so the token is spent, and the requests wait no longer and fail. Else
+  // an explicit refresh re-evaluates the requests (it may leave a renewal to start), and a timer refresh refused with 103
+  // does too; another timer refusal is the main client's own business: it retries or ends the connection.
   private onRefreshFailed(error: any, explicit: boolean): void {
     if (this.mainState() !== 'connected') {
       return;
     }
     const code: number = error?.code;
-    if (refreshKeepsConnection(code) && this.renewedFor !== null && this.renewedFor === this.confirmed) {
+    const confirmed: string | null = this.confirmed;
+    if (refreshKeepsConnection(code) && this.renewedFor !== null && this.renewedFor === confirmed && confirmed !== null) {
       for (const [requester, waiter] of Array.from(this.waiting)) {
         this.fail(requester, waiter);
       }
+      this.spend(confirmed);
       return;
     }
     if (explicit || refreshKeepsConnection(code)) {
@@ -350,16 +389,20 @@ export class TokenSource {
 
 
   // A renewal accepted with the token a request was refused: that request cannot use it, so it fails as unauthorized now.
-  private refusedAgain(): void {
+  // True when such a request was there.
+  private refusedAgain(): boolean {
     const confirmed: string | null = this.confirmed;
     if (confirmed === null || confirmed === '') {
-      return;
+      return false;
     }
+    let refused: boolean = false;
     for (const [requester, waiter] of Array.from(this.waiting)) {
       if (waiter.refused === confirmed && this.waiting.get(requester) === waiter) {
+        refused = true;
         this.fail(requester, waiter);
       }
     }
+    return refused;
   }
 
 

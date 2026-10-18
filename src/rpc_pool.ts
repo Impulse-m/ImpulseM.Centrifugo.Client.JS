@@ -525,7 +525,7 @@ export class RpcPool {
   private admit(call: PendingCall, fresh: boolean, endpoints: RpcPoolEndpoint[]): void {
     const front: boolean = call.rerouted;
     call.rerouted = false;
-    if (!fresh && !this.entryOk(call)) {
+    if (!fresh && !this.entryOk(call, endpoints)) {
       return;
     }
     const line: RpcPoolLine = this.lineOf(call.key, endpoints);
@@ -619,9 +619,9 @@ export class RpcPool {
   }
 
 
-  // The entry check of a call against the main client (table 2.2, rows ME, MD and b ≠ G): a call that can never be placed
-  // settles now, with that row's error. False when it settled.
-  private entryOk(call: PendingCall): boolean {
+  // The entry check of a call against the main client (table 2.2, rows ME, MD, b ≠ G and, while connected, the refused
+  // row of a spent source): a call that can never be placed settles now, with that row's error. False when it settled.
+  private entryOk(call: PendingCall, endpoints: RpcPoolEndpoint[]): boolean {
     const source: TokenSource | null = this.source;
     if (source === null) {
       return true;
@@ -639,7 +639,24 @@ export class RpcPool {
       this.fail(call, poolError(errorCodes.clientDisconnected, 'identity changed'));
       return false;
     }
+    if (call.generation !== null && source.spent() && !this.liveOf(endpoints, call.generation)) {
+      this.fail(call, poolError(errorCodes.clientDisconnected, 'token refused'));
+      return false;
+    }
     return true;
+  }
+
+
+  // Whether a connection of the endpoints is live with the generation given: the calls bound to it may be placed there.
+  private liveOf(endpoints: RpcPoolEndpoint[], generation: number): boolean {
+    for (const endpoint of endpoints) {
+      for (const conn of endpoint.all()) {
+        if (conn.live && conn.generation === generation) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
 
@@ -649,7 +666,7 @@ export class RpcPool {
   private place(call: PendingCall, endpoints: RpcPoolEndpoint[]): Placement {
     const source: TokenSource | null = this.source;
     if (source !== null) {
-      if (!this.entryOk(call)) {
+      if (!this.entryOk(call, endpoints)) {
         return 'failed';
       }
       const state: MainState = source.mainState();
@@ -680,6 +697,11 @@ export class RpcPool {
       return 'placed';
     }
     if (source !== null && (source.mainState() !== 'connected' || !source.canLend())) {
+      // A spent source places nothing new: the call is refused unless a live connection of its generation takes it later.
+      if (call.generation !== null && source.spent() && !this.liveOf(endpoints, call.generation)) {
+        this.fail(call, poolError(errorCodes.clientDisconnected, 'token refused'));
+        return 'failed';
+      }
       return 'wait';
     }
     for (const endpoint of endpoints) {
@@ -917,7 +939,10 @@ export class RpcPool {
         this.holdEndpoint(endpoint);
       }
     }
-    this.scheduleEndpoint(endpoint);
+    // The end of a retired connection drains nothing: its endpoint took it out already (2.4, after an end).
+    if (!conn.retired) {
+      this.scheduleEndpoint(endpoint);
+    }
   }
 
 
