@@ -19,11 +19,15 @@ export interface PendingCall {
   // True while the call is counted in RpcPool.queued: from its admission until it holds a slot or settles. It is counted
   // while its key is still resolving, and while it waits in the line of its key (line).
   queued: boolean;
-  // The line of the endpoint key the call waits in, null while it is not in one.
-  line: RpcPoolEndpoint | null;
+  // The line of the key the call waits in, null while it is not in one.
+  line: RpcPoolLine | null;
   // The neighbours of the call in its line, null at either end.
   previous: PendingCall | null;
   next: PendingCall | null;
+  // The identity generation the call is bound to, null while it is not bound (with tokenFrom only, see TokenSource).
+  generation: number | null;
+  // True when a reroute moved the call to its new key: it joins the front of that key's line.
+  rerouted: boolean;
   timer: CallTimer | null;
   resend: CallTimer | null;
   // Removes the abort listener of the signal, if the call has one.
@@ -36,15 +40,15 @@ export interface PendingCall {
 
 /** A connection of an rpc pool: its client, the calls it carries and whether its connect is still in flight. */
 export interface PoolConnection {
-  /** The endpoint the client connects to. */
-  url: string;
-  /** The endpoint key's group the connection belongs to. */
-  group: RpcPoolEndpoint;
+  /** The endpoint the client connects to, which holds the connection. */
+  endpoint: RpcPoolEndpoint;
   client: Centrifuge;
   /** Calls in flight on the connection, each holding a slot of the window. */
   inflight: number;
-  /** True until the first connected event: one connect in flight per endpoint. */
+  /** True from the open, and again while the client reconnects, until its next connected event: the endpoint's connect. */
   connecting: boolean;
+  /** True while the connection is connected and its identity verified: it takes calls (see RpcPool, live). */
+  live: boolean;
   /** The code of the disconnect that ended the connection for good, null while it is not ended. */
   closeCode: number | null;
   /** The time the connection was last left without calls, read by its idle check, see RpcPool. */
@@ -60,24 +64,32 @@ export interface PoolConnection {
 }
 
 
-/** The connections of one endpoint key, over the endpoints its resolver gave. */
-export class RpcPoolEndpoint {
-  readonly urls: string[];
-  // The calls of the key waiting for a slot, first come first served: a doubly linked line, so a call leaves it in O(1)
-  // when it settles.
+/**
+ * A line of the calls of one endpoint key, first come first served: a doubly linked line, so a call leaves it in O(1)
+ * when it settles. The endpoints of the key are kept beside it, for the keys waiting per endpoint (see RpcPoolEndpoint).
+ */
+export class RpcPoolLine {
+  readonly key: string;
+  readonly endpoints: RpcPoolEndpoint[];
   private first: PendingCall | null = null;
   private last: PendingCall | null = null;
-  private connections: PoolConnection[] = [];
 
 
-  constructor(urls: string[]) {
-    this.urls = urls;
+  constructor(key: string, endpoints: RpcPoolEndpoint[]) {
+    this.key = key;
+    this.endpoints = endpoints;
   }
 
 
   /** The call at the head of the line, null when no call waits. */
   head(): PendingCall | null {
     return this.first;
+  }
+
+
+  /** Whether no call waits in the line. */
+  isEmpty(): boolean {
+    return this.first === null;
   }
 
 
@@ -92,6 +104,20 @@ export class RpcPoolEndpoint {
       this.last.next = call;
     }
     this.last = call;
+  }
+
+
+  /** Puts a call at the head of the line: a rerouted call goes first. */
+  addFirst(call: PendingCall): void {
+    call.line = this;
+    call.previous = null;
+    call.next = this.first;
+    if (this.first === null) {
+      this.last = call;
+    } else {
+      this.first.previous = call;
+    }
+    this.first = call;
   }
 
 
@@ -114,50 +140,56 @@ export class RpcPoolEndpoint {
     call.previous = null;
     call.next = null;
   }
+}
 
 
-  /** The connection of the key with a free slot of the window and the fewest calls in flight, null when none has one. */
-  roomy(window: number): PoolConnection | null {
-    let best: PoolConnection | null = null;
-    for (const conn of this.connections) {
-      if (conn.inflight < window && (best === null || conn.inflight < best.inflight)) {
-        best = conn;
-      }
-    }
-    return best;
+/**
+ * One endpoint: a URL, and the connections the pool opened to it. Connections belong to the URL, so every key which
+ * resolves to it shares them. It keeps the hold of opens after a terminal close, and the keys with waiting calls.
+ */
+export class RpcPoolEndpoint {
+  readonly url: string;
+  // Terminal closes since the endpoint last connected: the hold of its next open grows with them.
+  closes: number = 0;
+  // The hold of the opens after a terminal close: one timer per held endpoint, see RpcPool.
+  hold: CallTimer | null = null;
+  // The keys with calls in their line, among the keys that resolve to this endpoint.
+  readonly waitingKeys: Set<string> = new Set<string>();
+  // The connections the endpoint holds: opened, and neither retired nor removed.
+  private connections: PoolConnection[] = [];
+
+
+  constructor(url: string) {
+    this.url = url;
   }
 
 
-  /**
-   * The first endpoint with fewer connections than perEndpoint and no connect in flight, null when there is none:
-   * a connect is serialised per endpoint, so a burst of calls opens one socket per endpoint at a time.
-   */
-  openable(perEndpoint: number): string | null {
-    for (const url of this.urls) {
-      let count: number = 0;
-      let connecting: boolean = false;
-      for (const conn of this.connections) {
-        if (conn.url === url) {
-          count++;
-          connecting = connecting || conn.connecting;
-        }
-      }
-      if (!connecting && count < perEndpoint) {
-        return url;
-      }
-    }
-    return null;
+  /** The connections the endpoint holds. The caller must not keep the array across a call that may remove one. */
+  all(): PoolConnection[] {
+    return this.connections;
   }
 
 
-  /** The first connection of the key whose token belongs to another identity than the generation, null when there is none. */
-  staleOf(generation: number): PoolConnection | null {
+  /** A copy of the connections: the caller may close them while it walks the list. */
+  copy(): PoolConnection[] {
+    return this.connections.slice(0);
+  }
+
+
+  /** How many connections the endpoint holds. */
+  count(): number {
+    return this.connections.length;
+  }
+
+
+  /** Whether a connection of the endpoint is connecting: its connect is in flight, and no other opens. */
+  connecting(): boolean {
     for (const conn of this.connections) {
-      if (conn.generation !== null && conn.generation !== generation) {
-        return conn;
+      if (conn.connecting) {
+        return true;
       }
     }
-    return null;
+    return false;
   }
 
 
@@ -174,8 +206,13 @@ export class RpcPoolEndpoint {
   }
 
 
-  /** A copy of the connections: the caller may close them while it walks the list. */
-  all(): PoolConnection[] {
-    return this.connections.slice(0);
+  /** The first connection whose token belongs to a generation other than the one given, null when there is none. */
+  staleOf(generation: number): PoolConnection | null {
+    for (const conn of this.connections) {
+      if (conn.generation !== null && conn.generation !== generation) {
+        return conn;
+      }
+    }
+    return null;
   }
 }

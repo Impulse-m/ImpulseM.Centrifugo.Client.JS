@@ -116,7 +116,13 @@ export async function fetchRedirect(
     // A redirect of a secure endpoint is not followed by the runtime: it fails the fetch, before any hop is sent, since a
     // browser's 'manual' gives an opaque response no hop can be checked on. The hook names the final URL instead. An
     // insecure endpoint is fetched with 'manual', and its response is checked below.
-    response = await fetchFunction(url, { headers: redirect.headers, signal: signal, redirect: secureEndpoint(endpoint) ? 'error' : 'manual' });
+    // The request carries only the redirect headers: no cookies or ambient browser credentials (credentials 'omit').
+    response = await fetchFunction(url, {
+      headers: redirect.headers,
+      signal: signal,
+      credentials: 'omit',
+      redirect: secureEndpoint(endpoint) ? 'error' : 'manual',
+    });
   } catch (e: any) {
     throw redirectFailure('redirect fetch failed', e);
   }
@@ -189,7 +195,8 @@ async function readBounded(response: any, maxBytes: number): Promise<Uint8Array>
     return whole;
   }
   // One buffer: allocated at the declared length up to initialBodyBytes, so that a body which declares a large length and
-  // stalls holds little memory, and grown geometrically as the bytes arrive, so that a body is never held twice at once.
+  // stalls holds little memory, and grown geometrically as the bytes arrive. A growth step or the final copy holds the old
+  // and the new buffer at once, so a fetch peaks at 2 x maxBytes, briefly; the pool's peak is maxRedirectsInflight x 2 x maxBytes.
   const initial: number = declared !== undefined && declared >= 0 ? Math.min(declared, initialBodyBytes) : 0;
   let out: Uint8Array = new Uint8Array(initial);
   let total: number = 0;

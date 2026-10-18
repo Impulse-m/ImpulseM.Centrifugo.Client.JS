@@ -3,13 +3,14 @@ import { CentrifugeProtobuf } from './protobuf_client';
 import { disconnectedCodes, errorCodes } from './codes';
 import { callTimer } from './call_timer';
 import { laterResendDelay, maxLaterResends, retrySignal } from './rpc_tracker';
-import { RpcPoolEndpoint } from './rpc_pool_endpoint';
+import { RpcPoolEndpoint, RpcPoolLine } from './rpc_pool_endpoint';
 import type { PendingCall, PoolConnection } from './rpc_pool_endpoint';
 import { fetchRedirect, RedirectGate } from './rpc_pool_redirect';
 import { poolError } from './rpc_pool_error';
 import { tokenSourceOf } from './token_source';
-import type { SourcedToken, TokenSource } from './token_source';
+import type { MainListener, MainState, SourcedToken, TokenSource } from './token_source';
 import { UnauthorizedError } from './unauthorized_error';
+import { backoff } from './utils';
 import type { Options, RpcOptions, RpcResult } from './types';
 
 // The connection options a pool passes on to its clients. The type of RpcPoolOptions.connection and the check of
@@ -20,10 +21,10 @@ const connectionOptionNames = [
 ] as const;
 type ConnectionOptionName = typeof connectionOptionNames[number];
 
-/** The options of a pool call's client a pool accepts: nothing else of the client options is taken. */
+/** The options of the pool's clients a pool accepts: nothing else of the client options is taken. */
 export interface RpcPoolOptions {
   /**
-   * The client which owns the access token of the pool's connections. The pool lends the client's current token to each
+   * The client which owns the access token of the pool's connections. The pool lends the client's confirmed token to each
    * connection, and renews it through that client when the token is refused or expires: the pool runs no exchange and
    * calls no getter of its own. Exclusive with connection.token and connection.getToken; connection.tokenExchange is
    * refused. It works with every token mode of the client, and needs no change of the client.
@@ -32,8 +33,9 @@ export interface RpcPoolOptions {
   /**
    * Endpoints of an endpoint key. '' is the key of a call without one. The key is whatever the server answered the
    * application (a cluster, a region); the pool does not interpret it. Resolved once per key, until close(); a resolution
-   * which fails is resolved again by the next call. Each key keeps its connections and its state for the life of the
-   * pool, so keys should be a bounded set (clusters, regions), not one per object.
+   * which fails is resolved again by the next call. Each key keeps its line and its state for the life of the pool, so
+   * keys should be a bounded set (clusters, regions), not one per object. Connections belong to the endpoint URL, so keys
+   * which resolve to one URL share its connections.
    */
   endpoints: (endpointKey: string) => string | string[] | Promise<string | string[]>;
   /**
@@ -56,15 +58,15 @@ export interface RpcPoolOptions {
   maxInflightPerConnection?: number;
   /**
    * Calls waiting for a slot at most, over all endpoints: the calls waiting for their endpoint key to resolve, and the
-   * ones waiting in a line for a connection. Beyond it rpc() rejects with limitExceeded. Default 64. A change of a
-   * connection places only the calls waiting for its endpoint key, so the bound does not multiply the work of an event.
-   * A resend of a call already admitted (lost connection, later, move) is queued beyond this bound, and is bounded by
-   * retries instead. The redirect fetches waiting for a slot are bounded by it too.
+   * ones waiting in a line for a connection. Beyond it rpc() rejects with limitExceeded. Default 64. 0 is valid: then a
+   * call waits for no slot, and a connection is opened only for the call which needs it. A resend of a call already
+   * admitted (lost connection, later, move) is queued beyond this bound, and is bounded by retries instead. The redirect
+   * fetches waiting for a slot are bounded by it too.
    */
   maxQueued?: number;
   /**
    * Closes a connection without calls for this long, in milliseconds, at most 2147483647 (the longest timer). 0 keeps it
-   * open. Default 60000.
+   * open, and then close() is the only way to release it. Default 60000.
    */
   idleTimeout?: number;
   /**
@@ -134,12 +136,19 @@ const defaultMaxInflightPerConnection: number = 1;
 const defaultMaxQueued: number = 64;
 const defaultIdleTimeout: number = 60000;
 const defaultMaxRedirectsInflight: number = 4;
-// The longest delay a timer runs for, as ttlMilliseconds in utils.ts: the idleTimeout may not be longer.
+// The reconnect delays of a client when none is set: the defaults of centrifuge.ts, which time the hold of opens.
+const defaultMinReconnectDelay: number = 500;
+const defaultMaxReconnectDelay: number = 20000;
+// The longest delay a timer runs for, as ttlMilliseconds in utils.ts: no duration the pool arms may be longer.
 const maxTimerDelay: number = 2147483647;
 // Codes from this one up are the server's errors; the ones below are the client's own, see errorCodes.
 const serverErrorFloor: number = 100;
 const noop: () => void = (): void => {};
 const noData: Uint8Array = new Uint8Array(0);
+
+// What placing a call did: sent on a connection, opened a connection and left the call in its line, left it waiting, or
+// settled it with an error.
+type Placement = 'placed' | 'opened' | 'wait' | 'failed';
 
 
 /**
@@ -161,26 +170,41 @@ export class RpcPool {
   private readonly maxQueued: number;
   private readonly idleTimeout: number;
   private readonly retries: number;
+  private readonly minReconnectDelay: number;
+  private readonly maxReconnectDelay: number;
   private readonly redirects: RedirectGate;
   // The token source of tokenFrom, null without it: a pool which takes no token from a client holds none.
   private readonly source: TokenSource | null;
-  private readonly resolved: Map<string, Promise<string[]>> = new Map();
-  private readonly groups: Map<string, RpcPoolEndpoint> = new Map();
-  // The connections retired while they carry calls: they close when their last call settles, see retire.
-  private readonly retiring: Set<PoolConnection> = new Set();
+  // The pool as the source's listener: the events of the main client drain the keys with waiting calls.
+  private readonly mainListener: MainListener = {
+    onMainEvent: (): void => {
+      this.mainEvent();
+    },
+  };
+  // The endpoint lookups of the keys: pending while a resolution runs, and kept after it resolved.
+  private readonly resolved: Map<string, Promise<RpcPoolEndpoint[]>> = new Map<string, Promise<RpcPoolEndpoint[]>>();
+  // The endpoints of the resolved keys.
+  private readonly keyEndpoints: Map<string, RpcPoolEndpoint[]> = new Map<string, RpcPoolEndpoint[]>();
+  // The endpoints by URL, which own the connections.
+  private readonly endpoints: Map<string, RpcPoolEndpoint> = new Map<string, RpcPoolEndpoint>();
+  // The line of each key, made on the first call which waits for one.
+  private readonly lines: Map<string, RpcPoolLine> = new Map<string, RpcPoolLine>();
+  // The keys with calls in their line. While there is one, the source listens to the pool.
+  private readonly waitingKeys: Set<string> = new Set<string>();
+  // The connections retired while they carry calls: they close when their last call settles, see released.
+  private readonly retiring: Set<PoolConnection> = new Set<PoolConnection>();
   // The calls not settled yet, so that close() settles them all.
-  private readonly calls: Set<PendingCall> = new Set();
-  // The groups whose waiting calls may be placed now: a pass over a group is started by the event that frees its room.
-  private readonly dirty: Set<RpcPoolEndpoint> = new Set();
-  // The calls in the lines of the groups, counted for maxQueued; a settled call leaves the count when it settles.
+  private readonly calls: Set<PendingCall> = new Set<PendingCall>();
+  // The keys whose line may place a call now. A pass takes them one by one, see pass.
+  private readonly dirtyKeys: Set<string> = new Set<string>();
+  // The calls counted for maxQueued: the ones waiting for a key to resolve, and the ones in a line.
   private queued: number = 0;
   private readonly errorListeners: Array<(ctx: { endpoint: string; error: any }) => void> = [];
   private closed: boolean = false;
-  private dispatching: boolean = false;
-  // Told by the token source when its client connects or ends: the waiting calls of every group are placed or failed then.
-  private readonly onSource: () => void = (): void => {
-    this.dispatchAll();
-  };
+  // True while a pass runs: an event inside it marks its key, and the pass takes the key after its own work.
+  private busy: boolean = false;
+  // The key lines a pass looked at, for the tests which bound the work of an event.
+  private drainedKeys: number = 0;
 
 
   constructor(options: RpcPoolOptions) {
@@ -205,14 +229,20 @@ export class RpcPool {
     if (this.timeout > maxTimerDelay) {
       throw poolError(errorCodes.badConfiguration, `connection.timeout must be at most ${maxTimerDelay} milliseconds`);
     }
+    this.minReconnectDelay = this.connectionOptions.minReconnectDelay ?? defaultMinReconnectDelay;
+    this.maxReconnectDelay = this.connectionOptions.maxReconnectDelay ?? defaultMaxReconnectDelay;
+    // The hold of opens after a close is a timer of these spans.
+    if (this.minReconnectDelay > maxTimerDelay || this.maxReconnectDelay > maxTimerDelay) {
+      throw poolError(errorCodes.badConfiguration, `connection.minReconnectDelay and connection.maxReconnectDelay must be at most ${maxTimerDelay} milliseconds`);
+    }
     this.retries = integerOption('retries', options.retries, maxLaterResends, 0);
     this.redirects = new RedirectGate(integerOption('maxRedirectsInflight', options.maxRedirectsInflight, defaultMaxRedirectsInflight, 1));
     this.rerouteHook = options.reroute;
     this.redirectHook = options.redirect;
     this.fetchOption = options.fetch;
-    // Last: a pool which fails a check above leaves no listener on the client it names.
+    // Last: a pool which fails a check above leaves no listener on the client it names. The source listens to the pool only
+    // while a call waits in a key line.
     this.source = tokenSourceFrom(options.tokenFrom, this.connectionOptions);
-    this.source?.listen(this.onSource);
   }
 
 
@@ -228,13 +258,21 @@ export class RpcPool {
         reject(poolError(errorCodes.clientClosed, 'rpc pool is closed'));
         return;
       }
-      // The session of the client ended as unauthorized, or no token can be lent and the client is not connecting: no
-      // connection is opened, and the call is not sent. Removed listeners are put back by the token requests, and by a
-      // call while a request waits for an event of the client, since only that event can answer the waiting request.
-      this.source?.reattachWaiting();
-      if (this.source?.refuses() === true) {
-        reject(poolError(errorCodes.clientDisconnected, 'unauthorized'));
-        return;
+      const source: TokenSource | null = this.source;
+      let state: MainState = 'connected';
+      if (source !== null) {
+        // A listener the application removed is put back while a request waits for an event of the client, since only
+        // that event answers the request.
+        source.reattachWaiting();
+        state = source.mainState();
+        if (state === 'ended') {
+          reject(poolError(errorCodes.clientDisconnected, 'unauthorized'));
+          return;
+        }
+        if (state === 'disconnected') {
+          reject(poolError(errorCodes.clientDisconnected, 'client disconnected'));
+          return;
+        }
       }
       const signal: AbortSignal | undefined = opts?.signal;
       if (signal?.aborted === true) {
@@ -264,6 +302,10 @@ export class RpcPool {
         line: null,
         previous: null,
         next: null,
+        // A call made while the main client is connected is bound to its identity now; one made in the connecting window
+        // is bound at its first placement after the connect.
+        generation: source !== null && state === 'connected' ? source.generation() : null,
+        rerouted: false,
         timer: null,
         resend: null,
         detach: noop,
@@ -278,7 +320,9 @@ export class RpcPool {
       }
       this.calls.add(call);
       call.timer = callTimer(call.deadline, (): void => this.expire(call));
-      this.attempt(call, true);
+      this.pass((): void => {
+        this.route(call, true);
+      });
     });
   }
 
@@ -287,8 +331,8 @@ export class RpcPool {
   stats(): RpcPoolStats {
     let connections: number = 0;
     let inflight: number = 0;
-    for (const group of this.groups.values()) {
-      for (const conn of group.all()) {
+    for (const endpoint of this.endpoints.values()) {
+      for (const conn of endpoint.all()) {
         connections++;
         inflight += conn.inflight;
       }
@@ -307,20 +351,21 @@ export class RpcPool {
       return;
     }
     this.closed = true;
-    this.source?.unlisten(this.onSource);
-    for (const group of this.groups.values()) {
-      for (const conn of group.all()) {
-        conn.idle?.clear();
-        conn.idle = null;
-        conn.client.disconnect();
+    this.source?.unlisten(this.mainListener);
+    for (const endpoint of this.endpoints.values()) {
+      endpoint.hold?.clear();
+      endpoint.hold = null;
+      for (const conn of endpoint.copy()) {
+        this.source?.forget(conn);
+        this.shut(conn);
       }
     }
     for (const conn of Array.from(this.retiring)) {
-      conn.idle?.clear();
-      conn.idle = null;
-      conn.client.disconnect();
+      this.source?.forget(conn);
+      this.shut(conn);
     }
     this.retiring.clear();
+    this.dirtyKeys.clear();
     for (const call of Array.from(this.calls)) {
       // A call whose reply carried a redirect was served already: it is in flight until its fetch ends.
       if (!call.sent && call.controller === null) {
@@ -386,72 +431,161 @@ export class RpcPool {
   }
 
 
-  // The endpoints of a key: resolved once, and resolved again after a failure.
-  private endpointsOf(key: string): Promise<string[]> {
-    let urls: Promise<string[]> | undefined = this.resolved.get(key);
-    if (urls === undefined) {
-      // A resolver that throws or rejects rejects the lookup: the calls of the key reject with its error.
-      urls = Promise.resolve()
-        .then((): string | string[] | Promise<string | string[]> => this.resolver(key))
-        .then((value: string | string[]): string[] => endpointList(value));
-      this.resolved.set(key, urls);
-      urls.catch((): void => {
-        this.resolved.delete(key);
-      });
-    }
-    return urls;
+  // Starts the resolution of a key, which keeps its endpoints once resolved and forgets a failed one.
+  private startResolution(key: string): Promise<RpcPoolEndpoint[]> {
+    // A resolver that throws or rejects rejects the lookup: the calls of the key reject with its error.
+    const endpoints: Promise<RpcPoolEndpoint[]> = Promise.resolve()
+      .then((): string | string[] | Promise<string | string[]> => this.resolver(key))
+      .then((value: string | string[]): RpcPoolEndpoint[] => endpointList(value).map((url: string): RpcPoolEndpoint => this.endpointOf(url)));
+    this.resolved.set(key, endpoints);
+    endpoints.then((list: RpcPoolEndpoint[]): void => {
+      this.keyEndpoints.set(key, list);
+    }, (): void => {
+      this.resolved.delete(key);
+    });
+    return endpoints;
   }
 
 
-  // The endpoint group of a key, made with its endpoints the first time the key is used.
-  private groupOf(key: string, urls: string[]): RpcPoolEndpoint {
-    let group: RpcPoolEndpoint | undefined = this.groups.get(key);
-    if (group === undefined) {
-      group = new RpcPoolEndpoint(urls);
-      this.groups.set(key, group);
+  // The endpoint of a URL, made the first time the URL is used.
+  private endpointOf(url: string): RpcPoolEndpoint {
+    let endpoint: RpcPoolEndpoint | undefined = this.endpoints.get(url);
+    if (endpoint === undefined) {
+      endpoint = new RpcPoolEndpoint(url);
+      this.endpoints.set(url, endpoint);
     }
-    return group;
+    return endpoint;
   }
 
 
-  // Places a call on a connection of its key, or queues it. A fresh call beyond maxQueued is refused; a call sent again
-  // is queued whatever the bound, since it was admitted already. A call for a key not resolved yet is counted in
-  // queued while it resolves, so the bound covers it too: a resolver which is slow cannot admit calls without a limit.
-  // The first such call is admitted at any bound, since its connection opens once the key resolves, as a call on a
-  // resolved key with a free slot is.
-  private attempt(call: PendingCall, fresh: boolean): void {
-    const resolving: boolean = !this.groups.has(call.key);
-    if (resolving) {
-      if (fresh && this.queued > 0 && this.queued >= this.maxQueued) {
+  // The line of a key, made with its endpoints the first time the key has a waiting call.
+  private lineOf(key: string, endpoints: RpcPoolEndpoint[]): RpcPoolLine {
+    let line: RpcPoolLine | undefined = this.lines.get(key);
+    if (line === undefined) {
+      line = new RpcPoolLine(key, endpoints);
+      this.lines.set(key, line);
+    }
+    return line;
+  }
+
+
+  // Routes a call to its key (table 2.1, rows 7 to 9). A key which is resolved admits or places the call at once. A key
+  // being resolved lets a fresh call wait behind the bound, and the call is judged again when the key resolves. The first
+  // call of an unresolved key starts its resolution and is admitted at any bound.
+  private route(call: PendingCall, fresh: boolean): void {
+    const endpoints: RpcPoolEndpoint[] | undefined = this.keyEndpoints.get(call.key);
+    if (endpoints !== undefined) {
+      this.admit(call, fresh, endpoints);
+      return;
+    }
+    const pending: Promise<RpcPoolEndpoint[]> | undefined = this.resolved.get(call.key);
+    if (pending !== undefined) {
+      if (fresh && this.queued >= this.maxQueued) {
         this.fail(call, poolError(errorCodes.limitExceeded, 'too many rpc calls waiting for a connection'));
         return;
       }
       this.count(call);
+      this.judgeWhenResolved(call, fresh, pending);
+      return;
     }
-    this.endpointsOf(call.key).then((urls: string[]): void => {
-      if (call.settled) {
-        return;
-      }
-      try {
-        const group: RpcPoolEndpoint = this.groupOf(call.key, urls);
-        if (resolving) {
-          this.uncount(call);
-        }
-        if (this.assign(call, group)) {
-          return;
-        }
-        if (fresh && this.queued >= this.maxQueued) {
-          this.fail(call, poolError(errorCodes.limitExceeded, 'too many rpc calls waiting for a connection'));
-          return;
-        }
-        this.count(call);
-        group.enqueue(call);
-      } catch (e) {
-        this.fail(call, e);
-      }
+    this.count(call);
+    this.judgeWhenResolved(call, fresh, this.startResolution(call.key));
+  }
+
+
+  // Judges a call once its key resolved: it is uncounted, and admitted again as a call of the key.
+  private judgeWhenResolved(call: PendingCall, fresh: boolean, pending: Promise<RpcPoolEndpoint[]>): void {
+    pending.then((): void => {
+      this.pass((): void => {
+        this.judge(call, fresh);
+      });
     }, (error: any): void => {
       this.fail(call, error);
     });
+  }
+
+
+  // The judgement of a call of a key which resolved: it counts again, as a fresh call of the key.
+  private judge(call: PendingCall, fresh: boolean): void {
+    if (call.settled) {
+      return;
+    }
+    this.uncount(call);
+    const endpoints: RpcPoolEndpoint[] | undefined = this.keyEndpoints.get(call.key);
+    if (endpoints === undefined) {
+      this.fail(call, poolError(errorCodes.badConfiguration, 'the endpoint resolver gave no endpoint for the key'));
+      return;
+    }
+    this.admit(call, fresh, endpoints);
+  }
+
+
+  // Admits a call of a resolved key (table 2.1 rows 7 and 8, and 2.3). A call with an empty line is placed at once; one
+  // that waits joins the line under the bound. A resend is checked before it joins a line (2.2).
+  private admit(call: PendingCall, fresh: boolean, endpoints: RpcPoolEndpoint[]): void {
+    const front: boolean = call.rerouted;
+    call.rerouted = false;
+    if (!fresh && !this.entryOk(call)) {
+      return;
+    }
+    const line: RpcPoolLine = this.lineOf(call.key, endpoints);
+    if (line.isEmpty()) {
+      const placement: Placement = this.place(call, endpoints);
+      if (placement === 'placed' || placement === 'failed') {
+        return;
+      }
+      if (placement === 'opened') {
+        // The call is the opener of an endpoint: admitted at any bound, it waits for the connect in its line.
+        this.join(call, line, front);
+        return;
+      }
+    }
+    if (fresh && this.queued >= this.maxQueued && !this.mayOpen(endpoints)) {
+      this.fail(call, poolError(errorCodes.limitExceeded, 'too many rpc calls waiting for a connection'));
+      return;
+    }
+    this.join(call, line, front);
+  }
+
+
+  // Puts a call in its line, counted for maxQueued. A rerouted call goes to the front; a key which gains its first call
+  // is told to the source and to its endpoints.
+  private join(call: PendingCall, line: RpcPoolLine, front: boolean): void {
+    this.count(call);
+    const wasEmpty: boolean = line.isEmpty();
+    if (front) {
+      line.addFirst(call);
+    } else {
+      line.enqueue(call);
+    }
+    if (wasEmpty) {
+      this.keyWaits(line);
+    }
+    this.dirtyKeys.add(line.key);
+  }
+
+
+  // A key gains its first waiting call: the pool and its endpoints keep it, and the source listens to the pool once.
+  private keyWaits(line: RpcPoolLine): void {
+    this.waitingKeys.add(line.key);
+    for (const endpoint of line.endpoints) {
+      endpoint.waitingKeys.add(line.key);
+    }
+    if (this.waitingKeys.size === 1) {
+      this.source?.listen(this.mainListener);
+    }
+  }
+
+
+  // A key loses its last waiting call: the pool and its endpoints forget it, and the source stops listening to a pool with none.
+  private keyIdle(line: RpcPoolLine): void {
+    this.waitingKeys.delete(line.key);
+    for (const endpoint of line.endpoints) {
+      endpoint.waitingKeys.delete(line.key);
+    }
+    if (this.waitingKeys.size === 0) {
+      this.source?.unlisten(this.mainListener);
+    }
   }
 
 
@@ -462,9 +596,9 @@ export class RpcPool {
   }
 
 
-  // Stops counting a call in queued: it holds a slot, it failed, or it settled.
+  // Stops counting a call in queued: it left its line, it holds a slot, it failed or it settled.
   private uncount(call: PendingCall): void {
-    call.line?.dequeue(call);
+    this.leave(call);
     if (call.queued) {
       call.queued = false;
       this.queued--;
@@ -472,30 +606,109 @@ export class RpcPool {
   }
 
 
-  // Sends a call on a connection of its group, if there is one with room or one may be opened.
-  private assign(call: PendingCall, group: RpcPoolEndpoint): boolean {
-    // A call placed after the session ended, or with no token to lend, would open or use a connection under an identity
-    // which is gone: it fails here, as rpc() fails it. Calls queued before the end fail through this check too.
-    if (this.source?.refuses() === true) {
-      throw poolError(errorCodes.clientDisconnected, 'unauthorized');
+  // Takes a call out of its line, in O(1). A key which empties is forgotten.
+  private leave(call: PendingCall): void {
+    const line: RpcPoolLine | null = call.line;
+    if (line === null) {
+      return;
     }
-    // The client is connecting: no connection's identity is confirmed, so the call waits in its line until the client
-    // connects, or ends (the token source tells the pool then).
-    if (this.source?.connecting() === true) {
-      return false;
+    line.dequeue(call);
+    if (line.isEmpty()) {
+      this.keyIdle(line);
     }
-    this.retireStale(group);
-    const roomy: PoolConnection | null = group.roomy(this.maxInflightPerConnection);
-    if (roomy !== null) {
-      this.send(call, roomy);
+  }
+
+
+  // The entry check of a call against the main client (table 2.2, rows ME, MD and b ≠ G): a call that can never be placed
+  // settles now, with that row's error. False when it settled.
+  private entryOk(call: PendingCall): boolean {
+    const source: TokenSource | null = this.source;
+    if (source === null) {
       return true;
     }
-    const url: string | null = group.openable(this.maxConnectionsPerEndpoint);
-    if (url === null) {
+    const state: MainState = source.mainState();
+    if (state === 'ended') {
+      this.fail(call, poolError(errorCodes.clientDisconnected, 'unauthorized'));
       return false;
     }
-    this.send(call, this.open(group, url));
+    if (state === 'disconnected') {
+      this.fail(call, poolError(errorCodes.clientDisconnected, 'client disconnected'));
+      return false;
+    }
+    if (call.generation !== null && call.generation !== source.generation()) {
+      this.fail(call, poolError(errorCodes.clientDisconnected, 'identity changed'));
+      return false;
+    }
     return true;
+  }
+
+
+  // Places a call of a key whose line is empty or whose line is being drained (table 2.2). A placed call takes a slot of a
+  // live connection with room; an open connection is started for the call when its endpoint may open, and the call waits
+  // for it. The call is bound to the identity of the main client at its first placement that finds it connected.
+  private place(call: PendingCall, endpoints: RpcPoolEndpoint[]): Placement {
+    const source: TokenSource | null = this.source;
+    if (source !== null) {
+      if (!this.entryOk(call)) {
+        return 'failed';
+      }
+      const state: MainState = source.mainState();
+      if (call.generation === null) {
+        if (state !== 'connected') {
+          return 'wait';
+        }
+        call.generation = source.generation();
+      }
+      if (state === 'connected') {
+        this.retireStale(endpoints, source.generation());
+      }
+    }
+    const generation: number | null = source === null ? null : call.generation;
+    let best: PoolConnection | null = null;
+    for (const endpoint of endpoints) {
+      for (const conn of endpoint.all()) {
+        if (conn.live
+          && conn.inflight < this.maxInflightPerConnection
+          && (generation === null || conn.generation === generation)
+          && (best === null || conn.inflight < best.inflight)) {
+          best = conn;
+        }
+      }
+    }
+    if (best !== null) {
+      this.send(call, best);
+      return 'placed';
+    }
+    if (source !== null && (source.mainState() !== 'connected' || !source.canLend())) {
+      return 'wait';
+    }
+    for (const endpoint of endpoints) {
+      if (this.openable(endpoint)) {
+        this.open(endpoint);
+        return 'opened';
+      }
+    }
+    return 'wait';
+  }
+
+
+  // Whether a call of the key may open a connection now: an endpoint may open, and the main client lends a token to it.
+  private mayOpen(endpoints: RpcPoolEndpoint[]): boolean {
+    if (this.source !== null && (this.source.mainState() !== 'connected' || !this.source.canLend())) {
+      return false;
+    }
+    for (const endpoint of endpoints) {
+      if (this.openable(endpoint)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+
+  // Whether an endpoint may open a connection: fewer than the maximum, no connect in flight, and not held after a close.
+  private openable(endpoint: RpcPoolEndpoint): boolean {
+    return endpoint.count() < this.maxConnectionsPerEndpoint && !endpoint.connecting() && endpoint.hold === null;
   }
 
 
@@ -511,21 +724,22 @@ export class RpcPool {
   }
 
 
-  // Opens a connection to an endpoint. Its connect is in flight until its first connected event.
-  private open(group: RpcPoolEndpoint, url: string): PoolConnection {
+  // Opens a connection to an endpoint (table 2.4, open). The connection joins its endpoint before connect() is called, so
+  // a terminal disconnect during connect() is handled as any other. Its connect is in flight until it connects.
+  private open(endpoint: RpcPoolEndpoint): void {
     const source: TokenSource | null = this.source;
     // The token getter of the client is bound to the connection below. The getter runs only from connect(), which is
     // called after the connection exists.
     const options: Partial<Options> = source === null
       ? this.connectionOptions
       : { ...this.connectionOptions, getToken: (): Promise<string> => this.tokenOf(conn, source) };
-    const client: CentrifugeProtobuf = new CentrifugeProtobuf(url, options);
+    const client: CentrifugeProtobuf = new CentrifugeProtobuf(endpoint.url, options);
     const conn: PoolConnection = {
-      url: url,
-      group: group,
+      endpoint: endpoint,
       client: client,
       inflight: 0,
       connecting: true,
+      live: false,
       closeCode: null,
       lastUse: Date.now(),
       idle: null,
@@ -533,26 +747,43 @@ export class RpcPool {
       generation: null,
       retired: false,
     };
-    client.on('connected', (): void => {
-      conn.connecting = false;
-      this.dispatch(group);
+    client.on('connecting', (): void => {
+      this.pass((): void => {
+        this.transportLost(conn);
+      });
+    });
+    client.on('connected', (ctx: any): void => {
+      this.pass((): void => {
+        this.connected(conn, ctx);
+      });
     });
     client.on('disconnected', (ctx: any): void => {
-      this.lost(conn, ctx);
+      this.pass((): void => {
+        this.lost(conn, ctx);
+      });
     });
-    // The connection joins its group after connect() returned: a connect which throws leaves no connection behind. A
-    // connection which ended during connect() (lost has run already) joins no group.
-    client.connect();
-    if (conn.closeCode === null) {
-      group.add(conn);
+    endpoint.add(conn);
+    this.armIdle(conn);
+    try {
+      client.connect();
+    } catch (error: any) {
+      // The connection carries no call, so nothing is lost: the calls waiting stay in their line, and the endpoint holds
+      // its opens after the error.
+      endpoint.remove(conn);
+      conn.retired = true;
+      conn.closeCode = disconnectedCodes.disconnectCalled;
+      conn.idle?.clear();
+      conn.idle = null;
+      this.source?.forget(conn);
+      this.emitError(endpoint.url, error);
+      this.holdEndpoint(endpoint);
     }
-    return conn;
   }
 
 
-  // The token of a connection from the source. A token request after the first means the connection's last token is
-  // no longer usable. A connection which is given the token of another identity is retired, and fails as unauthorized:
-  // its calls are never sent under the identity of another connection.
+  // The token of a connection from the source (table 2.4, token request and token delivered). A request of a connection
+  // stamped with an earlier generation retires it, and is answered unauthorized without asking the source. A token
+  // delivered of another generation than the stamp retires the connection too.
   private tokenOf(conn: PoolConnection, source: TokenSource): Promise<string> {
     if (conn.generation !== null && conn.generation !== source.generation()) {
       this.retire(conn);
@@ -571,15 +802,62 @@ export class RpcPool {
   }
 
 
-  // Takes a connection out of its group: it takes no new call, and it does not count against the endpoint's connections.
-  // It closes at once when it carries no call; else it waits in retiring, and closes when its last call settles, so
-  // its calls complete under the identity they were sent with.
+  // The connection's transport was lost and its client reconnects: the connect is in flight again, and the connection takes
+  // no call until it connects. A stale connection is retired now, before its client reuses the token it stored.
+  private transportLost(conn: PoolConnection): void {
+    conn.connecting = true;
+    conn.live = false;
+    if (this.stale(conn)) {
+      this.retire(conn);
+    }
+  }
+
+
+  // The connection connected (table 2.4, connected). With tokenFrom its identity is verified against the generation and the
+  // pair the source recorded: a connection which is not of the current generation is retired silently, and one whose
+  // server confirmed another identity is retired and reported, with its token marked unusable.
+  private connected(conn: PoolConnection, ctx: any): void {
+    conn.connecting = false;
+    if (conn.retired) {
+      return;
+    }
+    const source: TokenSource | null = this.source;
+    if (source === null) {
+      this.goLive(conn);
+      return;
+    }
+    if (!source.recordedPair() || conn.generation !== source.generation()) {
+      this.retire(conn);
+      return;
+    }
+    if (!source.identityMatches(ctx.user, ctx.authClass)) {
+      this.retire(conn);
+      source.unusable(conn.token);
+      this.emitError(conn.endpoint.url, { code: disconnectedCodes.unauthorized, reason: 'identity mismatch' });
+      return;
+    }
+    this.goLive(conn);
+  }
+
+
+  // A verified connection takes calls: its endpoint's connect is over, and its keys with waiting calls are placed.
+  private goLive(conn: PoolConnection): void {
+    conn.live = true;
+    conn.endpoint.closes = 0;
+    this.scheduleEndpoint(conn.endpoint);
+  }
+
+
+  // Takes a connection out of its endpoint: it takes no new call, and it does not count against the endpoint's connections.
+  // It closes at once when it carries no call; else it waits in retiring, and closes when its last call settles, so its
+  // calls complete under the identity they were sent with.
   private retire(conn: PoolConnection): void {
     if (conn.retired) {
       return;
     }
     conn.retired = true;
-    conn.group.remove(conn);
+    conn.live = false;
+    conn.endpoint.remove(conn);
     if (conn.inflight > 0) {
       this.retiring.add(conn);
       return;
@@ -588,74 +866,110 @@ export class RpcPool {
   }
 
 
-  // Closes a retired connection. The close reports no error: its code is disconnectCalled.
+  // Closes a retired connection. The close reports no error and holds no open: its code is disconnectCalled.
   private closeRetired(conn: PoolConnection): void {
     this.retiring.delete(conn);
+    this.shut(conn);
+  }
+
+
+  // Retires the connections of the endpoints whose token belongs to another generation than the current one. Only the
+  // endpoints of the key are looked at.
+  private retireStale(endpoints: RpcPoolEndpoint[], generation: number): void {
+    for (const endpoint of endpoints) {
+      let stale: PoolConnection | null = endpoint.staleOf(generation);
+      while (stale !== null) {
+        this.retire(stale);
+        stale = endpoint.staleOf(generation);
+      }
+    }
+  }
+
+
+  // Ends a connection's timers and its client. The teardown of a connection, shared by close, retirement and idle close.
+  private shut(conn: PoolConnection): void {
     conn.idle?.clear();
     conn.idle = null;
     conn.client.disconnect();
   }
 
 
-  // Retires the connections of a group whose token belongs to another identity than the current one. A pass over the
-  // group, not over the pool: the calls of other groups are not looked at.
-  private retireStale(group: RpcPoolEndpoint): void {
-    if (this.source === null) {
-      return;
-    }
-    const generation: number = this.source.generation();
-    let stale: PoolConnection | null = group.staleOf(generation);
-    while (stale !== null) {
-      this.retire(stale);
-      stale = group.staleOf(generation);
-    }
-  }
-
-
-  // A connection ended for good. It leaves its group; the calls waiting take the other connections, and the
-  // application hears of the end unless it asked for it, or unless the end is the retirement of an identity change, which
-  // the application made itself (as Java does not report it either).
+  // A connection ended for good (table 2.4, disconnected for good). Retired and disconnectCalled ends report nothing;
+  // a message size close reports and holds nothing; any other end reports and holds the endpoint's opens. Its calls
+  // go by the outcome rows of 2.6.
   private lost(conn: PoolConnection, ctx: any): void {
     conn.connecting = false;
+    conn.live = false;
     conn.closeCode = ctx.code;
     conn.idle?.clear();
     conn.idle = null;
-    conn.group.remove(conn);
+    const endpoint: RpcPoolEndpoint = conn.endpoint;
+    endpoint.remove(conn);
     this.retiring.delete(conn);
     this.source?.forget(conn);
-    this.dispatch(conn.group);
-    if (ctx.code !== disconnectedCodes.disconnectCalled && !conn.retired) {
-      for (const listener of this.errorListeners) {
-        listener({ endpoint: conn.url, error: ctx });
+    if (!conn.retired && ctx.code !== disconnectedCodes.disconnectCalled) {
+      this.emitError(endpoint.url, ctx);
+      if (ctx.code !== disconnectedCodes.messageSizeLimit) {
+        this.holdEndpoint(endpoint);
       }
+    }
+    this.scheduleEndpoint(endpoint);
+  }
+
+
+  // Reports an error of a connection to the listeners of the pool.
+  private emitError(url: string, error: any): void {
+    for (const listener of this.errorListeners) {
+      listener({ endpoint: url, error: error });
     }
   }
 
 
-  // A reply of the server: the slot is free, and the outcome settles the call unless the call settled before.
-  private replied(call: PendingCall, conn: PoolConnection, reply: RpcResult): void {
-    conn.inflight--;
-    call.sent = false;
-    if (!call.settled) {
-      this.finish(call, conn.url, null, reply);
+  // Holds the opens of an endpoint after a terminal close: the hold lasts a backoff of the closes so far, and one timer
+  // runs for it. The count resets at the next connected event.
+  private holdEndpoint(endpoint: RpcPoolEndpoint): void {
+    if (this.closed || endpoint.hold !== null) {
+      return;
     }
-    this.released(conn);
+    const delay: number = backoff(endpoint.closes, this.minReconnectDelay, this.maxReconnectDelay);
+    endpoint.closes++;
+    endpoint.hold = callTimer(Date.now() + delay, (): void => {
+      endpoint.hold = null;
+      this.pass((): void => {
+        this.scheduleEndpoint(endpoint);
+      });
+    });
+  }
+
+
+  // The outcome of an attempt on a connection: the slot is free, then the reply settles the call unless it settled before.
+  private replied(call: PendingCall, conn: PoolConnection, reply: RpcResult): void {
+    this.pass((): void => {
+      conn.inflight--;
+      call.sent = false;
+      if (!call.settled) {
+        this.finish(call, conn.endpoint.url, null, reply);
+      }
+      this.released(conn);
+    });
   }
 
 
   // An error of the connection or of the server: the slot is free, then the error is retried or surfaced.
   private errored(call: PendingCall, conn: PoolConnection, error: any): void {
-    conn.inflight--;
-    call.sent = false;
-    if (!call.settled) {
-      this.failed(call, conn, error);
-    }
-    this.released(conn);
+    this.pass((): void => {
+      conn.inflight--;
+      call.sent = false;
+      if (!call.settled) {
+        this.failed(call, conn, error);
+      }
+      this.released(conn);
+    });
   }
 
 
-  // A slot became free: a retired connection left without calls closes now, a stale one is retired, and a connection
-  // left without calls is marked as used now. The line of its key takes the slot.
+  // A slot became free (table 2.8): a retired connection left without calls closes now, a stale one is retired, and a
+  // connection left without calls is marked as used now. The keys of its endpoint which wait take the slot.
   private released(conn: PoolConnection): void {
     if (conn.retired) {
       if (conn.inflight === 0) {
@@ -667,71 +981,63 @@ export class RpcPool {
       conn.lastUse = Date.now();
       this.armIdle(conn);
     }
-    this.dispatch(conn.group);
+    this.scheduleEndpoint(conn.endpoint);
   }
 
 
-  // Arms the idle check of a connection when none is pending. Nothing runs without the option, nor on a connection
-  // which ended: its calls may settle after it left the group, and close() would not reach a timer armed then. The
-  // check is not cancelled when a call starts: it reads lastUse when it is due, so a busy connection arms no timer per
-  // call, and a connection has at most one check pending. The idleTimeout is at most the longest timer (see the
-  // constructor), so one check per period is one timer.
+  // Arms the idle check of a connection when none is pending. Nothing runs without the option, nor on a connection that ended
+  // or is retired. The check is not cancelled when a call starts: it reads lastUse when it is due, so a busy connection arms
+  // no timer per call, and a connection has at most one check pending.
   private armIdle(conn: PoolConnection): void {
-    if (this.idleTimeout === 0 || this.closed || conn.closeCode !== null || conn.idle !== null) {
+    if (this.idleTimeout === 0 || this.closed || conn.closeCode !== null || conn.retired || conn.idle !== null) {
       return;
     }
-    conn.idle = callTimer(conn.lastUse + this.idleTimeout, (): void => this.idleDue(conn));
+    conn.idle = callTimer(conn.lastUse + this.idleTimeout, (): void => {
+      this.pass((): void => {
+        this.idleDue(conn);
+      });
+    });
   }
 
 
-  // The idle check: a connection with calls waits for the release of its last call, and a connection used since the
-  // check was armed waits for the rest of its period.
+  // The idle check: a connection with calls waits for the release of its last call, and a connection used since the check
+  // was armed waits for the rest of its period, which the check re-arms for.
   private idleDue(conn: PoolConnection): void {
     conn.idle = null;
-    if (this.closed || conn.closeCode !== null || conn.inflight > 0) {
+    if (this.closed || conn.closeCode !== null || conn.retired || conn.inflight > 0) {
       return;
     }
     if (Date.now() < conn.lastUse + this.idleTimeout) {
       this.armIdle(conn);
       return;
     }
-    conn.group.remove(conn);
-    conn.client.disconnect();
+    conn.endpoint.remove(conn);
+    conn.live = false;
+    this.shut(conn);
   }
 
 
-  // Whether a connection holds the identity of an earlier generation: its token belongs to a session the client left.
+  // Whether a connection holds the identity of an earlier generation: its token belongs to a session the main client left.
   private stale(conn: PoolConnection): boolean {
     return this.source !== null && conn.generation !== null && conn.generation !== this.source.generation();
   }
 
 
-  // Whether the client the tokens come from is connecting: its identity is not confirmed, and a resend would wait for a
-  // connect which may bring another identity. A call lost then is not resent. A disconnected client refuses the resend
-  // at once, as before, so it is not in this case.
-  private unconfirmed(): boolean {
-    return this.source !== null && this.source.connecting();
-  }
-
-
-  // The error of a call on a connection. A connection the server closed for message size settles its calls without
-  // a resend: the failure is the same on every attempt. So does a connection closed as unauthorized, or retired, since
-  // its identity is gone: the call would be sent under the same identity. The same holds for a connection whose identity
-  // moved on while the call was in flight, and for a loss while the client is not connected, since the identity of a
-  // resend is then unknown. A lost connection or a later refusal is retried; a server error may move the call by
-  // reroute, and the later signal is retried as the main client does.
+  // The error of a call on a connection (table 2.6). A connection the server closed for message size, one closed as
+  // unauthorized, one retired or stale: the call settles without a resend. A lost connection is retried; a server error
+  // may move the call by reroute, and the later signal is retried as the main client does.
   private failed(call: PendingCall, conn: PoolConnection, error: any): void {
+    const url: string = conn.endpoint.url;
     const code: number | undefined = error?.code;
     if (code === errorCodes.connectionClosed || code === errorCodes.clientDisconnected) {
       if (conn.closeCode === disconnectedCodes.messageSizeLimit
         || conn.closeCode === disconnectedCodes.unauthorized
         || conn.retired
-        || this.stale(conn)
-        || this.unconfirmed()) {
-        this.finish(call, conn.url, error, null);
+        || this.stale(conn)) {
+        this.finish(call, url, error, null);
         return;
       }
-      this.retry(call, conn.url, error, 0);
+      this.retry(call, url, error, 0);
       return;
     }
     if (typeof code === 'number' && code >= serverErrorFloor) {
@@ -745,22 +1051,24 @@ export class RpcPool {
         }
         if (key !== undefined && key !== null) {
           call.key = key;
-          this.retry(call, conn.url, error, 0);
+          call.rerouted = true;
+          this.retry(call, url, error, 0);
           return;
         }
       }
       if (retrySignal(error) === 'later') {
         const delay: number = laterResendDelay(call.laterResends);
         call.laterResends++;
-        this.retry(call, conn.url, error, delay);
+        this.retry(call, url, error, delay);
         return;
       }
     }
-    this.finish(call, conn.url, error, null);
+    this.finish(call, url, error, null);
   }
 
 
-  // Sends the call again, after delay milliseconds, while its resends and its deadline allow; else surfaces the error.
+  // Sends the call again, after delay milliseconds, while its resends and its deadline allow; else surfaces the error. A
+  // resend is not bounded by maxQueued: it was admitted already.
   private retry(call: PendingCall, endpoint: string, error: any, delay: number): void {
     if (call.resends >= this.retries || call.deadline <= Date.now()) {
       this.finish(call, endpoint, error, null);
@@ -768,17 +1076,19 @@ export class RpcPool {
     }
     call.resends++;
     if (delay <= 0) {
-      this.attempt(call, false);
+      this.route(call, false);
       return;
     }
     call.resend = callTimer(Math.min(Date.now() + delay, call.deadline), (): void => {
-      call.resend = null;
-      // The deadline timer of the call may fire in the same tick: a call past its deadline is not sent again.
-      if (call.deadline <= Date.now()) {
-        this.expire(call);
-        return;
-      }
-      this.attempt(call, false);
+      this.pass((): void => {
+        call.resend = null;
+        // The deadline timer of the call may fire in the same tick: a call past its deadline is not sent again.
+        if (call.deadline <= Date.now()) {
+          this.expire(call);
+          return;
+        }
+        this.route(call, false);
+      });
     });
   }
 
@@ -886,60 +1196,72 @@ export class RpcPool {
   }
 
 
-  // The token source changed: each group takes one pass, which places its calls or fails them. The cost is per group.
-  private dispatchAll(): void {
-    for (const group of this.groups.values()) {
-      this.dispatch(group);
+  // An event of the main client: the keys with waiting calls are placed or failed, and no other key is looked at.
+  private mainEvent(): void {
+    this.pass((): void => {
+      for (const key of this.waitingKeys) {
+        this.dirtyKeys.add(key);
+      }
+    });
+  }
+
+
+  // An event of an endpoint: the keys with waiting calls on it are placed or failed.
+  private scheduleEndpoint(endpoint: RpcPoolEndpoint): void {
+    for (const key of endpoint.waitingKeys) {
+      this.dirtyKeys.add(key);
     }
   }
 
 
-  // Places the waiting calls of a group on its connections, first come first served. A pass is started for the group
-  // whose room changed, and only that group is walked: a call's placement depends on its group alone, so the pass stops
-  // at the first call which cannot be placed. An event during a pass (it may open or end a connection) marks its group
-  // for one more pass, which the running pass takes after its own.
-  private dispatch(group: RpcPoolEndpoint): void {
-    // A release with no waiting call has nothing to place: it returns before any allocation.
-    if (this.closed || group.head() === null) {
+  // Runs the work of an event, then the keys it marked. An event inside a pass marks its keys only: the pass takes them
+  // after its own work, so a key line is never drained inside another drain of it.
+  private pass(work: () => void): void {
+    if (this.busy) {
+      work();
       return;
     }
-    this.dirty.add(group);
-    if (this.dispatching) {
-      return;
-    }
-    this.dispatching = true;
+    this.busy = true;
     try {
-      while (this.dirty.size > 0) {
-        const next: RpcPoolEndpoint | undefined = this.dirty.values().next().value;
-        if (next === undefined) {
-          break;
-        }
-        this.dirty.delete(next);
-        this.drain(next);
+      work();
+      let key: string | undefined = this.nextDirty();
+      while (key !== undefined) {
+        this.dirtyKeys.delete(key);
+        this.drainKey(key);
+        key = this.nextDirty();
       }
     } finally {
-      this.dispatching = false;
+      this.busy = false;
     }
   }
 
 
-  // Places the calls at the head of a group's line while the group has room for them. A call the placement fails is
-  // failed with its error, as a call which cannot open its connection. A settled call is no longer in the line.
-  private drain(group: RpcPoolEndpoint): void {
-    let head: PendingCall | null = group.head();
+  // The first key marked for a drain, undefined when none is.
+  private nextDirty(): string | undefined {
+    const next: IteratorResult<string> = this.dirtyKeys.values().next();
+    return next.done === true ? undefined : next.value;
+  }
+
+
+  // Places the calls at the head of a key's line while they can be placed. The line stops at the first call that waits or
+  // opens a connection; a call which settles, or is placed, leaves the line.
+  private drainKey(key: string): void {
+    if (this.closed) {
+      return;
+    }
+    this.drainedKeys++;
+    const line: RpcPoolLine | undefined = this.lines.get(key);
+    if (line === undefined) {
+      return;
+    }
+    let head: PendingCall | null = line.head();
     while (head !== null) {
-      try {
-        if (!this.assign(head, group)) {
-          return;
-        }
-      } catch (e) {
-        this.uncount(head);
-        this.fail(head, e);
-        head = group.head();
-        continue;
+      const placement: Placement = this.place(head, line.endpoints);
+      if (placement === 'wait' || placement === 'opened') {
+        return;
       }
       this.uncount(head);
-      head = group.head();
+      head = line.head();
     }
   }
 }
@@ -1006,3 +1328,4 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
   const lower: string = name.toLowerCase();
   return Object.keys(headers).some((key: string): boolean => key.toLowerCase() === lower);
 }
+
