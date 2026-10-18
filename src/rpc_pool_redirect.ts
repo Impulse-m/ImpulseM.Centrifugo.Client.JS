@@ -133,7 +133,7 @@ export async function fetchRedirect(
   // A runtime which followed a redirect anyway (it ignores 'error' or 'manual') is refused before its body is read. The
   // URL of a response has no fragment, so the fragment of the requested URL is left out of the comparison.
   const requested: string = url.split('#')[0];
-  if (typeof response.url === 'string' && response.url !== '' && response.url !== requested) {
+  if (response.url !== requested) {
     discardBody(response);
     throw redirectFailure('redirect followed by the runtime');
   }

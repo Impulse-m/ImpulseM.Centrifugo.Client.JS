@@ -37,6 +37,13 @@ function isConnect(cmd: any): boolean {
   return cmd.connect !== undefined;
 }
 
+// A response which reports the URL it was fetched from, as a runtime does when it follows no hop (I7).
+function responseAt(url: string, body: BodyInit | null, init: ResponseInit): Response {
+  const response: Response = new Response(body, init);
+  Object.defineProperty(response, 'url', { value: url });
+  return response;
+}
+
 function callsOf(server: WaitableFakeServer): any[] {
   return server.received.filter(isCall);
 }
@@ -783,7 +790,7 @@ describe('RpcPool', () => {
   describe('redirect', () => {
     // A fetch stub which answers with the given body and status.
     function fetchReturning(body: Uint8Array, status: number): jest.Mock {
-      return jest.fn(async (): Promise<any> => new Response(body as any, { status: status }));
+      return jest.fn(async (url: string): Promise<any> => responseAt(url, body as any, { status: status }));
     }
 
     // A fetch stub which never answers: it fails when the signal it is given aborts.
@@ -817,12 +824,12 @@ describe('RpcPool', () => {
       }
       let running: number = 0;
       let peak: number = 0;
-      const fetchFunction: jest.Mock = jest.fn(async (): Promise<any> => {
+      const fetchFunction: jest.Mock = jest.fn(async (url: string): Promise<any> => {
         running++;
         peak = Math.max(peak, running);
         await sleep(30);
         running--;
-        return new Response(new Uint8Array([9]), { status: 200 });
+        return responseAt(url, new Uint8Array([9]), { status: 200 });
       });
       const pool: RpcPool = createPool((): string[] => servers.map((server: WaitableFakeServer): string => server.url), {
         maxRedirectsInflight: 1,
@@ -961,14 +968,14 @@ describe('RpcPool', () => {
     test('a Node stream body over maxBytes is cut off as it arrives, and one within it resolves', async (): Promise<void> => {
       const chunks: Uint8Array[] = [new Uint8Array(3), new Uint8Array(3), new Uint8Array(3)];
       const over: Promise<Uint8Array> = fetchRedirect(
-        jest.fn(async (): Promise<any> => ({ ok: true, status: 200, headers: new Headers(), body: Readable.from(chunks) })) as any,
+        jest.fn(async (url: string): Promise<any> => ({ ok: true, status: 200, url: url, headers: new Headers(), body: Readable.from(chunks) })) as any,
         'wss://edge.example/connection/websocket',
         { url: 'https://cdn.example/stream', maxBytes: 4 },
         new AbortController().signal
       );
       await expect(over).rejects.toMatchObject({ code: errorCodes.redirectFailed });
       const within: Uint8Array = await fetchRedirect(
-        jest.fn(async (): Promise<any> => ({ ok: true, status: 200, headers: new Headers(), body: Readable.from(chunks) })) as any,
+        jest.fn(async (url: string): Promise<any> => ({ ok: true, status: 200, url: url, headers: new Headers(), body: Readable.from(chunks) })) as any,
         'wss://edge.example/connection/websocket',
         { url: 'https://cdn.example/stream', maxBytes: 9 },
         new AbortController().signal
@@ -1087,7 +1094,7 @@ describe('RpcPool', () => {
         },
       });
       await expect(fetchRedirect(
-        jest.fn(async (): Promise<any> => new Response(body, { status: 200 })) as any,
+        jest.fn(async (url: string): Promise<any> => responseAt(url, body, { status: 200 })) as any,
         'wss://edge.example/connection/websocket',
         { url: 'https://cdn.example/broken' },
         new AbortController().signal

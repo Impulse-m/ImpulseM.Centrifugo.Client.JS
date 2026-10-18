@@ -50,7 +50,7 @@ describe('fetchRedirect', () => {
     const fetchFunction: any = async (): Promise<any> => ({
       ok: true,
       status: 200,
-      url: '',
+      url: 'https://files.example.test/part',
       headers: new Map<string, string>(),
       body: undefined,
       arrayBuffer: async (): Promise<ArrayBuffer> => {
@@ -68,7 +68,7 @@ describe('fetchRedirect', () => {
     const calls: any[] = [];
     const fetchFunction: any = async (url: string, init: any): Promise<any> => {
       calls.push({ url: url, init: init });
-      return { ok: true, status: 200, url: '', headers: new Map<string, string>(), body: null, arrayBuffer: async (): Promise<ArrayBuffer> => new ArrayBuffer(0) };
+      return { ok: true, status: 200, url: 'https://files.example.test/a', headers: new Map<string, string>(), body: null, arrayBuffer: async (): Promise<ArrayBuffer> => new ArrayBuffer(0) };
     };
     await fetchRedirect(fetchFunction, 'wss://edge.example.test', { url: 'https://files.example.test/a', headers: { 'x-part': '1' } }, new AbortController().signal);
     expect(calls).toHaveLength(1);
@@ -130,7 +130,7 @@ describe('fetchRedirect', () => {
       },
     };
     const declared: (length: string) => any = (length: string): any => new Map<string, string>([['content-length', length]]);
-    const brokenResponse: any = { ok: true, status: 200, url: '', headers: declared('10'), body: brokenBody };
+    const brokenResponse: any = { ok: true, status: 200, url: 'https://files.example.test/a', headers: declared('10'), body: brokenBody };
     const failedRead: any = await fetchRedirect(async (): Promise<any> => brokenResponse, 'wss://edge.example.test', { url: 'https://files.example.test/a', maxBytes: 100 }, new AbortController().signal)
       .then((): string => 'resolved', (error: any): any => error);
     expect(failedRead.code).toBe(errorCodes.redirectFailed);
@@ -138,7 +138,7 @@ describe('fetchRedirect', () => {
     expect(cancelled).toBe(1);
 
     cancelled = 0;
-    const overDeclared: any = { ok: true, status: 200, url: '', headers: declared('100'), body: brokenBody };
+    const overDeclared: any = { ok: true, status: 200, url: 'https://files.example.test/a', headers: declared('100'), body: brokenBody };
     const failedDeclared: any = await fetchRedirect(async (): Promise<any> => overDeclared, 'wss://edge.example.test', { url: 'https://files.example.test/a', maxBytes: 10 }, new AbortController().signal)
       .then((): string => 'resolved', (error: any): any => error);
     expect(failedDeclared.code).toBe(errorCodes.redirectFailed);
@@ -157,7 +157,7 @@ describe('fetchRedirect', () => {
       },
     };
     // The declared length is within the limit; the bytes read pass it.
-    const overLimit: any = { ok: true, status: 200, url: '', headers: declared('6'), body: chunked };
+    const overLimit: any = { ok: true, status: 200, url: 'https://files.example.test/a', headers: declared('6'), body: chunked };
     const failedChunks: any = await fetchRedirect(async (): Promise<any> => overLimit, 'wss://edge.example.test', { url: 'https://files.example.test/a', maxBytes: 10 }, new AbortController().signal)
       .then((): string => 'resolved', (error: any): any => error);
     expect(failedChunks.code).toBe(errorCodes.redirectFailed);
@@ -191,15 +191,15 @@ describe('fetchRedirect', () => {
       buffered++;
       return new ArrayBuffer(4);
     };
-    const withoutBody: any = { ok: true, status: 200, url: '', headers: new Map<string, string>(), arrayBuffer: arrayBuffer };
-    const notAStream: any = { ok: true, status: 200, url: '', headers: new Map<string, string>(), body: 42, arrayBuffer: arrayBuffer };
+    const withoutBody: any = { ok: true, status: 200, url: 'https://files.example.test/a', headers: new Map<string, string>(), arrayBuffer: arrayBuffer };
+    const notAStream: any = { ok: true, status: 200, url: 'https://files.example.test/a', headers: new Map<string, string>(), body: 42, arrayBuffer: arrayBuffer };
     for (const response of [withoutBody, notAStream]) {
       const failed: any = await fetchRedirect(async (): Promise<any> => response, 'wss://edge.example.test', { url: 'https://files.example.test/a' }, new AbortController().signal)
         .then((): string => 'resolved', (error: any): any => error);
       expect(failed.code).toBe(errorCodes.redirectFailed);
     }
     expect(buffered).toBe(0);
-    const empty: any = { ok: true, status: 200, url: '', headers: new Map<string, string>(), body: null, arrayBuffer: async (): Promise<ArrayBuffer> => new ArrayBuffer(0) };
+    const empty: any = { ok: true, status: 200, url: 'https://files.example.test/a', headers: new Map<string, string>(), body: null, arrayBuffer: async (): Promise<ArrayBuffer> => new ArrayBuffer(0) };
     const data: Uint8Array = await fetchRedirect(async (): Promise<any> => empty, 'wss://edge.example.test', { url: 'https://files.example.test/a' }, new AbortController().signal);
     expect(data.length).toBe(0);
   });
@@ -208,7 +208,7 @@ describe('fetchRedirect', () => {
 
 describe('RpcPool redirect waiters', () => {
   test('redirectWaiterCountsInMaxQueued', async (): Promise<void> => {
-    const okResponse: () => any = (): any => ({ ok: true, status: 200, url: '', headers: new Map<string, string>(), body: null, arrayBuffer: async (): Promise<ArrayBuffer> => new ArrayBuffer(0) });
+    const okResponse: () => any = (): any => ({ ok: true, status: 200, url: 'https://cdn.example.test/x',headers: new Map<string, string>(), body: null, arrayBuffer: async (): Promise<ArrayBuffer> => new ArrayBuffer(0) });
     const servers: WaitableFakeServer[] = [await WaitableFakeServer.start('protobuf'), await WaitableFakeServer.start('protobuf')];
     try {
       for (const server of servers) {
