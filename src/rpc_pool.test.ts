@@ -1,10 +1,10 @@
 import { Readable } from 'stream';
 import WebSocket from 'ws';
 import { errorCodes, disconnectedCodes } from './codes';
-import { Centrifuge as ProtobufCentrifuge } from './protobuf';
 import { RpcPool, RpcPoolOptions } from './rpc_pool';
 import { fetchRedirect } from './rpc_pool_redirect';
-import { RpcResult } from './types';
+import { Centrifuge as ProtobufCentrifuge } from './protobuf';
+import { RpcResult, State } from './types';
 import {
   WaitableFakeServer, bytes, fromBytes, holdReply, rpcOptionsWireFlag, until,
 } from './testing/codecs';
@@ -187,7 +187,7 @@ describe('RpcPool', () => {
       quiet(pool.rpc('work', bytes({ n: 1 })));
       const waited: any = await pool.rpc('work', bytes({ n: 2 }), { timeout: 100 }).then((): string => 'resolved', (error: any): any => error);
       expect(waited.code).toBe(errorCodes.timeout);
-      expect((pool as any).groups.get('').head()).toBeNull();
+      expect((pool as any).lines.get('').head()).toBeNull();
       expect(pool.stats().queued).toBe(0);
     });
 
@@ -248,7 +248,9 @@ describe('RpcPool', () => {
       await sleep(100);
       expect(connectsOf(server).length).toBe(1);
       expect(pool.stats().connections).toBe(1);
-      expect(pool.stats().queued).toBe(3);
+      // The opener waits for its connect in its line, so all four calls count in queued and none in flight.
+      expect(pool.stats().queued).toBe(4);
+      expect(pool.stats().inflight).toBe(0);
 
       server.send({ id: connectCmd.id, connect: server.connectResult });
       expect(await until((): boolean => callsOf(server).length === 4)).toBe(true);
@@ -361,7 +363,8 @@ describe('RpcPool', () => {
       }
       expect(pool.stats()).toEqual({ connections: 1, inflight: 2, queued: 0, redirects: 0 });
       const armed: any[] = timers.mock.calls.filter((args: any[]): boolean => Math.abs(Number(args[1]) - 5123) <= 5);
-      expect(armed.length).toBe(0);
+      // The connection arms its idle check once, at its open, and no check per call.
+      expect(armed.length).toBeLessThanOrEqual(1);
       pool.close();
       timers.mockRestore();
       await Promise.allSettled(pending);
@@ -381,17 +384,37 @@ describe('RpcPool', () => {
       expect(pool.stats().connections).toBe(0);
     });
 
-    test('a connect which throws leaves no connection in its group, and the next call opens a new one', async (): Promise<void> => {
+    test('connectThatThrowsLeavesNoConnection', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
       server.onCommand = echo;
-      jest.spyOn(ProtobufCentrifuge.prototype, 'connect').mockImplementationOnce((): void => {
-        throw new Error('connect refused');
+      // The runtime has no WebSocket: the connect of the first connection throws.
+      const savedWebSocket: any = (globalThis as any).WebSocket;
+      (globalThis as any).WebSocket = undefined;
+      const pool: RpcPool = new RpcPool({
+        endpoints: (): string => server.url,
+        connection: { minReconnectDelay: 100, maxReconnectDelay: 100 },
+        maxConnectionsPerEndpoint: 1,
       });
-      const pool: RpcPool = createPool((): string => server.url);
-      await expect(pool.rpc('work', bytes({ n: 1 }))).rejects.toThrow('connect refused');
-      expect(pool.stats().connections).toBe(0);
-      expect(fromBytes((await pool.rpc('work', bytes({ n: 2 }))).data)).toEqual({ n: 2 });
-      expect(pool.stats().connections).toBe(1);
+      const errors: any[] = [];
+      pool.on('error', (ctx: any): void => {
+        errors.push(ctx);
+      });
+      try {
+        const first: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
+        expect(await within((): boolean => errors.length === 1, 5000)).toBe(true);
+        expect(errors[0].error).toBeInstanceOf(Error);
+        expect(pool.stats()).toEqual({ connections: 0, inflight: 0, queued: 1, redirects: 0 });
+        (globalThis as any).WebSocket = savedWebSocket;
+        // The next open waits the hold of the endpoint: the call stays queued until it ends.
+        const started: number = Date.now();
+        const second: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 2 })));
+        expect(fromBytes((await first).data)).toEqual({ n: 1 });
+        expect(Date.now() - started).toBeGreaterThanOrEqual(90);
+        expect(fromBytes((await second).data)).toEqual({ n: 2 });
+      } finally {
+        (globalThis as any).WebSocket = savedWebSocket;
+        pool.close();
+      }
     });
   });
 
@@ -823,7 +846,8 @@ describe('RpcPool', () => {
       const pool: RpcPool = createPool((): string => server.url, {
         maxQueued: 3,
         maxRedirectsInflight: 1,
-        maxConnectionsPerEndpoint: 4,
+        // One connection: the fake server answers on its latest socket only, and the calls here read the fetch slots.
+        maxConnectionsPerEndpoint: 1,
         fetch: hangingFetch() as any,
         redirect: (): any => ({ url: 'https://cdn.example/x' }),
       });
@@ -1157,6 +1181,219 @@ describe('RpcPool', () => {
     });
   });
 
+  describe('behaviour table', () => {
+    // The error of a call, or 'resolved' when it resolved.
+    function settledOf(promise: Promise<RpcResult>): Promise<any> {
+      return promise.then((): string => 'resolved', (error: any): any => error);
+    }
+
+    // Runs a function which throws, and returns what it threw.
+    function thrownBy(fn: () => unknown): any {
+      try {
+        fn();
+      } catch (e) {
+        return e;
+      }
+      return undefined;
+    }
+
+    test('callWaitsForItsConnectionToConnect', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      let connectCmd: any = null;
+      server.onCommand = (cmd: any): any => {
+        if (isConnect(cmd) && connectCmd === null) {
+          connectCmd = cmd;
+          return holdReply;
+        }
+        return isCall(cmd) ? holdReply : undefined;
+      };
+      const pool: RpcPool = createPool((): string => server.url);
+      const pending: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
+      expect(await within((): boolean => connectCmd !== null, 5000)).toBe(true);
+      await sleep(50);
+      expect(callsOf(server)).toHaveLength(0);
+      expect(pool.stats()).toEqual({ connections: 1, inflight: 0, queued: 1, redirects: 0 });
+      server.send({ id: connectCmd.id, connect: server.connectResult });
+      expect(await within((): boolean => callsOf(server).length === 1, 5000)).toBe(true);
+      expect(pool.stats()).toEqual({ connections: 1, inflight: 1, queued: 0, redirects: 0 });
+      reply(server, callsOf(server)[0], { n: 1 });
+      expect(fromBytes((await pending).data)).toEqual({ n: 1 });
+    });
+
+    test('connectionsAreSharedByKeysOfOneEndpoint', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = (cmd: any): any => (isCall(cmd) ? holdReply : undefined);
+      const pool: RpcPool = createPool((): string => server.url, { maxConnectionsPerEndpoint: 1, maxInflightPerConnection: 2 });
+      const a: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 'a' }), { endpointKey: 'a' }));
+      const b: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 'b' }), { endpointKey: 'b' }));
+      expect(await within((): boolean => callsOf(server).length === 2, 5000)).toBe(true);
+      expect(connectsOf(server)).toHaveLength(1);
+      expect(pool.stats().connections).toBe(1);
+      reply(server, callsOf(server)[0], { n: 'a' });
+      reply(server, callsOf(server)[1], { n: 'b' });
+      expect(fromBytes((await a).data)).toEqual({ n: 'a' });
+      expect(fromBytes((await b).data)).toEqual({ n: 'b' });
+    });
+
+    test('reroutedCallGoesToTheFrontOfItsNewLine', async (): Promise<void> => {
+      const serverA: WaitableFakeServer = await startServer();
+      const serverB: WaitableFakeServer = await startServer();
+      serverA.onCommand = (cmd: any): any => (isCall(cmd) ? { id: cmd.id, error: moveError('b') } : undefined);
+      serverB.onCommand = (cmd: any): any => (isCall(cmd) ? holdReply : undefined);
+      const pool: RpcPool = createPool((key: string): string => (key === 'a' ? serverA.url : serverB.url), {
+        maxConnectionsPerEndpoint: 1,
+        reroute: (error: any): string | undefined => error?.metadata?.['x-moved'],
+      });
+      const b0: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 'b0' }), { endpointKey: 'b' }));
+      expect(await within((): boolean => callsOf(serverB).length === 1, 5000)).toBe(true);
+      const b1: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 'b1' }), { endpointKey: 'b' }));
+      const a: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 'a' }), { endpointKey: 'a' }));
+      expect(await within((): boolean => callsOf(serverA).length === 1, 5000)).toBe(true);
+      expect(await within((): boolean => pool.stats().queued === 2, 5000)).toBe(true);
+      reply(serverB, callsOf(serverB)[0], { n: 'b0' });
+      expect(await within((): boolean => callsOf(serverB).length === 2, 5000)).toBe(true);
+      expect(fromBytes(callsOf(serverB)[1].rpc.data)).toEqual({ n: 'a' });
+      reply(serverB, callsOf(serverB)[1], { n: 'a' });
+      expect(await within((): boolean => callsOf(serverB).length === 3, 5000)).toBe(true);
+      expect(fromBytes(callsOf(serverB)[2].rpc.data)).toEqual({ n: 'b1' });
+      reply(serverB, callsOf(serverB)[2], { n: 'b1' });
+      await Promise.all([b0, a, b1]);
+    });
+
+    test('refusesTimerDurationsAboveTheLimit', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = echo;
+      const endpoints: () => string = (): string => server.url;
+      expect(thrownBy((): RpcPool => new RpcPool({ endpoints: endpoints, idleTimeout: 2147483648 }))).toMatchObject({ code: errorCodes.badConfiguration });
+      expect(thrownBy((): RpcPool => new RpcPool({ endpoints: endpoints, connection: { timeout: 2147483648 } }))).toMatchObject({ code: errorCodes.badConfiguration });
+      expect(thrownBy((): RpcPool => new RpcPool({ endpoints: endpoints, connection: { maxReconnectDelay: 2147483648 } }))).toMatchObject({ code: errorCodes.badConfiguration });
+      const pool: RpcPool = createPool(endpoints, { connection: { websocket: WebSocket, timeout: 5000 } });
+      const refused: any = await settledOf(pool.rpc('work', bytes({ n: 1 }), { timeout: 5001 }));
+      expect(refused).toMatchObject({ code: errorCodes.badConfiguration });
+      expect(connectsOf(server)).toHaveLength(0);
+    });
+
+    test('saturatedKeyDoesNotHoldBackAnotherKey', async (): Promise<void> => {
+      const serverA: WaitableFakeServer = await startServer();
+      const serverB: WaitableFakeServer = await startServer();
+      serverA.onCommand = (cmd: any): any => (isCall(cmd) ? holdReply : undefined);
+      serverB.onCommand = echo;
+      const pool: RpcPool = createPool((key: string): string => (key === 'a' ? serverA.url : serverB.url), { maxConnectionsPerEndpoint: 1 });
+      const a1: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 'a1' }), { endpointKey: 'a' }));
+      expect(await within((): boolean => callsOf(serverA).length === 1, 5000)).toBe(true);
+      const a2: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 'a2' }), { endpointKey: 'a' }));
+      expect(pool.stats().queued).toBe(1);
+      const b: Promise<RpcResult> = pool.rpc('work', bytes({ n: 'b' }), { endpointKey: 'b' });
+      expect(fromBytes((await b).data)).toEqual({ n: 'b' });
+      expect(pool.stats().queued).toBe(1);
+      // The reply of B's connection finds no key waiting on its endpoint: key a's line is not looked up.
+      const drainedBefore: number = (pool as any).drainedKeys;
+      const b2: Promise<RpcResult> = pool.rpc('work', bytes({ n: 'b2' }), { endpointKey: 'b' });
+      expect(fromBytes((await b2).data)).toEqual({ n: 'b2' });
+      expect((pool as any).drainedKeys - drainedBefore).toBe(0);
+      expect(pool.stats().queued).toBe(1);
+      reply(serverA, callsOf(serverA)[0], { n: 'a1' });
+      expect(fromBytes((await a1).data)).toEqual({ n: 'a1' });
+      expect(await within((): boolean => callsOf(serverA).length === 2, 5000)).toBe(true);
+      reply(serverA, callsOf(serverA)[1], { n: 'a2' });
+      expect(fromBytes((await a2).data)).toEqual({ n: 'a2' });
+    });
+
+    test('firstCallOfAnUnresolvedKeyIsAdmittedAtAnyBound', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = echo;
+      let resolveKey: (url: string) => void = (): void => {};
+      const pool: RpcPool = createPool((): Promise<string> => new Promise<string>((resolve: (url: string) => void): void => {
+        resolveKey = resolve;
+      }), { maxQueued: 0 });
+      const first: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
+      const second: any = await settledOf(pool.rpc('work', bytes({ n: 2 })));
+      expect(second).toMatchObject({ code: errorCodes.limitExceeded });
+      await sleep(20);
+      resolveKey(server.url);
+      expect(fromBytes((await first).data)).toEqual({ n: 1 });
+      expect(connectsOf(server)).toHaveLength(1);
+    });
+
+    test('terminalCloseHoldsTheEndpointOpens', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = echo;
+      const errors: any[] = [];
+      const pool: RpcPool = createPool((): string => server.url, {
+        connection: { websocket: WebSocket, minReconnectDelay: 100, maxReconnectDelay: 100 },
+      });
+      pool.on('error', (ctx: any): void => {
+        errors.push(ctx);
+      });
+      expect(fromBytes((await pool.rpc('work', bytes({ n: 1 }))).data)).toEqual({ n: 1 });
+      // The fleet closes the connection for good: the error is reported, and the next open of the endpoint waits the hold.
+      server.send({ push: { disconnect: { code: 3501, reason: 'closed' } } });
+      expect(await within((): boolean => errors.length === 1, 5000)).toBe(true);
+      const started: number = Date.now();
+      expect(fromBytes((await pool.rpc('work', bytes({ n: 2 }))).data)).toEqual({ n: 2 });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(80);
+      expect(connectsOf(server)).toHaveLength(2);
+    });
+
+    test('retiredConnectionCloseReportsNoErrorAndHoldsNoOpen', async (): Promise<void> => {
+      const main: WaitableFakeServer = await startServer();
+      main.connectResult = { client: 'main-client', version: '0.0.0', ping: 25, flag: rpcOptionsWireFlag, user: 'alice' };
+      main.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? { id: cmd.id, refresh: { expires: true, ttl: 900, user: 'bob' } } : undefined);
+      const client: ProtobufCentrifuge = new ProtobufCentrifuge([{ transport: 'websocket', endpoint: main.url }], {
+        websocket: WebSocket,
+        token: 'alice-token',
+        minReconnectDelay: 10,
+        maxReconnectDelay: 50,
+      });
+      client.on('error', (): void => {});
+      try {
+        client.connect();
+        expect(await within((): boolean => client.state === State.Connected, 5000)).toBe(true);
+        const edge: WaitableFakeServer = await startServer();
+        edge.connectResult = { client: 'edge', version: '0.0.0', ping: 25, flag: rpcOptionsWireFlag, user: 'alice' };
+        edge.onCommand = (cmd: any): any => (isCall(cmd) ? holdReply : undefined);
+        const pool: RpcPool = createPool((): string => edge.url, { tokenFrom: client });
+        const errors: any[] = [];
+        pool.on('error', (ctx: any): void => {
+          errors.push(ctx);
+        });
+        const inFlight: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
+        expect(await within((): boolean => callsOf(edge).length === 1, 5000)).toBe(true);
+        // The main client changes identity: the connection of alice is retired, with its call in flight.
+        await client.refresh('bob-token');
+        edge.connectResult = { ...edge.connectResult, user: 'bob' };
+        // The fleet closes the retired connection for good: no error is reported, and the next call opens a connection at once.
+        edge.send({ push: { disconnect: { code: 3500, reason: 'closed' } } });
+        await inFlight.catch((): void => {});
+        const started: number = Date.now();
+        const next: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 2 })));
+        expect(await within((): boolean => connectsOf(edge).length === 2, 1000)).toBe(true);
+        expect(Date.now() - started).toBeLessThan(1000);
+        expect(errors).toEqual([]);
+        expect(next).toBeDefined();
+      } finally {
+        client.disconnect();
+      }
+    });
+
+    test('callsWaitingForAResolutionCountInQueued', async (): Promise<void> => {
+      const server: WaitableFakeServer = await startServer();
+      server.onCommand = echo;
+      let resolveKey: (url: string) => void = (): void => {};
+      const pool: RpcPool = createPool((): Promise<string> => new Promise<string>((resolve: (url: string) => void): void => {
+        resolveKey = resolve;
+      }), { maxQueued: 3, maxConnectionsPerEndpoint: 1 });
+      const first: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
+      const second: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 2 })));
+      expect(pool.stats().queued).toBe(2);
+      await sleep(20);
+      resolveKey(server.url);
+      expect(fromBytes((await first).data)).toEqual({ n: 1 });
+      expect(fromBytes((await second).data)).toEqual({ n: 2 });
+      expect(pool.stats().queued).toBe(0);
+    });
+  });
+
   describe('close and tokens', () => {
     test('close rejects waiting calls with cancelled and calls in flight with connectionClosed', async (): Promise<void> => {
       const server: WaitableFakeServer = await startServer();
@@ -1198,7 +1435,8 @@ describe('RpcPool', () => {
       pool.close();
       await sleep(20);
       const armed: any[] = timers.mock.calls.filter((args: any[]): boolean => Math.abs(Number(args[1]) - 5123) <= 5);
-      expect(armed.length).toBe(0);
+      // The connection arms its idle check once, at its open; the loss does not arm another one.
+      expect(armed.length).toBeLessThanOrEqual(1);
     });
 
     test('getToken is called for each connection of the pool', async (): Promise<void> => {
