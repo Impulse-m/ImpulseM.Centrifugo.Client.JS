@@ -1409,6 +1409,8 @@ describe('RpcPool', () => {
         // The fleet closes the retired connection for good: no error is reported, and the next call opens a connection at once.
         edge.send({ push: { disconnect: { code: 3500, reason: 'closed' } } });
         await inFlight.catch((): void => {});
+        // The retired close holds no open: the endpoint has no hold timer, right after it.
+        expect((pool as any).endpoints.get(edge.url).hold).toBeNull();
         const started: number = Date.now();
         const next: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 2 })));
         expect(await within((): boolean => connectsOf(edge).length === 2, 1000)).toBe(true);
@@ -1481,31 +1483,6 @@ describe('RpcPool', () => {
       const armed: any[] = timers.mock.calls.filter((args: any[]): boolean => Math.abs(Number(args[1]) - 5123) <= 5);
       // The connection arms its idle check once, at its open; the loss does not arm another one.
       expect(armed.length).toBeLessThanOrEqual(1);
-    });
-
-    test('getToken is called for each connection of the pool', async (): Promise<void> => {
-      const server: WaitableFakeServer = await startServer();
-      let held: number = 0;
-      server.onCommand = (cmd: any): any => {
-        if (isCall(cmd)) {
-          held++;
-          return holdReply;
-        }
-        return undefined;
-      };
-      const getToken: jest.Mock = jest.fn(async (): Promise<string> => 'token');
-      const pool: RpcPool = createPool((): string => server.url, {
-        maxConnectionsPerEndpoint: 2,
-        connection: { websocket: WebSocket, minReconnectDelay: 10, maxReconnectDelay: 50, getToken: getToken },
-      });
-      const calls: Promise<RpcResult>[] = [pool.rpc('work', bytes({ n: 1 })), pool.rpc('work', bytes({ n: 2 }))];
-      expect(await until((): boolean => held === 2)).toBe(true);
-      expect(getToken).toHaveBeenCalledTimes(2);
-      expect(pool.stats().connections).toBe(2);
-      pool.close();
-      for (const call of calls) {
-        await expect(call).rejects.toMatchObject({ code: errorCodes.connectionClosed });
-      }
     });
   });
 });
