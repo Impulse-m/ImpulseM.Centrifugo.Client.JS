@@ -5,6 +5,9 @@ import { poolError } from './rpc_pool_error';
 /** The default body limit of a redirect fetch, in bytes. */
 const defaultRedirectMaxBytes: number = 16 * 1024 * 1024;
 
+/** The most a body buffer is allocated for before a byte of it arrives: a declared length above it grows as the body comes. */
+const initialBodyBytes: number = 1024 * 1024;
+
 // A waiter of the gate: its start takes a slot, and it is removed when its signal aborts first.
 interface RedirectWaiter {
   start: () => void;
@@ -140,7 +143,7 @@ export async function fetchRedirect(
 
 
 // The URL of a redirect, checked against the scheme of the endpoint it came from. A secure endpoint (wss: or https:)
-// takes only an https: URL; an http: URL is allowed only from an insecure endpoint, and a ws: URL is never fetched.
+// takes only an https: URL; an http: URL is allowed only from an endpoint which is not secure, and a ws: URL is never fetched.
 function redirectUrl(endpoint: string, target: string): string {
   let parsed: URL;
   try {
@@ -185,9 +188,10 @@ async function readBounded(response: any, maxBytes: number): Promise<Uint8Array>
     }
     return whole;
   }
-  // One buffer: allocated at the declared length when there is one (it is within the limit here), and grown geometrically
-  // otherwise, so that a body is never held twice at once.
-  let out: Uint8Array = new Uint8Array(declared !== undefined && declared >= 0 ? declared : 0);
+  // One buffer: allocated at the declared length up to initialBodyBytes, so that a body which declares a large length and
+  // stalls holds little memory, and grown geometrically as the bytes arrive, so that a body is never held twice at once.
+  const initial: number = declared !== undefined && declared >= 0 ? Math.min(declared, initialBodyBytes) : 0;
+  let out: Uint8Array = new Uint8Array(initial);
   let total: number = 0;
   try {
     for (;;) {
