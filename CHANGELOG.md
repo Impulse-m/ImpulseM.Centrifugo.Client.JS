@@ -1,6 +1,7 @@
 Unreleased
 ==========
 
+* `RpcPool` with `tokenFrom` fails the calls that no connection can take once the fleet refuses the client's token and no renewal can replace it: they fail with `token refused` at once, without opening a connection, and the next confirmation of the client lets calls through again. A call in flight on a connection that ends as unauthorized settles with the connection loss, not resent. A pool made after a logout reads the client as disconnected until its next connect.
 * `RpcPool` places calls by one behaviour table: a call is bound to the identity of its `tokenFrom` client, is placed only on a live connection of that identity, and fails with `identity changed` when the identity moves on before it is placed. A connection is opened only while the client is connected, and a connection whose server confirms another identity is closed and reported with `identity mismatch`.
 * `RpcPool` connections belong to the endpoint URL, so keys which resolve to one URL share their connections; `maxConnectionsPerEndpoint` counts per URL. A connect is serialised per URL, and its opener waits in its line, counted in `queued`.
 * `RpcPool` `maxQueued: 0` is valid: a call waits for no slot of an existing connection, and a connection is opened only for the call which needs one.
