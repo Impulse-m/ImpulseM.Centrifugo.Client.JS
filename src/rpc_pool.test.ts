@@ -1351,13 +1351,20 @@ describe('RpcPool', () => {
         errors.push(ctx);
       });
       expect(fromBytes((await pool.rpc('work', bytes({ n: 1 }))).data)).toEqual({ n: 1 });
+      const endpoint: any = (pool as any).endpoints.get(server.url);
       // The fleet closes the connection for good: the error is reported, and the next open of the endpoint waits the hold.
       server.send({ push: { disconnect: { code: 3501, reason: 'closed' } } });
       expect(await within((): boolean => errors.length === 1, 5000)).toBe(true);
+      expect(endpoint.closes).toBe(1);
       const started: number = Date.now();
       expect(fromBytes((await pool.rpc('work', bytes({ n: 2 }))).data)).toEqual({ n: 2 });
       expect(Date.now() - started).toBeGreaterThanOrEqual(80);
       expect(connectsOf(server)).toHaveLength(2);
+      // The connected event of the next connection resets the count: the next close holds the opens of step 0 again.
+      expect(endpoint.closes).toBe(0);
+      server.send({ push: { disconnect: { code: 3501, reason: 'closed' } } });
+      expect(await within((): boolean => errors.length === 2, 5000)).toBe(true);
+      expect(endpoint.closes).toBe(1);
     });
 
     test('retiredConnectionCloseReportsNoErrorAndHoldsNoOpen', async (): Promise<void> => {
@@ -1376,17 +1383,29 @@ describe('RpcPool', () => {
         expect(await within((): boolean => client.state === State.Connected, 5000)).toBe(true);
         const edge: WaitableFakeServer = await startServer();
         edge.connectResult = { client: 'edge', version: '0.0.0', ping: 25, flag: rpcOptionsWireFlag, user: 'alice' };
-        edge.onCommand = (cmd: any): any => (isCall(cmd) ? holdReply : undefined);
-        const pool: RpcPool = createPool((): string => edge.url, { tokenFrom: client });
+        const held: any[] = [];
+        edge.onCommand = (cmd: any): any => {
+          if (isCall(cmd)) {
+            held.push(cmd);
+            return holdReply;
+          }
+          return undefined;
+        };
+        // One connection of two calls in flight: the first stays in flight, the second settles it after the change.
+        const pool: RpcPool = createPool((): string => edge.url, { tokenFrom: client, maxConnectionsPerEndpoint: 1, maxInflightPerConnection: 2 });
         const errors: any[] = [];
         pool.on('error', (ctx: any): void => {
           errors.push(ctx);
         });
         const inFlight: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
-        expect(await within((): boolean => callsOf(edge).length === 1, 5000)).toBe(true);
-        // The main client changes identity: the connection of alice is retired, with its call in flight.
+        const settling: Promise<RpcResult> = pool.rpc('work', bytes({ n: 3 }));
+        expect(await within((): boolean => callsOf(edge).length === 2, 5000)).toBe(true);
+        // The main client changes identity: the connection of alice is stale. Its second call settles, and the slot freed
+        // retires the connection, with its first call still in flight.
         await client.refresh('bob-token');
         edge.connectResult = { ...edge.connectResult, user: 'bob' };
+        edge.send({ id: held[1].id, rpc: { data: held[1].rpc.data } });
+        expect(fromBytes((await settling).data)).toEqual({ n: 3 });
         // The fleet closes the retired connection for good: no error is reported, and the next call opens a connection at once.
         edge.send({ push: { disconnect: { code: 3500, reason: 'closed' } } });
         await inFlight.catch((): void => {});
