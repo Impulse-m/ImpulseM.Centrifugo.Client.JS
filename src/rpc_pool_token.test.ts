@@ -318,6 +318,31 @@ describe('RpcPool tokenFrom', () => {
     expect(exchanges).toBe(1);
   });
 
+  test('a call placed while the main client connects waits in the queue, and no connection of the earlier identity takes it', async (): Promise<void> => {
+    const c: ProtobufCentrifuge = createMain();
+    await connectClient(c);
+    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url] });
+    expect(fromBytes((await pool.rpc('work', bytes({ n: 1 }))).data)).toEqual({ n: 1 });
+    expect(connectsOf(edgeA)).toHaveLength(1);
+    const before: number = callsOf(edgeA).length;
+    holdMainConnect = true;
+    c.disconnect();
+    // The main client reconnects as another user: the connection of alice is not confirmed for the new identity.
+    main.connectResult = { ...main.connectResult, user: 'bob' };
+    c.connect();
+    const pending: Promise<RpcResult> = pool.rpc('work', bytes({ n: 2 }));
+    expect(await until((): boolean => heldMainConnect !== null)).toBe(true);
+    await new Promise<void>((resolve: () => void): void => {
+      setTimeout(resolve, 100);
+    });
+    expect(callsOf(edgeA).length).toBe(before);
+    holdMainConnect = false;
+    main.send({ id: heldMainConnect.id, connect: main.connectResult });
+    expect(fromBytes((await pending).data)).toEqual({ n: 2 });
+    expect(callsOf(edgeA).length).toBe(before + 1);
+    expect(connectsOf(edgeA)).toHaveLength(2);
+  });
+
   test('a failed renewal leaves the waiting connection to the main client retry, and starts no second renewal', async (): Promise<void> => {
     const c: ProtobufCentrifuge = createMain();
     await connectClient(c);
@@ -517,13 +542,19 @@ describe('RpcPool tokenFrom', () => {
   });
 
   test('a pool connection which leaves while it waits leaves no waiting request', async (): Promise<void> => {
-    holdMainConnect = true;
     const c: ProtobufCentrifuge = createMain();
-    c.connect();
+    await connectClient(c);
     const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url] });
-    quiet(pool.rpc('work', bytes({ n: 1 })));
+    expect(fromBytes((await pool.rpc('work', bytes({ n: 1 }))).data)).toEqual({ n: 1 });
+    holdMainConnect = true;
+    c.disconnect();
+    c.connect();
     const waiting: Map<object, unknown> = (tokenSourceOf(c) as any).waiting;
-    expect(await until((): boolean => waiting.size === 1)).toBe(true);
+    // The connection of the pool reconnects while the client connects, and the fleet refuses its token: its token request
+    // waits. A call placed in the window waits in the queue, so the request comes from the refusal.
+    refusedToken = 'access-1';
+    closeSocket(edgeA, 1001);
+    await eventually((): boolean => waiting.size === 1);
     pool.close();
     expect(waiting.size).toBe(0);
   });

@@ -177,6 +177,10 @@ export class RpcPool {
   private readonly errorListeners: Array<(ctx: { endpoint: string; error: any }) => void> = [];
   private closed: boolean = false;
   private dispatching: boolean = false;
+  // Told by the token source when its client connects or ends: the waiting calls of every group are placed or failed then.
+  private readonly onSource: () => void = (): void => {
+    this.dispatchAll();
+  };
 
 
   constructor(options: RpcPoolOptions) {
@@ -208,6 +212,7 @@ export class RpcPool {
     this.fetchOption = options.fetch;
     // Last: a pool which fails a check above leaves no listener on the client it names.
     this.source = tokenSourceFrom(options.tokenFrom, this.connectionOptions);
+    this.source?.listen(this.onSource);
   }
 
 
@@ -302,6 +307,7 @@ export class RpcPool {
       return;
     }
     this.closed = true;
+    this.source?.unlisten(this.onSource);
     for (const group of this.groups.values()) {
       for (const conn of group.all()) {
         conn.idle?.clear();
@@ -472,6 +478,11 @@ export class RpcPool {
     // which is gone: it fails here, as rpc() fails it. Calls queued before the end fail through this check too.
     if (this.source?.refuses() === true) {
       throw poolError(errorCodes.clientDisconnected, 'unauthorized');
+    }
+    // The client is connecting: no connection's identity is confirmed, so the call waits in its line until the client
+    // connects, or ends (the token source tells the pool then).
+    if (this.source?.connecting() === true) {
+      return false;
     }
     this.retireStale(group);
     const roomy: PoolConnection | null = group.roomy(this.maxInflightPerConnection);
@@ -872,6 +883,14 @@ export class RpcPool {
     this.uncount(call);
     call.data = noData;
     return true;
+  }
+
+
+  // The token source changed: each group takes one pass, which places its calls or fails them. The cost is per group.
+  private dispatchAll(): void {
+    for (const group of this.groups.values()) {
+      this.dispatch(group);
+    }
   }
 
 

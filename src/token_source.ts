@@ -36,6 +36,8 @@ export class TokenSource {
   private readonly host: TokenSourceHost;
   // The listeners the source has on its client, by event name: attached again when the application removes them.
   private readonly handlers: Map<string, (ctx: any) => void> = new Map<string, (ctx: any) => void>();
+  // The pools which take their tokens from the client: told when the client connects or ends, so that their waiting calls go on.
+  private readonly pools: Set<() => void> = new Set<() => void>();
   // The requests waiting for a token, one per requester: a new request of a requester replaces its waiting one.
   private readonly waiting: Map<object, Waiter> = new Map<object, Waiter>();
   // The token a renewal was started for since the client last connected; null before the first connect.
@@ -59,6 +61,7 @@ export class TokenSource {
       this.renewedFor = null;
       this.observe();
       this.settle();
+      this.notify();
     });
     this.handlers.set('disconnected', (ctx: any): void => {
       if (ctx?.code === disconnectedCodes.unauthorized) {
@@ -67,6 +70,7 @@ export class TokenSource {
         this.generationCount++;
       }
       this.settle();
+      this.notify();
     });
     this.handlers.set('auth', (): void => {
       this.observe();
@@ -129,10 +133,22 @@ export class TokenSource {
   }
 
 
+  /** Tells the pool that its calls may be placed or failed after a connect or a terminal disconnect of the client. */
+  listen(pool: () => void): void {
+    this.pools.add(pool);
+  }
+
+
+  /** Stops telling the pool: a closed pool is not kept by the source. */
+  unlisten(pool: () => void): void {
+    this.pools.delete(pool);
+  }
+
+
   /**
    * Re-attaches the listeners an application removed (removeAllListeners). An event missed that way, such as the connect
    * of the client, is answered here: the waiting requests are answered again, once, when a listener was missing. The
-   * check is three lookups, and it settles nothing when all listeners are in place.
+   * check is four lookups, and it settles nothing when all listeners are in place.
    */
   reattach(): void {
     if (this.attach()) {
@@ -221,11 +237,21 @@ export class TokenSource {
   }
 
 
-  // Answers every waiting request again, after an event of the client. A request only leaves the map when it settles,
-  // and a step adds none, so the map is walked in place.
+  // Answers every waiting request again, after an event of the client. The requests are walked over a copy, so that a
+  // request which settles or is replaced during the walk is not evaluated again in the same pass.
   private settle(): void {
-    for (const [requester, waiter] of this.waiting) {
-      this.step(requester, waiter);
+    for (const [requester, waiter] of Array.from(this.waiting)) {
+      if (this.waiting.get(requester) === waiter) {
+        this.step(requester, waiter);
+      }
+    }
+  }
+
+
+  // Tells the pools of the client an event which may place or fail their waiting calls. Each pool takes one pass over its groups.
+  private notify(): void {
+    for (const pool of this.pools) {
+      pool();
     }
   }
 
@@ -240,8 +266,8 @@ export class TokenSource {
     }
     // A renewal already started for this token is not started again: the requests refused it wait for the next event of
     // the client, as Java does, so the fleet costs one renewal per main token value per main connection.
-    for (const [requester, waiter] of this.waiting) {
-      if (waiter.refused === token) {
+    for (const [requester, waiter] of Array.from(this.waiting)) {
+      if (waiter.refused === token && this.waiting.get(requester) === waiter) {
         this.fail(requester, waiter);
       }
     }
