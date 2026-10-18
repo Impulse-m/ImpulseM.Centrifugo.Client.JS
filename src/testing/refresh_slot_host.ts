@@ -68,4 +68,6 @@ export class FakeRefreshHost implements RefreshSlotHost {
   }
 
   dispatchFailed(): void {}
+
+  refreshFailed(): void {}
 }

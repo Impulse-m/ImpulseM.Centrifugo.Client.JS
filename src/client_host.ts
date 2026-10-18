@@ -3,7 +3,7 @@ import { connectingCodes, errorCodes } from './codes';
 import type { RefreshSlotHost } from './refresh_slot';
 import type { CallResolveContext, RpcCallbacks, RpcHost } from './rpc_tracker';
 import type { ConnectionIdentity } from './identity';
-import type { State } from './types';
+import { State } from './types';
 import type { WriteHost } from './write_commands';
 import { ttlMilliseconds } from './utils';
 
@@ -13,6 +13,8 @@ export interface ClientHost extends RpcHost, RefreshSlotHost, WriteHost {
   scheduleRefresh(delay: number, refresh: () => void): void;
   /** Called after a refresh reply is applied, so the listener sees the new token and identity. Null without a listener. */
   onRefreshAccepted: (() => void) | null;
+  /** Called when a refresh fails while the client is connected, see RefreshSlotHost.refreshFailed. Null without a listener. */
+  onRefreshFailed: ((error: any, explicit: boolean) => void) | null;
 }
 
 /**
@@ -34,6 +36,10 @@ export interface TokenSourceHost {
   renewNow(): boolean;
   /** Sets the listener of the accepted refresh replies, or removes it with null. */
   setRefreshAccepted(listener: (() => void) | null): void;
+  /** Sets the listener of the refresh failures, or removes it with null. */
+  setRefreshFailed(listener: ((error: any, explicit: boolean) => void) | null): void;
+  /** Sets the listener of the connect replies that confirm the identity, or removes it with null. */
+  setConnectConfirmed(listener: (() => void) | null): void;
 }
 
 /**
@@ -83,12 +89,18 @@ export interface TokenExchangeHost extends ClientHost {
  */
 export function createClientHost(client: Centrifuge): ClientHost {
   const scheduleRefresh = (delay: number, refresh: () => void): void => {
-    // The timer field may hold a timer that fired already, or one a newer token superseded: it is replaced.
+    // The timer field may hold a timer that fired already, or one a newer token superseded: it is replaced. The timer
+    // refresh it arms is marked as running when it fires, see RefreshSlot.beginTimer.
     client['_clearRefreshTimeout']();
-    client['_refreshTimeout'] = setTimeout(refresh, delay);
+    client['_refreshSlot'].timerArmed();
+    client['_refreshTimeout'] = setTimeout((): void => {
+      client['_refreshSlot'].beginTimer(client['_client']);
+      refresh();
+    }, delay);
   };
   const host: ClientHost = {
     onRefreshAccepted: null,
+    onRefreshFailed: null,
     isConnected: (): boolean => client['_isConnected'](),
     createError: (code: number, message: string): any => client['_createErrorObject'](code, message),
     hasInstance: (): boolean => !!client['_config'].instance,
@@ -135,6 +147,9 @@ export function createClientHost(client: Centrifuge): ClientHost {
     },
     identity: (): ConnectionIdentity => client['_identity'],
     dispatchFailed: (err: any): void => client['_dispatchFailed'](err),
+    refreshFailed: (error: any, explicit: boolean): void => {
+      host.onRefreshFailed?.(error, explicit);
+    },
     hasTransport: (): boolean => !!client['_transport'],
     encode: (commands: any[]): any => client['_codec'].encodeCommands(commands),
     send: (data: any, session: string, node: string): void => {
@@ -179,9 +194,15 @@ export function createTokenSourceHost(client: Centrifuge): TokenSourceHost {
     tokenExpired: (token: string): boolean => client['_tokenExchange']?.tokenExpired(token) ?? false,
     canRenew: (): boolean => client['_host'].hasGetToken(),
     renewNow: (): boolean => {
-      // A refresh in flight renews the token already: a second one would send the same token again, as the Java renewNow
-      // also avoids. The in-flight fields are read here, not through a method of the refresh slot.
-      if (client['_refreshSlot']['callInFlight'] !== null || client['_refreshSlot']['commandInFlight'] !== null) {
+      // A renewal starts only for a connected client that is not busy: a refresh in flight, a refresh command waiting for
+      // its reply, or a timer refresh in progress renews the token already. The in-flight fields are read here, not
+      // through a method of the refresh slot.
+      if (client.state !== State.Connected) {
+        return false;
+      }
+      if (client['_refreshSlot']['callInFlight'] !== null
+        || client['_refreshSlot']['commandInFlight'] !== null
+        || client['_refreshSlot'].timerBusy(client['_client'])) {
         return false;
       }
       client['_host'].scheduleRefresh(0, (): void => client['_refresh']());
@@ -189,6 +210,12 @@ export function createTokenSourceHost(client: Centrifuge): TokenSourceHost {
     },
     setRefreshAccepted: (listener: (() => void) | null): void => {
       client['_host'].onRefreshAccepted = listener;
+    },
+    setRefreshFailed: (listener: ((error: any, explicit: boolean) => void) | null): void => {
+      client['_host'].onRefreshFailed = listener;
+    },
+    setConnectConfirmed: (listener: (() => void) | null): void => {
+      client['_identity'].onConnect = listener;
     },
   };
 }

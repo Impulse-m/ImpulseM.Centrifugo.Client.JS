@@ -7,6 +7,8 @@ import { AuthContext } from './types';
 export class ConnectionIdentity {
   user: string = '';
   authClass: string = '';
+  // Called after the identity of a connect reply is taken: the RPC pool confirms its tokens through it, see TokenSource.
+  onConnect: (() => void) | null = null;
   // Called with the new identity when a refresh reply changes it.
   private onChange: (ctx: AuthContext) => void;
 
@@ -18,6 +20,7 @@ export class ConnectionIdentity {
   applyConnect(result: any): void {
     this.user = result.user ?? '';
     this.authClass = result.auth_class ?? '';
+    this.onConnect?.();
   }
 
   /**

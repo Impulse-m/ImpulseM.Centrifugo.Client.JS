@@ -48,6 +48,8 @@ export interface RefreshSlotHost {
   identity(): ConnectionIdentity;
   /** Reports an error raised while a refresh was taken, e.g. by an 'auth' handler. */
   dispatchFailed(err: any): void;
+  /** Reports a refresh that failed while the client is connected: explicit for a refresh() call, else a timer refresh refused. */
+  refreshFailed(error: any, explicit: boolean): void;
 }
 
 
@@ -73,10 +75,31 @@ export class RefreshSlot {
   private tokenCallAt: number = 0;
   // The generation of the last token accepted.
   private acceptedGeneration: number = 0;
+  // The client a timer refresh runs for, from its timer firing until it sends its command, stores its token, is superseded
+  // or arms its retry; null when none runs. See timerBusy.
+  private timerRun: string | null = null;
 
 
   constructor(host: RefreshSlotHost) {
     this.host = host;
+  }
+
+
+  /** Marks a timer refresh as running for the client id given: its timer fired. */
+  beginTimer(clientId: string | null): void {
+    this.timerRun = clientId;
+  }
+
+
+  /** Clears the mark of a timer refresh: a new timer is armed, which supersedes the one that ran. */
+  timerArmed(): void {
+    this.timerRun = null;
+  }
+
+
+  /** Whether a timer refresh runs for the client id given. */
+  timerBusy(clientId: string | null): boolean {
+    return this.timerRun !== null && this.timerRun === clientId;
   }
 
 
@@ -119,6 +142,8 @@ export class RefreshSlot {
     }
     this.calls++;
     this.generationCount++;
+    // A refresh() call supersedes a timer refresh in progress.
+    this.timerRun = null;
     if (token !== undefined) {
       this.tokenGenerationCount++;
       this.tokenCallAt = this.generationCount;
@@ -135,7 +160,13 @@ export class RefreshSlot {
         this.callToken = undefined;
       }
     };
-    refresh.then(settled, settled);
+    // A failure is reported once the call is settled: a renewal the host starts for it finds the slot free.
+    refresh.then(settled, (error: any): void => {
+      settled();
+      if (this.host.isConnected()) {
+        this.host.refreshFailed(error, true);
+      }
+    });
     return refresh;
   }
 
@@ -238,7 +269,10 @@ export class RefreshSlot {
    * and the refresh timer is armed to retry: a token accepted since has armed the timer itself.
    */
   async sendTimer(token: string, generation: number): Promise<CallResolveContext | null> {
+    // The timer refresh is past its wait: it runs now as a command, which the in-flight check covers.
+    this.timerRun = null;
     const release: () => void = await this.claimCommand();
+    let refusal: any = null;
     try {
       // A connection lost while the slot was claimed is the same case: the command is not written, the retry is armed.
       if (this.generationCount !== generation || !this.host.isConnected()) {
@@ -248,8 +282,18 @@ export class RefreshSlot {
         return null;
       }
       return await this.host.sendCommand({ refresh: { token: token } });
+    } catch (rejectCtx: any) {
+      // A refusal of the server carries next(): the host hears of it once the command slot is free, and the client decides
+      // then as before.
+      if (rejectCtx.next !== undefined) {
+        refusal = rejectCtx;
+      }
+      throw rejectCtx;
     } finally {
       release();
+      if (refusal !== null) {
+        this.host.refreshFailed(refusal.error, false);
+      }
     }
   }
 
@@ -262,6 +306,7 @@ export class RefreshSlot {
     if (this.generationCount !== generation) {
       return;
     }
+    this.timerRun = null;
     this.host.setToken(token);
     this.host.debug('connection token refreshed');
   }
