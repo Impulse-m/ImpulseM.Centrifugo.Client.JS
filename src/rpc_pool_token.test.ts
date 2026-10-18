@@ -475,7 +475,11 @@ describe('RpcPool tokenFrom', () => {
     await c.refresh('bob-token');
     closeSocket(edgeA, 3000);
     const failed: any = await a;
+    // E-loss: the connection's own close reason, not the identity change or the refusal of a token.
     expect([errorCodes.connectionClosed, errorCodes.clientDisconnected]).toContain(failed.code);
+    expect(failed.message).not.toBe('identity changed');
+    expect(failed.message).not.toBe('token refused');
+    expect(failed.message).not.toBe('unauthorized');
     await pause(100);
     expect(callsOf(edgeA)).toHaveLength(1);
     expect(connectsOf(edgeA).filter((cmd: any): boolean => cmd.connect.token === 'access-1')).toHaveLength(1);
@@ -512,6 +516,10 @@ describe('RpcPool tokenFrom', () => {
     const held: any[] = [];
     holdCalls(edgeA, held);
     const a: Promise<any> = outcome(pool.rpc('work', bytes({ n: 'a' })));
+    let aSettled: boolean = false;
+    a.then((): void => {
+      aSettled = true;
+    });
     expect(await until((): boolean => held.length === 1)).toBe(true);
     holdMainConnect = true;
     closeSocket(main, 3000);
@@ -524,6 +532,9 @@ describe('RpcPool tokenFrom', () => {
     edgeA.send({ push: { disconnect: { code: 3500, reason: 'terminal' } } });
     await pause(100);
     expect(connectsOf(edgeA).length).toBe(connectsBefore);
+    // While the main client connects, A waits in its line: queued, not settled, and no socket opened.
+    expect(pool.stats().queued).toBe(1);
+    expect(aSettled).toBe(false);
     mainUser = 'bob';
     main.connectResult = { ...main.connectResult, user: 'bob' };
     holdMainConnect = false;
@@ -738,6 +749,8 @@ describe('RpcPool tokenFrom', () => {
     (answerGetter as unknown as (token: string) => void)('access-2');
     expect(fromBytes((await result).data)).toEqual({ n: 1 });
     expect(getterCalls).toBe(2);
+    // The busy window started no renewal of the source: r stays null, so a later renewal for the same token is not blocked.
+    expect((tokenSourceOf(c) as any).renewedFor).toBe(null);
     expect(connectsOf(edgeA).at(-1).connect.token).toBe('access-2');
   });
 
@@ -1142,7 +1155,6 @@ describe('RpcPool tokenFrom', () => {
 
   test('replacedTokenRequestEndsNothing', async (): Promise<void> => {
     const c: ProtobufCentrifuge = await connectedMain();
-    refusedToken = 'access-1';
     const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url] });
     const errors: any[] = [];
     pool.on('error', (ctx: any): void => {
@@ -1156,20 +1168,48 @@ describe('RpcPool tokenFrom', () => {
       }
       return refreshReply(cmd, mainTtl, mainUser);
     };
+    // P1 connects with an expiring token, so its refresh at expiry is its first token request (2.5 step 9 starts the renewal).
+    edgeA.connectResult = { ...edgeA.connectResult, expires: true, ttl: 2 };
     const held: any[] = [];
     holdCalls(edgeA, held);
     const result: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
-    expect(await until((): boolean => renewalHeld !== null)).toBe(true);
-    // The fleet drops the pool connection, and refuses its reconnect: it asks for a token again.
+    expect(await until((): boolean => held.length === 1)).toBe(true);
+    // The connection does not expire again: its reconnect is the replacing request, and it carries no further refresh.
+    edgeA.connectResult = { ...edgeA.connectResult, expires: false, ttl: 0 };
+    const source: any = tokenSourceOf(c);
+    await eventually((): boolean => renewalHeld !== null, 8000);
+    const rejections: any[] = watchRejection(source);
+    // The fleet drops the pool connection, and refuses its reconnect: it asks for a token again, which replaces the first.
+    refusedToken = 'access-1';
     closeSocket(edgeA, 3000);
+    expect(await until((): boolean => rejections.length === 1)).toBe(true);
+    expect(rejections[0]).toBeInstanceOf(UnauthorizedError);
     await pause(100);
     main.send({ id: renewalHeld.id, refresh: { expires: true, ttl: mainTtl, user: 'alice' } });
     refusedToken = '';
-    expect(await until((): boolean => held.length === 1)).toBe(true);
-    answer(edgeA, held[0]);
+    expect(await until((): boolean => held.length === 2)).toBe(true);
+    answer(edgeA, held[1]);
     expect(fromBytes((await result).data)).toEqual({ n: 1 });
     expect(errors).toEqual([]);
+    const endpoint: any = (pool as any).endpoints.get(edgeA.url);
+    expect(endpoint === undefined || endpoint.hold === null).toBe(true);
     expect(connectsOf(edgeA).at(-1).connect.token).toBe('access-2');
+  });
+
+  test('stateInvalidatedDoesNotLendThePresentedTokenBack', async (): Promise<void> => {
+    const c: ProtobufCentrifuge = await connectedMain();
+    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url] });
+    expect(fromBytes((await pool.rpc('work', bytes({ n: 1 }))).data)).toEqual({ n: 1 });
+    expect(connectsOf(edgeA)[0].connect.token).toBe('access-1');
+    const refreshesBefore: number = refreshesOf(main).length;
+    const connectsBefore: number = connectsOf(edgeA).length;
+    // The fleet invalidates the state of P1: its client clears its token and reconnects with a token request. The main client
+    // still confirms access-1, which P1 presented last (R3.3), so the source renews and does not lend access-1 back.
+    edgeA.send({ push: { disconnect: { code: disconnectedCodes.stateInvalidated, reason: 'state' } } });
+    expect(await until((): boolean => refreshesOf(main).length === refreshesBefore + 1)).toBe(true);
+    // The renewal brings access-2, and P1 connects with it. No connect carries access-1 again after the invalidation.
+    await eventually((): boolean => connectsOf(edgeA).some((cmd: any): boolean => cmd.connect.token === 'access-2'), 8000);
+    expect(connectsOf(edgeA).slice(connectsBefore).some((cmd: any): boolean => cmd.connect.token === 'access-1')).toBe(false);
   });
 
   test('resendOfAnOldBindingFailsBeforeItJoinsALine', async (): Promise<void> => {

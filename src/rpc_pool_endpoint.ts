@@ -57,6 +57,11 @@ export interface PoolConnection {
   idle: CallTimer | null;
   /** The identity generation of the connection's token, null before its first token; only with tokenFrom. */
   generation: number | null;
+  /**
+   * The token the connection presented at its last connect attempt that was not abandoned (R3.3), '' before the first.
+   * The client clears its own token on a state-invalidated disconnect, so the pool keeps it here, see RpcPool, presentedOf.
+   */
+  presented: string;
   /** True once the connection is retired: it takes no new call, and it closes when its calls settle. */
   retired: boolean;
 }

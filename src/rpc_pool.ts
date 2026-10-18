@@ -767,6 +767,7 @@ export class RpcPool {
       lastUse: Date.now(),
       idle: null,
       generation: null,
+      presented: '',
       retired: false,
     };
     client.on('connecting', (): void => {
@@ -803,16 +804,28 @@ export class RpcPool {
   }
 
 
+  // The token the connection presented at its last connect attempt that was not abandoned (R3.3). The client clears its
+  // token on a state-invalidated disconnect, before the reconnect that asks for a new one, so an empty token of the client
+  // keeps the one presented before. A connect that carries a token reads it here, at the request or at its verified connect.
+  private presentedOf(conn: PoolConnection): string {
+    const current: string = presentedTokenOf(conn.client);
+    if (current !== '') {
+      conn.presented = current;
+    }
+    return conn.presented;
+  }
+
+
   // The token of a connection from the source (table 2.4, token request and token delivered). A request of a connection
   // stamped with an earlier generation retires it, and is answered unauthorized without asking the source. A token
-  // delivered of another generation than the stamp retires the connection too. The request names the token the client
+  // delivered of another generation than the stamp retires the connection too. The request names the token the connection
   // presented last (R3.3): a token answered for an attempt the client dropped is not one it presented.
   private tokenOf(conn: PoolConnection, source: TokenSource): Promise<string> {
     if (conn.generation !== null && conn.generation !== source.generation()) {
       this.retire(conn);
       return Promise.reject(new UnauthorizedError('unauthorized'));
     }
-    return source.token(conn, presentedTokenOf(conn.client)).then((sourced: SourcedToken): string => {
+    return source.token(conn, this.presentedOf(conn)).then((sourced: SourcedToken): string => {
       if (conn.generation === null) {
         conn.generation = sourced.generation;
       } else if (conn.generation !== sourced.generation) {
@@ -852,9 +865,11 @@ export class RpcPool {
       this.retire(conn);
       return;
     }
+    // The connect is verified: the token it carried is the one it presented (R3.3), and it is the one found unusable below.
+    const presented: string = this.presentedOf(conn);
     if (!source.identityMatches(ctx.user, ctx.authClass)) {
       this.retire(conn);
-      source.unusable(presentedTokenOf(conn.client));
+      source.unusable(presented);
       this.emitError(conn.endpoint.url, { code: disconnectedCodes.unauthorized, reason: 'identity mismatch' });
       return;
     }
