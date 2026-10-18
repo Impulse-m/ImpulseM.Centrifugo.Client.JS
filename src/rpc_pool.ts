@@ -879,6 +879,7 @@ export class RpcPool {
     }
     conn.retired = true;
     conn.live = false;
+    this.source?.forget(conn);
     conn.endpoint.remove(conn);
     if (conn.inflight > 0) {
       this.retiring.add(conn);
