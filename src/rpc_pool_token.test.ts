@@ -3,7 +3,7 @@ import { errorCodes, disconnectedCodes } from './codes';
 import { Centrifuge as ProtobufCentrifuge } from './protobuf';
 import { RpcPool, RpcPoolOptions } from './rpc_pool';
 import { tokenSourceOf } from './token_source';
-import { TokenExchange, TokenExchangeContext, TokenExchangeResult, RpcResult } from './types';
+import { State, TokenExchange, TokenExchangeContext, TokenExchangeResult, RpcResult } from './types';
 import {
   WaitableFakeServer, bytes, connectClient, disconnectAll, fromBytes, holdReply, rpcOptionsWireFlag, until,
 } from './testing/codecs';
@@ -300,14 +300,16 @@ describe('RpcPool tokenFrom', () => {
     const c: ProtobufCentrifuge = createMain();
     c.connect();
     const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url] });
-    const timers: jest.SpyInstance = jest.spyOn(global, 'setTimeout');
     const pending: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
     expect(await until((): boolean => heldMainConnect !== null)).toBe(true);
+    // The window of the wait: the only timer armed in it is the test's own sleep, of 100 ms. Any other delay, a poll of
+    // the source included, fails the check.
+    const timers: jest.SpyInstance = jest.spyOn(global, 'setTimeout');
     await new Promise<void>((resolve: () => void): void => {
       setTimeout(resolve, 100);
     });
     expect(connectsOf(edgeA).length).toBe(0);
-    expect(timers.mock.calls.filter((call: any[]): boolean => call[1] === 0).length).toBe(0);
+    expect(timers.mock.calls.filter((call: any[]): boolean => call[1] !== 100)).toHaveLength(0);
     timers.mockRestore();
     holdMainConnect = false;
     main.send({ id: heldMainConnect.id, connect: main.connectResult });
@@ -391,6 +393,49 @@ describe('RpcPool tokenFrom', () => {
     expect(connectsOf(edgeA).length).toBe(2);
     expect(connectsOf(edgeA)[1].connect.token).toBe('new-token');
     expect(pool.stats().connections).toBe(1);
+  });
+
+  test('an identity change while a call is in flight: when its connection drops, the call settles with the loss and is not resent under the new identity', async (): Promise<void> => {
+    const c: ProtobufCentrifuge = createMain();
+    await connectClient(c);
+    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url] });
+    const held: any[] = [];
+    holdCalls(edgeA, held);
+    const first: Promise<any> = pool.rpc('work', bytes({ n: 1 })).then((): string => 'resolved', (error: any): any => error);
+    expect(await until((): boolean => held.length === 1)).toBe(true);
+    // The identity moves on while the call is in flight; the main client stays connected, so no pool event runs.
+    mainUser = 'bob';
+    await c.refresh('bob-token');
+    edgeA.onCommand = echo;
+    closeSocket(edgeA, 1001);
+    const failed: any = await first;
+    expect(failed).not.toBe('resolved');
+    expect(failed).toMatchObject({ code: errorCodes.connectionClosed });
+    await new Promise<void>((resolve: () => void): void => {
+      setTimeout(resolve, 300);
+    });
+    // The call was not sent again, and no connection of the pool carries the new identity.
+    expect(callsOf(edgeA)).toHaveLength(1);
+    expect(connectsOf(edgeA).some((cmd: any): boolean => cmd.connect.token === 'bob-token')).toBe(false);
+    expect(pool.stats().connections).toBe(0);
+  });
+
+  test('the main client loses its listeners while a pool connection waits for its connect: the next call of the pool answers the waiter', async (): Promise<void> => {
+    holdMainConnect = true;
+    const c: ProtobufCentrifuge = createMain();
+    c.connect();
+    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url] });
+    const first: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
+    expect(await until((): boolean => heldMainConnect !== null)).toBe(true);
+    c.removeAllListeners();
+    holdMainConnect = false;
+    main.send({ id: heldMainConnect.id, connect: main.connectResult });
+    expect(await until((): boolean => c.state === State.Connected)).toBe(true);
+    // The connected event went by with no listener. The next call re-attaches the listeners and answers the waiter.
+    const second: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 2 })));
+    expect(fromBytes((await first).data)).toEqual({ n: 1 });
+    expect(fromBytes((await second).data)).toEqual({ n: 2 });
+    expect(exchanges).toBe(1);
   });
 
   test('an anonymous main client gives anonymous pool connections, retired once it logs in', async (): Promise<void> => {

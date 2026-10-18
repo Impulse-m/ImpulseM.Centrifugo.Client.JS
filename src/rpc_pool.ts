@@ -220,7 +220,8 @@ export class RpcPool {
         return;
       }
       // The session of the client ended as unauthorized, or no token can be lent and the client is not connecting: no
-      // connection is opened, and the call is not sent.
+      // connection is opened, and the call is not sent. A listener the application removed is put back first.
+      this.source?.reattach();
       if (this.source?.refuses() === true) {
         reject(poolError(errorCodes.clientDisconnected, 'unauthorized'));
         return;
@@ -641,7 +642,7 @@ export class RpcPool {
       if (conn.inflight === 0) {
         this.closeRetired(conn);
       }
-    } else if (this.source !== null && conn.generation !== null && conn.generation !== this.source.generation()) {
+    } else if (this.stale(conn)) {
       this.retire(conn);
     } else if (conn.inflight === 0) {
       conn.lastUse = Date.now();
@@ -680,16 +681,34 @@ export class RpcPool {
   }
 
 
+  // Whether a connection holds the identity of an earlier generation: its token belongs to a session the client left.
+  private stale(conn: PoolConnection): boolean {
+    return this.source !== null && conn.generation !== null && conn.generation !== this.source.generation();
+  }
+
+
+  // Whether the client the tokens come from is connecting: its identity is not confirmed, and a resend would wait for a
+  // connect which may bring another identity. A call lost then is not resent. A disconnected client refuses the resend
+  // at once, as before, so it is not in this case.
+  private unconfirmed(): boolean {
+    return this.source !== null && this.source.connecting();
+  }
+
+
   // The error of a call on a connection. A connection the server closed for message size settles its calls without
   // a resend: the failure is the same on every attempt. So does a connection closed as unauthorized, or retired, since
-  // its identity is gone: the call would be sent under the same identity. A lost connection or a later refusal is
-  // retried; a server error may move the call by reroute, and the later signal is retried as the main client does.
+  // its identity is gone: the call would be sent under the same identity. The same holds for a connection whose identity
+  // moved on while the call was in flight, and for a loss while the client is not connected, since the identity of a
+  // resend is then unknown. A lost connection or a later refusal is retried; a server error may move the call by
+  // reroute, and the later signal is retried as the main client does.
   private failed(call: PendingCall, conn: PoolConnection, error: any): void {
     const code: number | undefined = error?.code;
     if (code === errorCodes.connectionClosed || code === errorCodes.clientDisconnected) {
       if (conn.closeCode === disconnectedCodes.messageSizeLimit
         || conn.closeCode === disconnectedCodes.unauthorized
-        || conn.retired) {
+        || conn.retired
+        || this.stale(conn)
+        || this.unconfirmed()) {
         this.finish(call, conn.url, error, null);
         return;
       }
@@ -735,6 +754,11 @@ export class RpcPool {
     }
     call.resend = callTimer(Math.min(Date.now() + delay, call.deadline), (): void => {
       call.resend = null;
+      // The deadline timer of the call may fire in the same tick: a call past its deadline is not sent again.
+      if (call.deadline <= Date.now()) {
+        this.expire(call);
+        return;
+      }
       this.attempt(call, false);
     });
   }

@@ -86,8 +86,7 @@ export class TokenSource {
    * connected or connecting, or the session has ended.
    */
   token(requester: object, refused: string): Promise<SourcedToken> {
-    // Re-attaches the listeners an application removed (removeAllListeners), so the source keeps its events.
-    this.attach();
+    this.reattach();
     return new Promise<SourcedToken>((resolve: (sourced: SourcedToken) => void, reject: (error: any) => void): void => {
       const waiter: Waiter = { refused: refused, resolve: resolve, reject: reject };
       // The request it replaces settles, so that no promise of the requester is left pending.
@@ -118,19 +117,40 @@ export class TokenSource {
   }
 
 
+  /** Whether the client is connecting: its identity is not confirmed yet, and no token is lent in that window. */
+  connecting(): boolean {
+    return this.host.state() === State.Connecting;
+  }
+
+
   /** Drops the waiting request of a requester which left the pool. */
   forget(requester: object): void {
     this.waiting.delete(requester);
   }
 
 
-  // Keeps the listeners of the handlers on the client.
-  private attach(): void {
+  /**
+   * Re-attaches the listeners an application removed (removeAllListeners). An event missed that way, such as the connect
+   * of the client, is answered here: the waiting requests are answered again, once, when a listener was missing. The
+   * check is three lookups, and it settles nothing when all listeners are in place.
+   */
+  reattach(): void {
+    if (this.attach()) {
+      this.settle();
+    }
+  }
+
+
+  // Keeps the listeners of the handlers on the client. True when one was missing and is attached now.
+  private attach(): boolean {
+    let attached: boolean = false;
     for (const [name, handler] of this.handlers) {
       if (this.client.listeners(name as 'connected').indexOf(handler) < 0) {
         this.client.on(name as 'connected', handler);
+        attached = true;
       }
     }
+    return attached;
   }
 
 
@@ -182,9 +202,9 @@ export class TokenSource {
     if (!this.host.canRenew()) {
       return this.fail(requester, waiter);
     }
-    if (this.renewedFor !== token) {
+    // The renewal is recorded only when it started: a refresh in flight starts none, and the next event asks again.
+    if (this.renewedFor !== token && this.host.renewNow()) {
       this.renewedFor = token;
-      this.host.renewNow();
     }
     return false;
   }
@@ -206,6 +226,11 @@ export class TokenSource {
     const token: string = this.host.token();
     if (token === '') {
       return;
+    }
+    // The token a renewal was started for has come back, so a request refused it again starts a renewal of its own: each
+    // such renewal is driven by a refusal, not by an event, so it cannot loop.
+    if (this.renewedFor === token) {
+      this.renewedFor = null;
     }
     for (const [requester, waiter] of this.waiting) {
       if (waiter.refused === token) {
