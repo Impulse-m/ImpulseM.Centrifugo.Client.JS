@@ -325,6 +325,43 @@ describe('RpcPool redirect waiters', () => {
       }
     }
   });
+
+  test('closeSettlesAWaitingFetchWithTheClosedError', async (): Promise<void> => {
+    const server: WaitableFakeServer = await WaitableFakeServer.start('protobuf');
+    try {
+      server.connectResult = { client: 'fake-client', version: '0.0.0', ping: 25, flag: rpcOptionsWireFlag };
+      server.onCommand = (cmd: any): any => (cmd.rpc !== undefined ? { id: cmd.id, rpc: { data: cmd.rpc.data } } : undefined);
+      // The first fetch holds the one redirect slot until the pool closes it. The second redirect waits for that slot.
+      let fetches: number = 0;
+      const fetchFunction: any = (...args: any[]): Promise<any> => {
+        fetches++;
+        const signal: AbortSignal = args[1].signal;
+        return new Promise<any>((resolve: (value: any) => void, reject: (error: any) => void): void => {
+          void resolve;
+          signal.addEventListener('abort', (): void => reject(new Error('aborted')));
+        });
+      };
+      const pool: RpcPool = new RpcPool({
+        endpoints: (): string => server.url,
+        connection: { websocket: WebSocket, minReconnectDelay: 10, maxReconnectDelay: 50 },
+        maxConnectionsPerEndpoint: 1,
+        maxInflightPerConnection: 2,
+        maxRedirectsInflight: 1,
+        fetch: fetchFunction,
+        redirect: (): any => ({ url: 'https://cdn.example.test/x' }),
+      });
+      const first: Promise<RpcResult> = pool.rpc('work', new TextEncoder().encode('{"n":1}'));
+      const second: Promise<RpcResult> = pool.rpc('work', new TextEncoder().encode('{"n":2}'));
+      expect(await within((): boolean => fetches === 1 && pool.stats().queued === 1, 5000)).toBe(true);
+      pool.close();
+      await expect(first).rejects.toMatchObject({ code: errorCodes.connectionClosed });
+      await expect(second).rejects.toMatchObject({ code: errorCodes.connectionClosed });
+      // The waiting redirect was settled by the close and never requested its fetch.
+      expect(fetches).toBe(1);
+    } finally {
+      await server.close();
+    }
+  });
 });
 
 // Polls a condition over real time, for a state which waits for the round trips of the fake server; false when the
