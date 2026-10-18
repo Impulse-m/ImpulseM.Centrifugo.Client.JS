@@ -518,6 +518,24 @@ describe('RpcPool', () => {
       expect(callsOf(serverB)[0].rpc.headers).toEqual({ 'x-affinity': 'hint' });
     });
 
+    test('a move that also carries the later signal is taken as a move, at once', async (): Promise<void> => {
+      const serverA: WaitableFakeServer = await startServer();
+      const serverB: WaitableFakeServer = await startServer();
+      // The later signal would resend to key a, at once with a zero draw: the move wins, so the call goes to key b.
+      serverA.onCommand = (cmd: any): any => (isCall(cmd)
+        ? { id: cmd.id, error: { ...laterError(), metadata: { 'x-centrifugo-retry': 'later', 'x-moved': 'b' } } }
+        : undefined);
+      serverB.onCommand = echo;
+      jest.spyOn(Math, 'random').mockReturnValue(0);
+      const pool: RpcPool = createPool((key: string): string => (key === 'a' ? serverA.url : serverB.url), {
+        reroute: (error: any): string | undefined => error.metadata?.['x-moved'],
+      });
+      const result: RpcResult = await pool.rpc('work', bytes({ n: 3 }), { endpointKey: 'a' });
+      expect(fromBytes(result.data)).toEqual({ n: 3 });
+      expect(callsOf(serverA)).toHaveLength(1);
+      expect(callsOf(serverB)).toHaveLength(1);
+    });
+
     test('retries bounds a hook which always moves, and the last error is surfaced', async (): Promise<void> => {
       const serverA: WaitableFakeServer = await startServer();
       const serverB: WaitableFakeServer = await startServer();

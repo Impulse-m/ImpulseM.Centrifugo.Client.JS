@@ -1071,7 +1071,8 @@ export class RpcPool {
       return;
     }
     if (typeof code === 'number' && code >= serverErrorFloor) {
-      if (call.resends < this.retries && this.rerouteHook !== undefined) {
+      // The move is checked before the later signal: a reroute that maps the error wins over it (table 2.6, ruling R4.1).
+      if (call.resends < this.retries && call.deadline > Date.now() && this.rerouteHook !== undefined) {
         let key: string | undefined;
         try {
           key = this.rerouteHook(error);
