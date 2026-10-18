@@ -4,6 +4,7 @@ import { RpcPool } from './rpc_pool';
 import { fetchRedirect, RedirectGate } from './rpc_pool_redirect';
 import { RpcResult } from './types';
 import { WaitableFakeServer, rpcOptionsWireFlag } from './testing/codecs';
+import { holdFetchUntilAborted } from './testing/fetch';
 
 describe('RedirectGate', () => {
   test('a fetch waits for a slot without a bound of its own: the pool bounds the waiters', async (): Promise<void> => {
@@ -335,11 +336,7 @@ describe('RpcPool redirect waiters', () => {
       let fetches: number = 0;
       const fetchFunction: any = (...args: any[]): Promise<any> => {
         fetches++;
-        const signal: AbortSignal = args[1].signal;
-        return new Promise<any>((resolve: (value: any) => void, reject: (error: any) => void): void => {
-          void resolve;
-          signal.addEventListener('abort', (): void => reject(new Error('aborted')));
-        });
+        return holdFetchUntilAborted(args[1].signal);
       };
       const pool: RpcPool = new RpcPool({
         endpoints: (): string => server.url,

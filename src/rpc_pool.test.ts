@@ -5,6 +5,7 @@ import { RpcPool, RpcPoolOptions } from './rpc_pool';
 import { fetchRedirect } from './rpc_pool_redirect';
 import { Centrifuge as ProtobufCentrifuge } from './protobuf';
 import { RpcResult, State } from './types';
+import { holdFetchUntilAborted } from './testing/fetch';
 import {
   WaitableFakeServer, bytes, fromBytes, holdReply, rpcOptionsWireFlag, until,
 } from './testing/codecs';
@@ -813,13 +814,7 @@ describe('RpcPool', () => {
 
     // A fetch stub which never answers: it fails when the signal it is given aborts.
     function hangingFetch(): jest.Mock {
-      return jest.fn((...args: any[]): Promise<any> => {
-        const signal: AbortSignal = args[1].signal;
-        return new Promise<any>((resolve: (value: any) => void, reject: (error: any) => void): void => {
-          void resolve;
-          signal.addEventListener('abort', (): void => reject(new Error('aborted')));
-        });
-      });
+      return jest.fn((...args: any[]): Promise<any> => holdFetchUntilAborted(args[1].signal));
     }
 
     test('a reply the hook maps to a URL is fetched, and the promise resolves with the body', async (): Promise<void> => {
