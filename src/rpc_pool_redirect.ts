@@ -187,17 +187,22 @@ async function readBounded(response: any, maxBytes: number): Promise<Uint8Array>
   }
   const chunks: Uint8Array[] = [];
   let total: number = 0;
-  for (;;) {
-    const step: any = await source.next();
-    if (step.done === true) {
-      break;
+  try {
+    for (;;) {
+      const step: any = await source.next();
+      if (step.done === true) {
+        break;
+      }
+      total += step.value.length;
+      if (total > maxBytes) {
+        throw redirectFailure('redirect body over the limit');
+      }
+      chunks.push(step.value);
     }
-    total += step.value.length;
-    if (total > maxBytes) {
-      source.cancel();
-      throw redirectFailure('redirect body over the limit');
-    }
-    chunks.push(step.value);
+  } catch (error: any) {
+    // A body over the limit, or a read which failed mid-body: the stream is released now, not at garbage collection.
+    source.cancel();
+    throw error;
   }
   const out: Uint8Array = new Uint8Array(total);
   let offset: number = 0;
