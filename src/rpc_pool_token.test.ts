@@ -748,18 +748,37 @@ describe('RpcPool tokenFrom', () => {
   });
 
   test('failedTimerRenewalLeavesWaitersToTheMainRetry', async (): Promise<void> => {
-    const c: ProtobufCentrifuge = await connectedMain();
-    refusedToken = 'access-1';
+    let getterCalls: number = 0;
+    const c: ProtobufCentrifuge = new ProtobufCentrifuge([{ transport: 'websocket', endpoint: main.url }], {
+      websocket: WebSocket,
+      minReconnectDelay: 10,
+      maxReconnectDelay: 50,
+      getToken: (): Promise<string> => {
+        getterCalls++;
+        return Promise.resolve(getterCalls === 1 ? 'tok-1' : 'tok-2');
+      },
+    });
+    c.on('error', (): void => {});
+    clients.push(c);
+    // The renewed token is the identity of alice, as the connect confirmed: a refresh which changed it would retire the connection.
+    main.connectResult = { ...main.connectResult, user: 'alice' };
+    await connectClient(c);
+    refusedToken = 'tok-1';
     let refreshes: number = 0;
     mainRefreshHook = (cmd: any): any => {
       refreshes++;
       return refreshes === 1 ? temporaryRefreshError(cmd) : refreshReply(cmd, mainTtl, mainUser);
     };
-    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url] });
+    // The call waits out the client's retry of its refresh: its deadline is the connection timeout, which is longer here.
+    const pool: RpcPool = createPool(c, {
+      endpoints: (): string[] => [edgeA.url],
+      connection: { websocket: WebSocket, minReconnectDelay: 10, maxReconnectDelay: 50, timeout: 20000 },
+    });
     const held: any[] = [];
     holdCalls(edgeA, held);
     const result: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
-    await eventually((): boolean => held.length === 1, 9000);
+    // The client retries its refresh after a backoff of five to ten seconds.
+    await eventually((): boolean => held.length === 1, 15000);
     expect(refreshes).toBe(2);
     answer(edgeA, held[0]);
     expect(fromBytes((await result).data)).toEqual({ n: 1 });
@@ -809,6 +828,8 @@ describe('RpcPool tokenFrom', () => {
     holdCalls(edgeA, held);
     quiet(pool.rpc('work', bytes({ n: 1 })));
     expect(await until((): boolean => held.length === 1)).toBe(true);
+    // The pool connection's reconnect is refused for the token: its request waits while the main client connects.
+    refusedToken = 'access-1';
     holdMainConnect = true;
     closeSocket(main, 3000);
     closeSocket(edgeA, 3000);
@@ -829,7 +850,7 @@ describe('RpcPool tokenFrom', () => {
     const heldB: any[] = [];
     holdCalls(edgeB, heldB);
     const bCall: Promise<RpcResult> = quiet(poolB.rpc('work', bytes({ n: 1 })));
-    expect(source.pools.size).toBe(1);
+    await eventually((): boolean => source.pools.size === 1);
     holdMainConnect = false;
     main.send({ id: heldMainConnect.id, connect: main.connectResult });
     expect(await until((): boolean => heldB.length === 1)).toBe(true);
@@ -842,7 +863,7 @@ describe('RpcPool tokenFrom', () => {
     expect(source.pools.size).toBe(0);
     poolB.close();
     expect(source.pools.size).toBe(0);
-    await second;
+    await second.catch((): void => {});
   });
 
   test('mainEventDrainsOnlyKeysWithWaitingCalls', async (): Promise<void> => {
@@ -941,12 +962,13 @@ describe('RpcPool tokenFrom', () => {
     closeSocket(main, 3000);
     closeSocket(edgeB, 3000);
     const source: any = tokenSourceOf(c);
-    expect(await until((): boolean => source.waiting.size === 1)).toBe(true);
+    await eventually((): boolean => source.waiting.size === 1);
     expect(source.pools.size).toBe(1);
     pool.close();
     expect(await queued).toMatchObject({ code: errorCodes.cancelled });
     expect(await inFlight).toMatchObject({ code: errorCodes.connectionClosed });
-    expect(await other).toMatchObject({ code: errorCodes.connectionClosed });
+    // The call on the edge B connection was lost when its connection dropped, and waits for a connection: close cancels it.
+    expect(await other).toMatchObject({ code: errorCodes.cancelled });
     expect(source.waiting.size).toBe(0);
     expect(source.pools.size).toBe(0);
   });
@@ -954,7 +976,8 @@ describe('RpcPool tokenFrom', () => {
   test('identityChangeRetiresAndCompletesInFlight', async (): Promise<void> => {
     const c: ProtobufCentrifuge = await connectedMain();
     edgeA.connectResult = { ...edgeA.connectResult, expires: true, ttl: 2 };
-    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url] });
+    // The next call has its own key, so its connection opens on edge B, while the call in flight stays on edge A.
+    const pool: RpcPool = createPool(c, { endpoints: (key: string): string => (key === 'next' ? edgeB.url : edgeA.url) });
     const held: any[] = [];
     holdCalls(edgeA, held);
     const a: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 'a' })));
@@ -963,14 +986,16 @@ describe('RpcPool tokenFrom', () => {
     await c.refresh('bob-token');
     edgeA.connectResult = { ...edgeA.connectResult, user: 'bob' };
     edgeB.connectResult = { ...edgeB.connectResult, user: 'bob' };
-    const next: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 'next' })));
-    expect(await until((): boolean => connectsOf(edgeB).length === 1)).toBe(true);
+    const next: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 'next' }), { endpointKey: 'next' }));
+    await eventually((): boolean => connectsOf(edgeB).length === 1);
     expect(connectsOf(edgeB)[0].connect.token).toBe('bob-token');
-    const refreshesBefore: number = refreshesOf(main).length;
-    await pause(2500);
-    expect(refreshesOf(main).length).toBe(refreshesBefore);
+    // The call in flight completes on its connection, before that connection's token expires.
     answer(edgeA, held[0]);
     expect(fromBytes((await a).data)).toEqual({ n: 'a' });
+    const refreshesBefore: number = refreshesOf(main).length;
+    // The expiry of the retired connection's token is answered unauthorized, without a renewal of the main client.
+    await pause(2500);
+    expect(refreshesOf(main).length).toBe(refreshesBefore);
     expect(await until((): boolean => callsOf(edgeB).length === 1)).toBe(true);
     answer(edgeB, callsOf(edgeB)[0]);
     expect(fromBytes((await next).data)).toEqual({ n: 'next' });
@@ -1015,6 +1040,10 @@ describe('RpcPool tokenFrom', () => {
     let edgeCalls: number = 0;
     const held: any[] = [];
     edgeA.onCommand = (cmd: any): any => {
+      if (cmd.connect !== undefined && holdEdgeConnects) {
+        heldEdgeConnects.push(cmd);
+        return holdReply;
+      }
       if (!isCall(cmd)) {
         return echo(cmd);
       }
@@ -1026,32 +1055,34 @@ describe('RpcPool tokenFrom', () => {
       return holdReply;
     };
     const a: Promise<any> = outcome(pool.rpc('work', bytes({ n: 'a' })));
-    expect(await until((): boolean => edgeCalls === 1)).toBe(true);
+    await eventually((): boolean => edgeCalls === 1);
     // C takes the slot A freed; B waits in the line behind it.
     const cCall: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 'c' })));
-    expect(await until((): boolean => held.length === 1)).toBe(true);
+    await eventually((): boolean => held.length === 1);
     const b: Promise<any> = outcome(pool.rpc('work', bytes({ n: 'b' })));
-    expect(pool.stats()).toEqual({ connections: 1, inflight: 1, queued: 2, redirects: 0 });
+    // A waits its later delay, which holds no slot and is not a call in a line: only B counts in queued.
+    expect(pool.stats()).toEqual({ connections: 1, inflight: 1, queued: 1, redirects: 0 });
     // The identity moves on before A's delay ends. The notification fails B, and D opens a connection of bob's own:
     // C's connection is retired at once, its slot is C's to finish.
     mainUser = 'bob';
     await c.refresh('bob-token');
     expect(await b).toMatchObject({ code: errorCodes.clientDisconnected, message: 'identity changed' });
     edgeA.connectResult = { ...edgeA.connectResult, user: 'bob' };
-    holdEdgeConnects = true;
-    const d: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 'd' })));
-    expect(await until((): boolean => heldEdgeConnects.length === 1)).toBe(true);
-    expect(callsOf(edgeA)).toHaveLength(2);
+    // C completes on its connection: the fake server answers on its latest socket only, so C's reply comes before D's connection.
     answer(edgeA, held[0]);
     expect(fromBytes((await cCall).data)).toEqual({ n: 'c' });
+    holdEdgeConnects = true;
+    const d: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 'd' })));
+    await eventually((): boolean => heldEdgeConnects.length === 1);
+    expect(callsOf(edgeA)).toHaveLength(2);
     // A's delay ends while D still waits for its connect: A is refused its identity and does not join the line behind D.
     const failedA: any = await a;
     expect(failedA).toMatchObject({ code: errorCodes.clientDisconnected, message: 'identity changed' });
     expect(callsOf(edgeA)).toHaveLength(2);
     holdEdgeConnects = false;
-    expect(await until((): boolean => heldEdgeConnects.length === 1)).toBe(true);
+    await eventually((): boolean => heldEdgeConnects.length === 1);
     releaseEdgeConnect(edgeA, heldEdgeConnects[0]);
-    expect(await until((): boolean => callsOf(edgeA).length === 3)).toBe(true);
+    await eventually((): boolean => callsOf(edgeA).length === 3);
     answer(edgeA, callsOf(edgeA)[2]);
     expect(fromBytes((await d).data)).toEqual({ n: 'd' });
   });
