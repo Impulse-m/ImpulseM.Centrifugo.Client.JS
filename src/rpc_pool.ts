@@ -907,6 +907,10 @@ export class RpcPool {
     endpoint.remove(conn);
     this.retiring.delete(conn);
     this.source?.forget(conn);
+    // A stale connection is retired at this, its next event: its end is no error, and holds no open.
+    if (this.stale(conn)) {
+      conn.retired = true;
+    }
     if (!conn.retired && ctx.code !== disconnectedCodes.disconnectCalled) {
       this.emitError(endpoint.url, ctx);
       if (ctx.code !== disconnectedCodes.messageSizeLimit) {
