@@ -710,8 +710,11 @@ describe('RpcPool tokenFrom', () => {
     expect(errors.filter((ctx: any): boolean => ctx.error?.code === disconnectedCodes.unauthorized)).toHaveLength(2);
     expect(pool.stats().connections).toBe(0);
     const connectsBefore: number = connectsOf(edgeA).length;
-    // A later call waits for no connection: it is refused at once, with no open and no token request.
+    // A later call waits for no connection: it is refused at once, with no open and no token request. It settles within
+    // 500 ms of the call (R5.7, row 2.2).
+    const startedFourth: number = Date.now();
     const fourth: any = await outcome(pool.rpc('work', bytes({ n: 4 }), { timeout: 4000 }));
+    expect(Date.now() - startedFourth).toBeLessThan(500);
     expect(fourth).toMatchObject({ code: errorCodes.clientDisconnected, message: 'token refused' });
     expect(exchanges).toBe(3);
     expect(connectsOf(edgeA)).toHaveLength(connectsBefore);
@@ -771,7 +774,12 @@ describe('RpcPool tokenFrom', () => {
     main.connectResult = { ...main.connectResult, user: 'alice' };
     await connectClient(c);
     refusedToken = 'tok-1';
-    mainRefreshHook = (cmd: any): any => refuseRefresh(cmd);
+    // The time of the 103 refusal: the event that settles the waiters at once (R5.7).
+    let refusedAt: number = 0;
+    mainRefreshHook = (cmd: any): any => {
+      refusedAt = Date.now();
+      return refuseRefresh(cmd);
+    };
     // The hold of the endpoint after the connection ends as unauthorized is 1000 ms here, so it is seen while it lasts.
     const pool: RpcPool = createPool(c, {
       endpoints: (): string[] => [edgeA.url],
@@ -785,9 +793,12 @@ describe('RpcPool tokenFrom', () => {
     // The opener and the call behind it wait for the connection's token; the 103 refuses the renewal of the refused token.
     const opener: Promise<any> = outcome(pool.rpc('work', bytes({ n: 'a' }), { timeout: 4000 }));
     const behind: Promise<any> = outcome(pool.rpc('work', bytes({ n: 'b' }), { timeout: 4000 }));
-    // The source is spent: both fail as refused, at once, and neither is written.
+    // The source is spent: both fail as refused, at once, and neither is written. The connection first waits its reconnect
+    // delay of 1000 ms after the 109 refusal, so the bound runs from the 103 refusal, which settles both (R5.7, row 2.2).
     expect(await opener).toMatchObject({ code: errorCodes.clientDisconnected, message: 'token refused' });
     expect(await behind).toMatchObject({ code: errorCodes.clientDisconnected, message: 'token refused' });
+    expect(refusedAt).toBeGreaterThan(0);
+    expect(Date.now() - refusedAt).toBeLessThan(500);
     expect(refreshesOf(main)).toHaveLength(1);
     // The connection ends as unauthorized, once, and its endpoint is held.
     await eventually((): boolean => errors.some((ctx: any): boolean => ctx.error?.code === disconnectedCodes.unauthorized), 8000);
@@ -797,17 +808,25 @@ describe('RpcPool tokenFrom', () => {
     expect(callsOf(edgeA)).toHaveLength(0);
     // A call behind the spent source is refused at once, with no open and no token request.
     const connectsBefore: number = connectsOf(edgeA).length;
+    const startedLater: number = Date.now();
     const later: any = await outcome(pool.rpc('work', bytes({ n: 'c' }), { timeout: 4000 }));
+    // The refused call settles within 500 ms of the call (R5.7, row 2.2).
+    expect(Date.now() - startedLater).toBeLessThan(500);
     expect(later).toMatchObject({ code: errorCodes.clientDisconnected, message: 'token refused' });
     expect(connectsOf(edgeA)).toHaveLength(connectsBefore);
     expect(refreshesOf(main)).toHaveLength(1);
-    // Second phase: the main client reconnects with a token the fleet accepts. The connect clears the spent mark, and the
-    // next call opens a connection after the endpoint's hold, and is written.
+    // Second phase: the main client reconnects with a token the fleet accepts. The connect clears the spent mark. The call
+    // waits until the endpoint's hold has ended (R5.7), then opens a connection and is written.
     refusedToken = 'none';
     const mainConnects: number = connectsOf(main).length;
     closeSocket(main, 3000);
     await eventually((): boolean => connectsOf(main).length > mainConnects && c.state === State.Connected, 8000);
+    await eventually((): boolean => holdOf() === null, 8000, 'the endpoint hold ends');
+    const edgeConnects: number = connectsOf(edgeA).length;
     const next: RpcResult = await pool.rpc('work', bytes({ n: 'd' }), { timeout: 4000 });
+    expect(connectsOf(edgeA)).toHaveLength(edgeConnects + 1);
+    // D is the only call the fleet has received: A, B and C were never written.
+    expect(callsOf(edgeA)).toHaveLength(1);
     expect(fromBytes(next.data)).toEqual({ n: 'd' });
     expect(refreshesOf(main)).toHaveLength(1);
   });
@@ -1065,15 +1084,21 @@ describe('RpcPool tokenFrom', () => {
     // has no getter, so the refusal spends the source (3.24): the lost call and the call behind it fail as refused, and the
     // lost call is written once in total.
     refusedToken = 'static-token';
+    const startedDrop: number = Date.now();
     closeSocket(edgeA, 3000);
     expect(await inFlight).toMatchObject({ code: errorCodes.clientDisconnected, message: 'token refused' });
     expect(await behind).toMatchObject({ code: errorCodes.clientDisconnected, message: 'token refused' });
+    // The two calls fail as refused within 500 ms of the drop, which is the event that spends the source (R5.7, row 2.5).
+    expect(Date.now() - startedDrop).toBeLessThan(500);
     await eventually((): boolean => errors.some((ctx: any): boolean => ctx.error?.code === disconnectedCodes.unauthorized), 8000);
     expect(errors.filter((ctx: any): boolean => ctx.error?.code === disconnectedCodes.unauthorized)).toHaveLength(1);
     expect(refreshesOf(main)).toHaveLength(0);
     // No connection opens after the refused one, and the call after it fails as refused at once, with no getter called.
+    // It settles within 500 ms of the call (R5.7, row 2.2).
     const connectsBefore: number = connectsOf(edgeA).length;
+    const startedLater: number = Date.now();
     expect(await outcome(pool.rpc('work', bytes({ n: 3 }), { timeout: 4000 }))).toMatchObject({ code: errorCodes.clientDisconnected, message: 'token refused' });
+    expect(Date.now() - startedLater).toBeLessThan(500);
     expect(connectsOf(edgeA)).toHaveLength(connectsBefore);
     expect(callsOf(edgeA)).toHaveLength(1);
   });
@@ -1278,7 +1303,10 @@ describe('RpcPool tokenFrom', () => {
     expect(await ended).toBe(disconnectedCodes.unauthorized);
     // The pool is made after the logout: its source has not heard of it, so the call reads the main client as disconnected.
     const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url] });
+    // The call fails at once: it settles within 500 ms of the call (R5.7, row 2.1 row 3).
+    const startedFirst: number = Date.now();
     expect(await outcome(pool.rpc('work', bytes({ n: 1 })))).toMatchObject({ code: errorCodes.clientDisconnected, message: 'client disconnected' });
+    expect(Date.now() - startedFirst).toBeLessThan(500);
     expect(connectsOf(edgeA)).toHaveLength(0);
     expect(pool.stats()).toEqual({ connections: 0, inflight: 0, queued: 0, redirects: 0 });
     holdMainConnect = true;
@@ -1362,10 +1390,13 @@ describe('RpcPool tokenFrom', () => {
     expect(errors.filter((ctx: any): boolean => ctx.endpoint === edgeA.url)).toHaveLength(1);
     // D on key a finds no live connection of its generation, and fails as refused at once, with no open.
     const connectsBefore: number = connectsOf(edgeA).length;
+    // D settles within 500 ms of the call (R5.7, row 2.2).
+    const startedD: number = Date.now();
     expect(await outcome(pool.rpc('work', bytes({ n: 'd' }), { endpointKey: 'a', timeout: 4000 }))).toMatchObject({
       code: errorCodes.clientDisconnected,
       message: 'token refused',
     });
+    expect(Date.now() - startedD).toBeLessThan(500);
     expect(connectsOf(edgeA)).toHaveLength(connectsBefore);
     expect(connectsOf(edgeB)).toHaveLength(1);
   });
