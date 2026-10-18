@@ -199,6 +199,54 @@ describe('fetchRedirect', () => {
     expect(data).toHaveLength(0);
   });
 
+  test('aRuntimeReportingARedirectIsRefusedWhateverItsUrl', async (): Promise<void> => {
+    // Ruling R4.2: redirected true is refused before the body is read, with an empty URL or the requested one.
+    const requested: string = 'https://files.example.test/a';
+    for (const reportedUrl of ['', requested]) {
+      let read: number = 0;
+      let cancelled: number = 0;
+      const response: any = {
+        ok: true,
+        status: 200,
+        url: reportedUrl,
+        redirected: true,
+        headers: new Map<string, string>(),
+        body: {
+          getReader: (): any => {
+            read++;
+            return {};
+          },
+          cancel: async (): Promise<void> => {
+            cancelled++;
+          },
+        },
+        arrayBuffer: async (): Promise<ArrayBuffer> => {
+          read++;
+          return new ArrayBuffer(0);
+        },
+      };
+      const failed: any = await fetchRedirect(async (): Promise<any> => response, 'wss://edge.example.test', { url: requested }, new AbortController().signal)
+        .then((): string => 'resolved', (error: any): any => error);
+      expect(failed.code).toBe(errorCodes.redirectFailed);
+      expect(read).toBe(0);
+      expect(cancelled).toBe(1);
+    }
+  });
+
+  test('aRuntimeReportingNoRedirectAndNoUrlIsReadAsBefore', async (): Promise<void> => {
+    const response: any = {
+      ok: true,
+      status: 200,
+      url: '',
+      redirected: false,
+      headers: new Map<string, string>(),
+      body: null,
+      arrayBuffer: async (): Promise<ArrayBuffer> => new ArrayBuffer(0),
+    };
+    const data: Uint8Array = await fetchRedirect(async (): Promise<any> => response, 'wss://edge.example.test', { url: 'https://files.example.test/a' }, new AbortController().signal);
+    expect(data).toHaveLength(0);
+  });
+
   test('redirectBodyWithoutAStreamIsRefused', async (): Promise<void> => {
     let buffered: number = 0;
     const arrayBuffer: () => Promise<ArrayBuffer> = async (): Promise<ArrayBuffer> => {

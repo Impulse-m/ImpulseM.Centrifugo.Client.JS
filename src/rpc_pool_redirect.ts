@@ -130,11 +130,16 @@ export async function fetchRedirect(
     discardBody(response);
     throw redirectFailure('redirect fetch status ' + response.status);
   }
-  // A runtime which followed a redirect anyway (it ignores 'error' or 'manual') is refused before its body is read. The
-  // URL of a response has no fragment, so the fragment of the requested URL is left out of the comparison. A runtime that
-  // reports no response URL (an empty one) is accepted: a compliant runtime follows no hop under 'error' or 'manual', and
+  // A runtime which followed a redirect anyway (it ignores 'error' or 'manual') is refused before its body is read. A
+  // runtime that reports that it followed one (redirected true) is refused whatever its URL holds. The URL of a response
+  // has no fragment, so the fragment of the requested URL is left out of the comparison. A runtime that reports neither
+  // (an empty URL and no redirected flag) is accepted: a compliant runtime follows no hop under 'error' or 'manual', and
   // the check is for the runtimes that report a followed hop (ruling R4.2).
   const requested: string = url.split('#')[0];
+  if (response.redirected === true) {
+    discardBody(response);
+    throw redirectFailure('redirect followed by the runtime');
+  }
   if (typeof response.url === 'string' && response.url !== '' && response.url !== requested) {
     discardBody(response);
     throw redirectFailure('redirect followed by the runtime');
