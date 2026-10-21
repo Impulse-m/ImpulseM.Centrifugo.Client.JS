@@ -1171,7 +1171,8 @@ describe('RpcPool', () => {
       expect(await until((): boolean => fetchFunction.mock.calls.length === 1)).toBe(true);
       controller.abort();
       await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
-      expect(pool.stats().redirects).toBe(0);
+      // The fetch slot is freed when the aborted fetch rejects, which follows the settlement of the call.
+      expect(await until((): boolean => pool.stats().redirects === 0)).toBe(true);
     });
 
     test('close rejects a call whose redirect fetch is in progress with connectionClosed, as the server served it', async (): Promise<void> => {
@@ -1197,7 +1198,8 @@ describe('RpcPool', () => {
         redirect: (): any => ({ url: 'https://cdn.example/never' }),
       });
       await expect(pool.rpc('work', bytes({ n: 1 }), { timeout: 150 })).rejects.toMatchObject({ code: errorCodes.timeout });
-      expect(pool.stats().redirects).toBe(0);
+      // The fetch slot is freed when the expired fetch rejects, which follows the settlement of the call.
+      expect(await until((): boolean => pool.stats().redirects === 0)).toBe(true);
     });
   });
 
