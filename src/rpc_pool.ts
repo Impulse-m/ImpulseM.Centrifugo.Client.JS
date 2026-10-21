@@ -470,7 +470,7 @@ export class RpcPool {
   }
 
 
-  // Routes a call to its key (table 2.1, rows 7 to 9). A key which is resolved admits or places the call at once. A key
+  // Routes a call to its key. A key which is resolved admits or places the call at once. A key
   // being resolved lets a fresh call wait behind the bound, and the call is judged again when the key resolves. The first
   // call of an unresolved key starts its resolution and is admitted at any bound.
   private route(call: PendingCall, fresh: boolean): void {
@@ -521,8 +521,8 @@ export class RpcPool {
   }
 
 
-  // Admits a call of a resolved key (table 2.1 rows 7 and 8, and 2.3). A call with an empty line is placed at once; one
-  // that waits joins the line under the bound. A resend is checked before it joins a line (2.2).
+  // Admits a call of a resolved key. A call with an empty line is placed at once; one that waits joins the line under
+  // the bound. A resend is checked before it joins a line, so one that can never be placed does not wait behind others.
   private admit(call: PendingCall, fresh: boolean, endpoints: RpcPoolEndpoint[]): void {
     const front: boolean = call.rerouted;
     call.rerouted = false;
@@ -620,8 +620,9 @@ export class RpcPool {
   }
 
 
-  // The entry check of a call against the main client (table 2.2, rows ME, MD, b ≠ G and, while connected, the refused
-  // row of a spent source): a call that can never be placed settles now, with that row's error. False when it settled.
+  // The entry check of a call against the main client: when the main client has ended or is disconnected, the call is
+  // bound to another identity, or the token source is spent for its connection, a call that can never be placed settles
+  // now, with that case's error. False when it settled.
   private entryOk(call: PendingCall, endpoints: RpcPoolEndpoint[]): boolean {
     const source: TokenSource | null = this.source;
     if (source === null) {
@@ -661,7 +662,7 @@ export class RpcPool {
   }
 
 
-  // Places a call of a key whose line is empty or whose line is being drained (table 2.2). A placed call takes a slot of a
+  // Places a call of a key whose line is empty or whose line is being drained. A placed call takes a slot of a
   // live connection with room; an open connection is started for the call when its endpoint may open, and the call waits
   // for it. The call is bound to the identity of the main client at its first placement that finds it connected.
   private place(call: PendingCall, endpoints: RpcPoolEndpoint[]): Placement {
@@ -747,7 +748,7 @@ export class RpcPool {
   }
 
 
-  // Opens a connection to an endpoint (table 2.4, open). The connection joins its endpoint before connect() is called, so
+  // Opens a connection to an endpoint. The connection joins its endpoint before connect() is called, so
   // a terminal disconnect during connect() is handled as any other. Its connect is in flight until it connects.
   private open(endpoint: RpcPoolEndpoint): void {
     const source: TokenSource | null = this.source;
@@ -804,7 +805,7 @@ export class RpcPool {
   }
 
 
-  // The token the connection presented at its last connect attempt that was not abandoned (R3.3). The client clears its
+  // The token the connection presented at its last connect attempt that the client did not abandon. The client clears its
   // token on a state-invalidated disconnect, before the reconnect that asks for a new one, so an empty token of the client
   // keeps the one presented before. A connect that carries a token reads it here, at the request or at its verified connect.
   private presentedOf(conn: PoolConnection): string {
@@ -816,10 +817,10 @@ export class RpcPool {
   }
 
 
-  // The token of a connection from the source (table 2.4, token request and token delivered). A request of a connection
-  // stamped with an earlier generation retires it, and is answered unauthorized without asking the source. A token
-  // delivered of another generation than the stamp retires the connection too. The request names the token the connection
-  // presented last (R3.3): a token answered for an attempt the client dropped is not one it presented.
+  // The token of a connection from the source. A request of a connection stamped with an earlier generation retires it,
+  // and is answered unauthorized without asking the source. A token delivered of another generation than the stamp
+  // retires the connection too. The request names the token the connection presented last: a token answered for an
+  // attempt the client dropped is not one it presented.
   private tokenOf(conn: PoolConnection, source: TokenSource): Promise<string> {
     if (conn.generation !== null && conn.generation !== source.generation()) {
       this.retire(conn);
@@ -848,7 +849,7 @@ export class RpcPool {
   }
 
 
-  // The connection connected (table 2.4, connected). With tokenFrom its identity is verified against the generation and the
+  // The connection connected. With tokenFrom its identity is verified against the generation and the
   // pair the source recorded: a connection which is not of the current generation is retired silently, and one whose
   // server confirmed another identity is retired and reported, with its token marked unusable.
   private connected(conn: PoolConnection, ctx: any): void {
@@ -865,7 +866,7 @@ export class RpcPool {
       this.retire(conn);
       return;
     }
-    // The connect is verified: the token it carried is the one it presented (R3.3), and it is the one found unusable below.
+    // The connect is verified: the token it carried is the one it presented, and it is the one found unusable below.
     const presented: string = this.presentedOf(conn);
     if (!source.identityMatches(ctx.user, ctx.authClass)) {
       this.retire(conn);
@@ -932,9 +933,8 @@ export class RpcPool {
   }
 
 
-  // A connection ended for good (table 2.4, disconnected for good). Retired and disconnectCalled ends report nothing;
-  // a message size close reports and holds nothing; any other end reports and holds the endpoint's opens. Its calls
-  // go by the outcome rows of 2.6.
+  // A connection ended for good. Retired and disconnectCalled ends report nothing; a message size close reports and holds
+  // nothing; any other end reports and holds the endpoint's opens. Its calls go by the outcome rules of a lost call.
   private lost(conn: PoolConnection, ctx: any): void {
     conn.connecting = false;
     conn.live = false;
@@ -955,7 +955,7 @@ export class RpcPool {
         this.holdEndpoint(endpoint);
       }
     }
-    // The end of a retired connection drains nothing: its endpoint took it out already (2.4, after an end).
+    // The end of a retired connection drains nothing: its endpoint took it out already.
     if (!conn.retired) {
       this.scheduleEndpoint(endpoint);
     }
@@ -1013,7 +1013,7 @@ export class RpcPool {
   }
 
 
-  // A slot became free (table 2.8): a retired connection left without calls closes now, a stale one is retired, and a
+  // A slot became free: a retired connection left without calls closes now, a stale one is retired, and a
   // connection left without calls is marked as used now. The keys of its endpoint which wait take the slot.
   private released(conn: PoolConnection): void {
     if (conn.retired) {
@@ -1068,7 +1068,7 @@ export class RpcPool {
   }
 
 
-  // The error of a call on a connection (table 2.6). A connection the server closed for message size, one closed as
+  // The error of a call on a connection. A connection the server closed for message size, one closed as
   // unauthorized, one retired or stale: the call settles without a resend. A lost connection is retried; a server error
   // may move the call by reroute, and the later signal is retried as the main client does.
   private failed(call: PendingCall, conn: PoolConnection, error: any): void {
@@ -1086,7 +1086,8 @@ export class RpcPool {
       return;
     }
     if (typeof code === 'number' && code >= serverErrorFloor) {
-      // The move is checked before the later signal: a reroute that maps the error wins over it (table 2.6, ruling R4.1).
+      // The move is checked before the later signal: a reroute that maps the error wins over it, so the call goes to the
+      // new key at once.
       if (call.resends < this.retries && call.deadline > Date.now() && this.rerouteHook !== undefined) {
         let key: string | undefined;
         try {

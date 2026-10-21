@@ -13,7 +13,7 @@ export interface SourcedToken {
 }
 
 /**
- * The state of the main client as the pools read it (table 1.1): connected with its identity confirmed, connecting, or
+ * The state of the main client as the pools read it: connected with its identity confirmed, connecting, or
  * disconnected. A session that ended as unauthorized reads as ended, until the next connect attempt.
  */
 export type MainState = 'connected' | 'connecting' | 'disconnected' | 'ended';
@@ -54,7 +54,7 @@ export class TokenSource {
   private readonly pools: Set<MainListener> = new Set<MainListener>();
   // The requests waiting for a token, one per requester: a new request of a requester replaces its waiting one.
   private readonly waiting: Map<object, Waiter> = new Map<object, Waiter>();
-  // The token the main client confirmed last, null before its first confirmation (table 1.2, c).
+  // The token the main client confirmed last, null before its first confirmation.
   private confirmed: string | null = null;
   // The token found unusable: a pool connection connected with it, and its server confirmed another identity (u).
   private unusableToken: string | null = null;
@@ -237,7 +237,7 @@ export class TokenSource {
   }
 
 
-  // Answers one waiting request by the rows of table 2.5, and starts the renewal it needs. A request left waiting is
+  // Answers one waiting request, and starts the renewal it needs. A request left waiting is
   // answered by a later event of the main client.
   private step(requester: object, waiter: Waiter): void {
     const state: MainState = this.mainState();

@@ -134,7 +134,7 @@ export async function fetchRedirect(
   // runtime that reports that it followed one (redirected true) is refused whatever its URL holds. The URL of a response
   // has no fragment, so the fragment of the requested URL is left out of the comparison. A runtime that reports neither
   // (an empty URL and no redirected flag) is accepted: a compliant runtime follows no hop under 'error' or 'manual', and
-  // the check is for the runtimes that report a followed hop (ruling R4.2).
+  // the check is for the runtimes that report a followed hop.
   const requested: string = url.split('#')[0];
   if (response.redirected === true) {
     discardBody(response);
