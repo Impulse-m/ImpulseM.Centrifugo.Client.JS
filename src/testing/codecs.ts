@@ -120,7 +120,10 @@ export async function connectClient(c: Centrifuge): Promise<void> {
  * waiting, so the caller asserts it: expect(await until(...)).toBe(true).
  */
 export async function until(condition: () => boolean): Promise<boolean> {
-  for (let i: number = 0; i < 10000 && !condition(); i++) {
+  // The budget is real time: a fixed count of immediates lasts about 50 ms, less than a reconnect or a round trip under load.
+  // The count is a cap for a clock that does not move, and a window of immediates arms no timer.
+  const started: number = Date.now();
+  for (let i: number = 0; i < 1000000 && !condition() && Date.now() - started < 5000; i++) {
     await new Promise<void>((resolve: () => void): void => {
       setImmediate(resolve);
     });
