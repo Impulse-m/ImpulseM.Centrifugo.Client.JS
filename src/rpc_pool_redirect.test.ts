@@ -3,7 +3,7 @@ import { errorCodes } from './codes';
 import { RpcPool } from './rpc_pool';
 import { fetchRedirect, RedirectGate } from './rpc_pool_redirect';
 import { RpcResult } from './types';
-import { WaitableFakeServer, rpcOptionsWireFlag } from './testing/codecs';
+import { WaitableFakeServer, rpcOptionsWireFlag, within } from './testing/codecs';
 import { holdFetchUntilAborted } from './testing/fetch';
 
 describe('RedirectGate', () => {
@@ -360,18 +360,3 @@ describe('RpcPool redirect waiters', () => {
     }
   });
 });
-
-// Polls a condition over real time, for a state which waits for the round trips of the fake server; false when the
-// budget runs out first.
-async function within(condition: () => boolean, budgetMs: number): Promise<boolean> {
-  const started: number = Date.now();
-  while (!condition()) {
-    if (Date.now() - started > budgetMs) {
-      return false;
-    }
-    await new Promise<void>((resolve: () => void): void => {
-      setTimeout(resolve, 10);
-    });
-  }
-  return true;
-}

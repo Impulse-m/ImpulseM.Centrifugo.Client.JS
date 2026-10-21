@@ -114,6 +114,11 @@ export async function connectClient(c: Centrifuge): Promise<void> {
   await connected;
 }
 
+// The real-time budget of until(), in milliseconds.
+const untilBudgetMs: number = 5000;
+// The turn cap of until(): under a fake Date the turn cap ends the wait, since the clock does not move.
+const untilTurnCap: number = 1000000;
+
 /**
  * Lets the socket deliver what it has, until the condition holds. Timers are not advanced here: a test
  * that runs on a fake clock moves it itself. Resolves with whether the condition holds when it stops
@@ -123,12 +128,42 @@ export async function until(condition: () => boolean): Promise<boolean> {
   // The budget is real time: a fixed count of immediates lasts about 50 ms, less than a reconnect or a round trip under load.
   // The count is a cap for a clock that does not move, and a window of immediates arms no timer.
   const started: number = Date.now();
-  for (let i: number = 0; i < 1000000 && !condition() && Date.now() - started < 5000; i++) {
+  for (let i: number = 0; i < untilTurnCap && !condition() && Date.now() - started < untilBudgetMs; i++) {
     await new Promise<void>((resolve: () => void): void => {
       setImmediate(resolve);
     });
   }
   return condition();
+}
+
+/** Lets the given number of immediates run. A window of immediates arms no timer, so a fake clock does not move in it. */
+export async function turns(count: number): Promise<void> {
+  for (let turn: number = 0; turn < count; turn++) {
+    await new Promise<void>((resolve: () => void): void => {
+      setImmediate(resolve);
+    });
+  }
+}
+
+/** Polls a condition over real time, for a state which waits for the round trips of the fake server; false when the budget runs out first. */
+export async function within(condition: () => boolean, budgetMs: number): Promise<boolean> {
+  const started: number = Date.now();
+  while (!condition()) {
+    if (Date.now() - started > budgetMs) {
+      return false;
+    }
+    await new Promise<void>((resolve: () => void): void => {
+      setTimeout(resolve, 10);
+    });
+  }
+  return true;
+}
+
+/** Resolves after a real-time pause. */
+export function pause(ms: number): Promise<void> {
+  return new Promise<void>((resolve: () => void): void => {
+    setTimeout(resolve, ms);
+  });
 }
 
 /** Disconnects the clients and empties the list. */

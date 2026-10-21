@@ -6,7 +6,7 @@ import { tokenSourceOf } from './token_source';
 import { State, TokenExchange, TokenExchangeContext, TokenExchangeResult, RpcResult } from './types';
 import { UnauthorizedError } from './unauthorized_error';
 import {
-  WaitableFakeServer, bytes, connectClient, disconnectAll, fromBytes, holdReply, rpcOptionsWireFlag, until,
+  WaitableFakeServer, bytes, connectClient, disconnectAll, fromBytes, holdReply, pause, rpcOptionsWireFlag, turns, until,
 } from './testing/codecs';
 
 // The RPC pool with tokenFrom: the pool's connections take the token of a main client, which runs a token exchange
@@ -74,13 +74,6 @@ async function eventually(condition: () => boolean, budgetMs: number = 6000, lab
       setTimeout(resolve, 10);
     });
   }
-}
-
-// Resolves after a real-time pause.
-function pause(ms: number): Promise<void> {
-  return new Promise<void>((resolve: () => void): void => {
-    setTimeout(resolve, ms);
-  });
 }
 
 // The number of listeners of an event of a client: the emitter's count, which the typed client does not declare.
@@ -363,11 +356,7 @@ describe('RpcPool tokenFrom', () => {
     const timers: jest.SpyInstance = jest.spyOn(global, 'setTimeout');
     const pending: Promise<RpcResult> = pool.rpc('work', bytes({ n: 1 }));
     // The window runs on immediates, which arm no timer of their own: 10000 turns, well inside the call's deadline.
-    for (let turn: number = 0; turn < 10000; turn++) {
-      await new Promise<void>((resolve: () => void): void => {
-        setImmediate(resolve);
-      });
-    }
+    await turns(10000);
     expect(connectsOf(edgeA)).toHaveLength(0);
     expect(pool.stats().queued).toBe(1);
     // The only timer armed in the window is the call's deadline.

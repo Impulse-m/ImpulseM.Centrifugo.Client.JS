@@ -7,23 +7,8 @@ import { Centrifuge as ProtobufCentrifuge } from './protobuf';
 import { RpcResult, State } from './types';
 import { holdFetchUntilAborted } from './testing/fetch';
 import {
-  WaitableFakeServer, bytes, fromBytes, holdReply, rpcOptionsWireFlag, until,
+  WaitableFakeServer, bytes, fromBytes, holdReply, rpcOptionsWireFlag, until, within,
 } from './testing/codecs';
-
-// Polls a condition over real time, for a state which waits for the round trips of the fake server; false when the
-// budget runs out first.
-async function within(condition: () => boolean, budgetMs: number): Promise<boolean> {
-  const started: number = Date.now();
-  while (!condition()) {
-    if (Date.now() - started > budgetMs) {
-      return false;
-    }
-    await new Promise<void>((resolve: () => void): void => {
-      setTimeout(resolve, 10);
-    });
-  }
-  return true;
-}
 
 // The RPC pool against fake servers: the scheduling of connections and calls, the routing by endpoint key and
 // affinity, the server's moves (reroute, redirect), the retries, the signal and the close. The pool speaks protobuf,
