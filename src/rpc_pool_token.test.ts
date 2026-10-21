@@ -362,8 +362,12 @@ describe('RpcPool tokenFrom', () => {
     holdCalls(edgeA, held);
     const timers: jest.SpyInstance = jest.spyOn(global, 'setTimeout');
     const pending: Promise<RpcResult> = pool.rpc('work', bytes({ n: 1 }));
-    // The window runs on immediates, which arm no timer of their own.
-    await until((): boolean => false);
+    // The window runs on immediates, which arm no timer of their own: 10000 turns, well inside the call's deadline.
+    for (let turn: number = 0; turn < 10000; turn++) {
+      await new Promise<void>((resolve: () => void): void => {
+        setImmediate(resolve);
+      });
+    }
     expect(connectsOf(edgeA)).toHaveLength(0);
     expect(pool.stats().queued).toBe(1);
     // The only timer armed in the window is the call's deadline.
@@ -699,10 +703,18 @@ describe('RpcPool tokenFrom', () => {
     pool.on('error', (ctx: any): void => {
       errors.push(ctx);
     });
+    // The calls are held on the edges: an answered call would free its connection, and the second call could then go to
+    // the first connection before the second one is live.
+    const heldA: any[] = [];
+    const heldB: any[] = [];
+    holdCalls(edgeA, heldA);
+    holdCalls(edgeB, heldB);
     const first: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
     const second: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 2 })));
-    await eventually((): boolean => callsOf(edgeA).length === 1 && callsOf(edgeB).length === 1, 8000, 'phase one: both connections carry their call after the renewal');
+    await eventually((): boolean => heldA.length === 1 && heldB.length === 1, 8000, 'phase one: both connections carry their call after the renewal');
     expect(exchanges).toBe(2);
+    answer(edgeA, heldA[0]);
+    answer(edgeB, heldB[0]);
     expect(fromBytes((await first).data)).toEqual({ n: 1 });
     expect(fromBytes((await second).data)).toEqual({ n: 2 });
     // Phase two: the renewed token is refused too, and the issuer gives it back. The renewal it asks for brings the refused
