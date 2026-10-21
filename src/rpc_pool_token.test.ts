@@ -439,8 +439,7 @@ describe('RpcPool tokenFrom', () => {
     const cCall: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 'c' })));
     answer(edgeA, held[0]);
     await a;
-    await pause(50);
-    expect(callsOf(edgeA)).toHaveLength(2);
+    expect(await until((): boolean => callsOf(edgeA).length === 2)).toBe(true);
     holdMainConnect = false;
     main.send({ id: heldMainConnect.id, connect: main.connectResult });
     expect(await until((): boolean => held.length === 3)).toBe(true);
@@ -507,6 +506,7 @@ describe('RpcPool tokenFrom', () => {
     expect(await until((): boolean => held.length === 1)).toBe(true);
     holdMainConnect = true;
     closeSocket(main, 3000);
+    expect(await until((): boolean => c.state !== State.Connected)).toBe(true);
     closeSocket(edgeA, 3000);
     // The pool connection reconnects with its stored token while the main client waits for its connect.
     expect(await until((): boolean => held.length === 2)).toBe(true);
@@ -542,7 +542,7 @@ describe('RpcPool tokenFrom', () => {
     // The fleet closes the pool connection for good, with a code which is not unauthorized.
     edgeA.onCommand = (cmd: any): any => (cmd.connect !== undefined ? holdReply : echo(cmd));
     edgeA.send({ push: { disconnect: { code: 3500, reason: 'terminal' } } });
-    await pause(100);
+    expect(await until((): boolean => pool.stats().queued === 1)).toBe(true);
     expect(connectsOf(edgeA).length).toBe(connectsBefore);
     // While the main client connects, A waits in its line: queued, not settled, and no socket opened.
     expect(pool.stats().queued).toBe(1);
@@ -605,7 +605,6 @@ describe('RpcPool tokenFrom', () => {
     await eventually((): boolean => heldEdgeConnects.length === 1, 6000, 'maxQueued zero: the opener connect reaches the edge');
     holdEdgeConnects = false;
     releaseEdgeConnect(edgeA, heldEdgeConnects[0]);
-    await pause(200);
     await eventually((): boolean => held.length === 1, 6000, 'maxQueued zero: A is written once the connect is released');
     expect(await outcome(pool.rpc('work', bytes({ n: 'b2' })))).toMatchObject({ code: errorCodes.limitExceeded });
     answer(edgeA, held[0]);
@@ -629,8 +628,7 @@ describe('RpcPool tokenFrom', () => {
     expect(pool.stats().queued).toBe(2);
     holdEdgeConnects = true;
     closeSocket(edgeA, 3000);
-    await pause(100);
-    expect(pool.stats().queued).toBe(3);
+    expect(await until((): boolean => pool.stats().queued === 3)).toBe(true);
     await eventually((): boolean => heldEdgeConnects.length === 1);
     holdEdgeConnects = false;
     releaseEdgeConnect(edgeA, heldEdgeConnects[0]);
@@ -929,6 +927,7 @@ describe('RpcPool tokenFrom', () => {
     holdMainConnect = true;
     refusedToken = 'access-1';
     closeSocket(main, 3000);
+    expect(await until((): boolean => c.state !== State.Connected)).toBe(true);
     closeSocket(edgeA, 3000);
     const source: any = tokenSourceOf(c);
     expect(await until((): boolean => heldMainConnect !== null && source.waiting.size === 1)).toBe(true);
@@ -978,6 +977,9 @@ describe('RpcPool tokenFrom', () => {
     refusedToken = 'access-1';
     holdMainConnect = true;
     closeSocket(main, 3000);
+    // The pool connection drops only once the main client has left the connected state, so its request meets the main
+    // client as it connects, not while the main client still counts as connected.
+    expect(await until((): boolean => c.state !== State.Connected)).toBe(true);
     closeSocket(edgeA, 3000);
     const source: any = tokenSourceOf(c);
     expect(await until((): boolean => source.waiting.size === 1)).toBe(true);
@@ -1079,9 +1081,8 @@ describe('RpcPool tokenFrom', () => {
     mainUser = 'bob';
     await c.refresh('bob-token');
     closeSocket(edgeA, 3000);
-    await pause(200);
+    expect(await until((): boolean => pool.stats().connections === 0)).toBe(true);
     expect(connectsOf(edgeA)).toHaveLength(1);
-    expect(pool.stats().connections).toBe(0);
   });
 
   test('staticTokenRefusalFailsWithoutAGetter', async (): Promise<void> => {
@@ -1131,11 +1132,16 @@ describe('RpcPool tokenFrom', () => {
     const inFlight: Promise<any> = outcome(pool.rpc('work', bytes({ n: 'in-flight' })));
     const other: Promise<any> = outcome(pool.rpc('work', bytes({ n: 'other' })));
     expect(await until((): boolean => heldA.length === 1 && heldB.length === 1)).toBe(true);
+    // Which endpoint goes live first is not fixed, so the call written to edge B is whichever of the two was placed there.
+    // That call is lost when edge B drops and waits for a connection; the call on edge A stays in flight.
+    const onB: Promise<any> = fromBytes(heldB[0].rpc.data).n === 'in-flight' ? inFlight : other;
+    const onA: Promise<any> = onB === inFlight ? other : inFlight;
     const queued: Promise<any> = outcome(pool.rpc('work', bytes({ n: 'queued' })));
     // The main client's transport goes away, and the connection of edge B loses its token: its request waits for the connect.
     refusedToken = 'access-1';
     holdMainConnect = true;
     closeSocket(main, 3000);
+    expect(await until((): boolean => c.state !== State.Connected)).toBe(true);
     closeSocket(edgeB, 3000);
     const source: any = tokenSourceOf(c);
     await eventually((): boolean => source.waiting.size === 1);
@@ -1145,9 +1151,9 @@ describe('RpcPool tokenFrom', () => {
     expect(rejections).toHaveLength(1);
     expect(rejections[0]).toBeInstanceOf(UnauthorizedError);
     expect(await queued).toMatchObject({ code: errorCodes.cancelled });
-    expect(await inFlight).toMatchObject({ code: errorCodes.connectionClosed });
+    expect(await onA).toMatchObject({ code: errorCodes.connectionClosed });
     // The call on the edge B connection was lost when its connection dropped, and waits for a connection: close cancels it.
-    expect(await other).toMatchObject({ code: errorCodes.cancelled });
+    expect(await onB).toMatchObject({ code: errorCodes.cancelled });
     expect(source.waiting.size).toBe(0);
     expect(source.pools.size).toBe(0);
   });
@@ -1227,7 +1233,8 @@ describe('RpcPool tokenFrom', () => {
     closeSocket(edgeA, 3000);
     expect(await until((): boolean => rejections.length === 1)).toBe(true);
     expect(rejections[0]).toBeInstanceOf(UnauthorizedError);
-    await pause(100);
+    // The replacing request is registered in the same step that rejects the replaced one: one waiter remains.
+    expect(source.waiting.size).toBe(1);
     main.send({ id: renewalHeld.id, refresh: { expires: true, ttl: mainTtl, user: 'alice' } });
     refusedToken = '';
     expect(await until((): boolean => held.length === 2)).toBe(true);
