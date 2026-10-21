@@ -38,8 +38,7 @@
   "exclude": [
     "node_modules",
     "**/*.test.ts",
-    "src/testing/codecs.ts",
-    "src/testing/fetch.ts",
+    "src/testing/**",
     "src/browser.protobuf.ts",
     "src/browser.ts",
   ]
