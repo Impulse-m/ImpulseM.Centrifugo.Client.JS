@@ -1089,7 +1089,7 @@ describe('RpcPool tokenFrom', () => {
     expect(await until((): boolean => held.length === 1)).toBe(true);
     const behind: Promise<any> = outcome(pool.rpc('work', bytes({ n: 2 }), { timeout: 4000 }));
     // The fleet drops the connection with a reconnectable code and refuses the static token on the reconnect. The main client
-    // has no getter, so the refusal spends the source (3.24): the lost call and the call behind it fail as refused, and the
+    // has no getter, so the refusal spends the source: the lost call and the call behind it fail as refused, and the
     // lost call is written once in total.
     refusedToken = 'static-token';
     const startedDrop: number = Date.now();

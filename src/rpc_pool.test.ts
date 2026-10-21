@@ -7,7 +7,7 @@ import { Centrifuge as ProtobufCentrifuge } from './protobuf';
 import { RpcResult, State } from './types';
 import { holdFetchUntilAborted } from './testing/fetch';
 import {
-  WaitableFakeServer, bytes, fromBytes, holdReply, rpcOptionsWireFlag, until, within,
+  WaitableFakeServer, bytes, fromBytes, holdReply, pause, rpcOptionsWireFlag, until, within,
 } from './testing/codecs';
 
 // The RPC pool against fake servers: the scheduling of connections and calls, the routing by endpoint key and
@@ -23,7 +23,7 @@ function isConnect(cmd: any): boolean {
   return cmd.connect !== undefined;
 }
 
-// A response which reports the URL it was fetched from, as a runtime does when it follows no hop (I7).
+// A response which reports the URL it was fetched from, as a runtime does when it follows no hop.
 function responseAt(url: string, body: BodyInit | null, init: ResponseInit): Response {
   const response: Response = new Response(body, init);
   Object.defineProperty(response, 'url', { value: url });
@@ -36,12 +36,6 @@ function callsOf(server: WaitableFakeServer): any[] {
 
 function connectsOf(server: WaitableFakeServer): any[] {
   return server.received.filter(isConnect);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve: () => void): void => {
-    setTimeout(resolve, ms);
-  });
 }
 
 // Keeps a rejection a test does not await from failing the run.
@@ -217,7 +211,7 @@ describe('RpcPool', () => {
       // The release of key b places nothing of key a: its line keeps the calls waiting for the slot of key a.
       reply(serverB, heldB[0], { n: 5 });
       expect(fromBytes((await other).data)).toEqual({ n: 5 });
-      await sleep(50);
+      await pause(50);
       expect(heldA.length).toBe(1);
       expect(pool.stats().queued).toBe(2);
 
@@ -244,7 +238,7 @@ describe('RpcPool', () => {
       const pool: RpcPool = createPool((): string => server.url, { maxConnectionsPerEndpoint: 4, maxQueued: 8 });
       const calls: Promise<RpcResult>[] = [1, 2, 3, 4].map((n: number): Promise<RpcResult> => quiet(pool.rpc('work', bytes({ n: n }))));
       expect(await until((): boolean => connectCmd !== null)).toBe(true);
-      await sleep(100);
+      await pause(100);
       expect(connectsOf(server).length).toBe(1);
       expect(pool.stats().connections).toBe(1);
       // The opener waits for its connect in its line, so all four calls count in queued and none in flight.
@@ -264,7 +258,7 @@ describe('RpcPool', () => {
       const pool: RpcPool = createPool((): string => server.url, { idleTimeout: 100 });
       expect(fromBytes((await pool.rpc('work', bytes({ n: 1 }))).data)).toEqual({ n: 1 });
       expect(pool.stats().connections).toBe(1);
-      await sleep(250);
+      await pause(250);
       expect(pool.stats().connections).toBe(0);
       expect(fromBytes((await pool.rpc('work', bytes({ n: 2 }))).data)).toEqual({ n: 2 });
       expect(connectsOf(server).length).toBe(2);
@@ -309,7 +303,7 @@ describe('RpcPool', () => {
       const pool: RpcPool = createPool((): string => server.url, { idleTimeout: 2147483647 });
       expect(fromBytes((await pool.rpc('work', bytes({ n: 1 }))).data)).toEqual({ n: 1 });
       const timers: jest.SpyInstance = jest.spyOn(global, 'setTimeout');
-      await sleep(300);
+      await pause(300);
       // The sleep is one timer of its own; a check re-armed in a loop would add one per millisecond.
       expect(timers.mock.calls.length).toBeLessThanOrEqual(2);
       expect(pool.stats().connections).toBe(1);
@@ -321,7 +315,7 @@ describe('RpcPool', () => {
       server.onCommand = echo;
       const pool: RpcPool = createPool((): string => server.url, { idleTimeout: 0 });
       await pool.rpc('work', bytes({ n: 1 }));
-      await sleep(150);
+      await pause(150);
       expect(pool.stats().connections).toBe(1);
       expect(connectsOf(server).length).toBe(1);
     });
@@ -375,11 +369,11 @@ describe('RpcPool', () => {
       const pool: RpcPool = createPool((): string => server.url, { idleTimeout: 100 });
       for (let n: number = 0; n < 5; n++) {
         await pool.rpc('work', bytes({ n: n }));
-        await sleep(60);
+        await pause(60);
         expect(pool.stats().connections).toBe(1);
       }
       expect(connectsOf(server).length).toBe(1);
-      await sleep(250);
+      await pause(250);
       expect(pool.stats().connections).toBe(0);
     });
 
@@ -625,7 +619,7 @@ describe('RpcPool', () => {
       expect(await until((): boolean => pool.stats().inflight === 0 && callsOf(server).length === 1)).toBe(true);
       pool.close();
       await expect(call).rejects.toMatchObject({ code: errorCodes.cancelled });
-      await sleep(300);
+      await pause(300);
       expect(callsOf(server).length).toBe(1);
     });
 
@@ -831,7 +825,7 @@ describe('RpcPool', () => {
       const fetchFunction: jest.Mock = jest.fn(async (url: string): Promise<any> => {
         running++;
         peak = Math.max(peak, running);
-        await sleep(30);
+        await pause(30);
         running--;
         return responseAt(url, new Uint8Array([9]), { status: 200 });
       });
@@ -978,13 +972,13 @@ describe('RpcPool', () => {
         new AbortController().signal
       );
       await expect(over).rejects.toMatchObject({ code: errorCodes.redirectFailed });
-      const within: Uint8Array = await fetchRedirect(
+      const atLimit: Uint8Array = await fetchRedirect(
         jest.fn(async (url: string): Promise<any> => ({ ok: true, status: 200, url: url, headers: new Headers(), body: Readable.from(chunks) })) as any,
         'wss://edge.example/connection/websocket',
         { url: 'https://cdn.example/stream', maxBytes: 9 },
         new AbortController().signal
       );
-      expect(within.length).toBe(9);
+      expect(atLimit.length).toBe(9);
     });
 
     test('a declared length over maxBytes is refused before the body is read', async (): Promise<void> => {
@@ -1223,7 +1217,7 @@ describe('RpcPool', () => {
       const pool: RpcPool = createPool((): string => server.url);
       const pending: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
       expect(await within((): boolean => connectCmd !== null, 5000)).toBe(true);
-      await sleep(50);
+      await pause(50);
       expect(callsOf(server)).toHaveLength(0);
       expect(pool.stats()).toEqual({ connections: 1, inflight: 0, queued: 1, redirects: 0 });
       server.send({ id: connectCmd.id, connect: server.connectResult });
@@ -1322,7 +1316,7 @@ describe('RpcPool', () => {
       const first: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
       const second: any = await settledOf(pool.rpc('work', bytes({ n: 2 })));
       expect(second).toMatchObject({ code: errorCodes.limitExceeded });
-      await sleep(20);
+      await pause(20);
       resolveKey(server.url);
       expect(fromBytes((await first).data)).toEqual({ n: 1 });
       expect(connectsOf(server)).toHaveLength(1);
@@ -1420,7 +1414,7 @@ describe('RpcPool', () => {
       const first: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
       const second: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 2 })));
       expect(pool.stats().queued).toBe(2);
-      await sleep(20);
+      await pause(20);
       resolveKey(server.url);
       expect(fromBytes((await first).data)).toEqual({ n: 1 });
       expect(fromBytes((await second).data)).toEqual({ n: 2 });
@@ -1452,7 +1446,7 @@ describe('RpcPool', () => {
       const timers: jest.SpyInstance = jest.spyOn(global, 'setTimeout');
       pool.close();
       await expect(inFlight).rejects.toMatchObject({ code: errorCodes.connectionClosed });
-      await sleep(20);
+      await pause(20);
       const armed: any[] = timers.mock.calls.filter((args: any[]): boolean => Math.abs(Number(args[1]) - 5123) <= 5);
       expect(armed.length).toBe(0);
     });
@@ -1467,7 +1461,7 @@ describe('RpcPool', () => {
       closeSocket(server, 1009);
       await expect(inFlight).rejects.toMatchObject({ code: errorCodes.connectionClosed });
       pool.close();
-      await sleep(20);
+      await pause(20);
       const armed: any[] = timers.mock.calls.filter((args: any[]): boolean => Math.abs(Number(args[1]) - 5123) <= 5);
       // The connection arms its idle check once, at its open; the loss does not arm another one.
       expect(armed.length).toBeLessThanOrEqual(1);
