@@ -28,7 +28,8 @@ export interface RpcPoolOptions {
    * The client which owns the access token of the pool's connections. The pool lends the client's confirmed token to each
    * connection, and renews it through that client when the token is refused or expires: the pool runs no exchange and
    * calls no getter of its own. Exclusive with connection.token and connection.getToken; connection.tokenExchange is
-   * refused. It works with every token mode of the client, and needs no change of the client.
+   * refused. It works with every token mode of the client, and needs no change of the client. The token is handed over
+   * unchanged, so a fleet which checks it must accept it as it is.
    */
   tokenFrom?: Centrifuge;
   /**
