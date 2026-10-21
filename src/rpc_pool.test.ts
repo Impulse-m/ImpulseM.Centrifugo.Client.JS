@@ -150,12 +150,18 @@ describe('RpcPool', () => {
       const calls: Promise<RpcResult>[] = [1, 2, 3, 4, 5].map((n: number): Promise<RpcResult> => quiet(pool.rpc('work', bytes({ n: n }))));
       expect(await until((): boolean => heldA.length === 2 && heldB.length === 2)).toBe(true);
       expect(pool.stats()).toEqual({ connections: 2, inflight: 4, queued: 1, redirects: 0 });
-      expect(fromBytes(heldA[1].rpc.data)).toEqual({ n: 2 });
+      // Which endpoint goes live first is not fixed: its connection takes the head of the line, two calls, and the other
+      // connection takes the next two.
+      const firstServer: WaitableFakeServer = heldA.some((cmd: any): boolean => fromBytes(cmd.rpc.data).n === 1) ? serverA : serverB;
+      const firstHeld: any[] = firstServer === serverA ? heldA : heldB;
+      const otherHeld: any[] = firstServer === serverA ? heldB : heldA;
+      expect(fromBytes(firstHeld[1].rpc.data)).toEqual({ n: 2 });
+      expect(otherHeld.map((cmd: any): any => fromBytes(cmd.rpc.data))).toEqual([{ n: 3 }, { n: 4 }]);
 
-      reply(serverA, heldA[0], { n: 1 });
+      reply(firstServer, firstHeld[0], { n: 1 });
       expect(fromBytes((await calls[0]).data)).toEqual({ n: 1 });
-      expect(await until((): boolean => heldA.length === 3)).toBe(true);
-      expect(fromBytes(heldA[2].rpc.data)).toEqual({ n: 5 });
+      expect(await until((): boolean => firstHeld.length === 3)).toBe(true);
+      expect(fromBytes(firstHeld[2].rpc.data)).toEqual({ n: 5 });
       expect(pool.stats().queued).toBe(0);
     });
 
