@@ -187,7 +187,7 @@ describe('fetchRedirect', () => {
   });
 
   test('aRuntimeReportingNoResponseUrlIsAccepted', async (): Promise<void> => {
-    // Ruling R4.2: a runtime with an empty response URL (a fetch polyfill) is read, as a compliant runtime follows no hop.
+    // A runtime with an empty response URL (a fetch polyfill) is read, as a compliant runtime follows no hop.
     const response: any = {
       ok: true,
       status: 200,
@@ -201,7 +201,7 @@ describe('fetchRedirect', () => {
   });
 
   test('aRuntimeReportingARedirectIsRefusedWhateverItsUrl', async (): Promise<void> => {
-    // Ruling R4.2: redirected true is refused before the body is read, with an empty URL or the requested one.
+    // A response with redirected true is refused before the body is read, with an empty URL or the requested one.
     const requested: string = 'https://files.example.test/a';
     for (const reportedUrl of ['', requested]) {
       let read: number = 0;

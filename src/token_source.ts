@@ -56,11 +56,11 @@ export class TokenSource {
   private readonly waiting: Map<object, Waiter> = new Map<object, Waiter>();
   // The token the main client confirmed last, null before its first confirmation.
   private confirmed: string | null = null;
-  // The token found unusable: a pool connection connected with it, and its server confirmed another identity (u).
+  // The token found unusable: a pool connection connected with it, and its server confirmed another identity.
   private unusableToken: string | null = null;
-  // The confirmed token the fleet refused and no renewal can replace before the next confirmation: the source is spent (d).
+  // The confirmed token the fleet refused and no renewal can replace before the next confirmation: the source is spent.
   private spentToken: string | null = null;
-  // The confirmed token a renewal was started for since the main client last connected (r), null after each connect.
+  // The confirmed token a renewal was started for since the main client last connected, null after each connect.
   private renewedFor: string | null = null;
   // The identity recorded, and whether one was recorded at all.
   private recorded: boolean = false;

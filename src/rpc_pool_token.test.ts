@@ -717,7 +717,7 @@ describe('RpcPool tokenFrom', () => {
     expect(fromBytes((await second).data)).toEqual({ n: 2 });
     // Phase two: the renewed token is refused too, and the issuer gives it back. The renewal it asks for brings the refused
     // token back (refusedAgain): the token requests of both connections are answered unauthorized, the source is spent
-    // (3.24), and it starts no second renewal. Both connections end as unauthorized, one error each (R3.1), and no
+    // and it starts no second renewal. Both connections end as unauthorized, one error each, and no
     // connection opens again.
     refusedToken = 'access-2';
     issued = 1;
@@ -1254,7 +1254,7 @@ describe('RpcPool tokenFrom', () => {
     const refreshesBefore: number = refreshesOf(main).length;
     const connectsBefore: number = connectsOf(edgeA).length;
     // The fleet invalidates the state of P1: its client clears its token and reconnects with a token request. The main client
-    // still confirms access-1, which P1 presented last (R3.3), so the source renews and does not lend access-1 back.
+    // still confirms access-1, which P1 presented last, so the source renews and does not lend access-1 back.
     edgeA.send({ push: { disconnect: { code: disconnectedCodes.stateInvalidated, reason: 'state' } } });
     expect(await until((): boolean => refreshesOf(main).length === refreshesBefore + 1)).toBe(true);
     // The renewal brings access-2, and P1 connects with it. No connect carries access-1 again after the invalidation.
