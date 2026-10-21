@@ -1391,8 +1391,9 @@ describe('RpcPool tokenFrom', () => {
     // with the connection loss, not resent.
     await eventually((): boolean => errors.some((ctx: any): boolean => ctx.endpoint === edgeA.url
       && ctx.error?.code === disconnectedCodes.unauthorized), 8000);
-    expect([errorCodes.connectionClosed, errorCodes.clientDisconnected]).toContain((await b).code);
+    expect((await b).code).toBe(errorCodes.connectionClosed);
     expect(callsOf(edgeA)).toHaveLength(2);
+    expect(callsOf(edgeA).filter((cmd: any): boolean => fromBytes(cmd.rpc.data).n === 'b')).toHaveLength(1);
     expect(errors.filter((ctx: any): boolean => ctx.endpoint === edgeA.url)).toHaveLength(1);
     // D on key a finds no live connection of its generation, and fails as refused at once, with no open.
     const connectsBefore: number = connectsOf(edgeA).length;
