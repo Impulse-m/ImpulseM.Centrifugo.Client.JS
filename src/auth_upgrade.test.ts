@@ -622,6 +622,8 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
       await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 1);
 
       // The retry gets the token the server refused: it is not sent again, and no further retry is scheduled.
+      // A retry that is not stopped would be scheduled on the fake clock and sent by the socket: the wait gives the socket
+      // its turns for that send. The stop is decided at the refusal, so the wait only bounds the check.
       jest.advanceTimersByTime(10000);
       await new Promise<void>((resolve: () => void): void => {
         realSetTimeout(resolve, 200);
