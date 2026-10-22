@@ -294,11 +294,11 @@ export class TokenExchangeFlow {
 
   /**
    * Called with the ttl of a reply that set the access token: records its expiry, and returns the delay of the refresh
-   * timer in milliseconds, a random moment between 0.7 and 0.9 of the ttl.
+   * timer in milliseconds, a random moment between 0.6 and 0.9 of the ttl.
    */
   expiryDelay(ttl: number): number {
     this.expiry = { token: this.host.token(), expiresAt: Date.now() + ttl * 1000 };
-    return ttlMilliseconds(ttl * (0.7 + 0.2 * Math.random()));
+    return ttlMilliseconds(ttl * (0.6 + 0.3 * Math.random()));
   }
 
 
