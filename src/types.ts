@@ -195,7 +195,8 @@ export interface Options {
    * application persists. Exclusive with `getToken`: setting both throws at construction. Default null. */
   tokenExchange?: TokenExchange | null;
   /** Stops a timer refresh refused as expired (109) from sending the same token again: the connection then stays until
-   * the server ends it. Default false: the retry sends the token `getToken` gives, as before. */
+   * the server ends it. Default true. Set false to let the retry send the token `getToken` gives, even when it is the
+   * one the server refused. */
   stopOnRefusedToken?: boolean;
 }
 

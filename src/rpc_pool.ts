@@ -74,7 +74,7 @@ export interface RpcPoolOptions {
   idleTimeout?: number;
   /**
    * Closes the idle connections of a session the main client ended at once, when the client ends it, instead of at the
-   * idle timeout or the next call. Default false.
+   * idle timeout or the next call. Default true. Set false to keep them until the idle timeout or the next call.
    */
   closeEndedSession?: boolean;
   /**
@@ -231,7 +231,7 @@ export class RpcPool {
     this.maxInflightPerConnection = integerOption('maxInflightPerConnection', options.maxInflightPerConnection, defaultMaxInflightPerConnection, 1);
     this.maxQueued = integerOption('maxQueued', options.maxQueued, defaultMaxQueued, 0);
     this.idleTimeout = integerOption('idleTimeout', options.idleTimeout, defaultIdleTimeout, 0);
-    this.closeEndedSession = options.closeEndedSession === true;
+    this.closeEndedSession = options.closeEndedSession !== false;
     if (this.idleTimeout > maxTimerDelay) {
       throw poolError(errorCodes.badConfiguration, `idleTimeout must be at most ${maxTimerDelay} milliseconds`);
     }

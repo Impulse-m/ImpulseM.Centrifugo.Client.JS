@@ -590,11 +590,11 @@ describe('RpcPool tokenFrom', () => {
     expect(callsOf(edgeA).length).toBe(writtenBefore);
   });
 
-  test('anIdleConnectionOfAnEndedSessionIsClosedAtLogout', async (): Promise<void> => {
+  test('by default an idle connection of an ended session is closed at logout', async (): Promise<void> => {
     mainTtl = 1;
     const c: ProtobufCentrifuge = await connectedMain();
     // No idle timeout: the connection stays open until the pool closes, unless its session ends.
-    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url], idleTimeout: 0, closeEndedSession: true });
+    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url], idleTimeout: 0 });
     expect(fromBytes((await pool.rpc('work', bytes({ n: 'a' }))).data)).toEqual({ n: 'a' });
     expect(pool.stats().connections).toBe(1);
     // The session ends with no call on the pool: its idle connection of the ended identity is closed.
@@ -602,10 +602,10 @@ describe('RpcPool tokenFrom', () => {
     await eventually((): boolean => pool.stats().connections === 0, 15000, 'an idle connection closed at logout');
   });
 
-  test('by default an idle connection of an ended session stays open until its idle timeout or next call', async (): Promise<void> => {
+  test('with closeEndedSession false, an idle connection of an ended session stays open until its idle timeout or next call', async (): Promise<void> => {
     mainTtl = 1;
     const c: ProtobufCentrifuge = await connectedMain();
-    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url], idleTimeout: 0 });
+    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url], idleTimeout: 0, closeEndedSession: false });
     expect(fromBytes((await pool.rpc('work', bytes({ n: 'a' }))).data)).toEqual({ n: 'a' });
     expect(pool.stats().connections).toBe(1);
     stored = '';
@@ -619,9 +619,9 @@ describe('RpcPool tokenFrom', () => {
     expect(pool.stats().connections).toBe(1);
   });
 
-  test('by default the source keeps no pool that holds an idle connection', async (): Promise<void> => {
+  test('with closeEndedSession false, the source keeps no pool that holds an idle connection', async (): Promise<void> => {
     const c: ProtobufCentrifuge = await connectedMain();
-    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url] });
+    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url], closeEndedSession: false });
     expect(fromBytes((await pool.rpc('work', bytes({ n: 'a' }))).data)).toEqual({ n: 'a' });
     expect(pool.stats().connections).toBe(1);
     const source: any = tokenSourceOf(c);

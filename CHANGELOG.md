@@ -1,8 +1,8 @@
 Unreleased
 ==========
 
-* Add the `stopOnRefusedToken` option: a timer refresh refused as expired (109) is not retried with the same token when `getToken` gives it again. Off by default, so the retry keeps sending the token `getToken` gives.
-* Add the `closeEndedSession` option of `RpcPool`: the idle connections of a session the main client ended are closed as the client ends it. Off by default: such a connection closes at its idle timeout or at the next call on it.
+* Add the `stopOnRefusedToken` option: a timer refresh refused as expired (109) is not retried with the same token when `getToken` gives it again. On by default; set `false` to keep sending the token `getToken` gives.
+* Add the `closeEndedSession` option of `RpcPool`: the idle connections of a session the main client ended are closed as the client ends it. On by default; set `false` to keep such a connection until its idle timeout or the next call on it.
 * `RpcPool` `maxRedirectsInflight` above 16 throws `badConfiguration` at construction, as its ceiling. A value from 17 to 1000 that was accepted before now throws. Lower the value to 16 or below.
 * A publish debounce longer than the longest timer (`2147483647` milliseconds) closes at the longest timer, sends its pending publish and restarts. It no longer fires at once.
 * Add the `earlyRenewal` option of `tokenExchange`: the renewal runs from 0.6 of the ttl instead of 0.7. Off by default.

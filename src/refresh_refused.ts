@@ -5,11 +5,11 @@ export const refreshRefusedExpired: number = 109;
 
 /**
  * The token a retry of a refused timer refresh must not send again, or undefined when the retry may send any token.
- * Only with the option stopOnRefusedToken set, and only for a refusal as expired: by default the retry sends the
- * token the getter gives, as it always did.
+ * Unless the option stopOnRefusedToken is set to false, and only for a refusal as expired: the retry does not send the
+ * token the server refused again, so a token that expired is not resent forever.
  */
 export function refusedAfter(options: Options, code: number, token: string): string | undefined {
-  return options.stopOnRefusedToken === true && code === refreshRefusedExpired ? token : undefined;
+  return options.stopOnRefusedToken !== false && code === refreshRefusedExpired ? token : undefined;
 }
 
 /**
