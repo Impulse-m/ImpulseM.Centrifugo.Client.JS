@@ -52,6 +52,9 @@ export class TokenSource {
   };
   // The pools with a call in a key line, told of the events that may place or fail their calls (see MainListener).
   private readonly pools: Set<MainListener> = new Set<MainListener>();
+  // The pools with a connection of their own, told of the events that end a session, so that an idle connection of the
+  // ended identity is closed. Kept apart from pools: a pool with no call waiting is not listened to for placements.
+  private readonly holders: Set<MainListener> = new Set<MainListener>();
   // The requests waiting for a token, one per requester: a new request of a requester replaces its waiting one.
   private readonly waiting: Map<object, Waiter> = new Map<object, Waiter>();
   // The token the main client confirmed last, null before its first confirmation.
@@ -186,6 +189,18 @@ export class TokenSource {
   }
 
 
+  /** Tells the pool the events of the main client that end a session, while the pool holds a connection. */
+  hold(pool: MainListener): void {
+    this.holders.add(pool);
+  }
+
+
+  /** Stops telling the pool: a pool with no connection, or a closed one, is not kept by the source. */
+  release(pool: MainListener): void {
+    this.holders.delete(pool);
+  }
+
+
   /** Re-attaches the listener the application may have removed, when a request waits for an event of the client. */
   reattachWaiting(): void {
     if (this.waiting.size > 0) {
@@ -302,7 +317,7 @@ export class TokenSource {
 
   // Tells the pools of the main client an event which may place or fail their waiting calls. Each pool takes its own pass.
   private notify(): void {
-    for (const pool of Array.from(this.pools)) {
+    for (const pool of Array.from(new Set<MainListener>([...this.pools, ...this.holders]))) {
       pool.onMainEvent();
     }
   }

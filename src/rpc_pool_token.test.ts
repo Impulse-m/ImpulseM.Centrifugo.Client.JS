@@ -578,6 +578,18 @@ describe('RpcPool tokenFrom', () => {
     expect(callsOf(edgeA).length).toBe(writtenBefore);
   });
 
+  test('anIdleConnectionOfAnEndedSessionIsClosedAtLogout', async (): Promise<void> => {
+    mainTtl = 1;
+    const c: ProtobufCentrifuge = await connectedMain();
+    // No idle timeout: the connection stays open until the pool closes, unless its session ends.
+    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url], idleTimeout: 0 });
+    expect(fromBytes((await pool.rpc('work', bytes({ n: 'a' }))).data)).toEqual({ n: 'a' });
+    expect(pool.stats().connections).toBe(1);
+    // The session ends with no call on the pool: its idle connection of the ended identity is closed.
+    stored = '';
+    await eventually((): boolean => pool.stats().connections === 0, 6000, 'an idle connection closed at logout');
+  });
+
   test('maxQueuedZeroAdmitsOnlyTheOpener', async (): Promise<void> => {
     const c: ProtobufCentrifuge = await connectedMain();
     const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url], maxQueued: 0 });

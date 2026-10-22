@@ -68,7 +68,8 @@ export interface RpcPoolOptions {
   maxQueued?: number;
   /**
    * Closes a connection without calls for this long, in milliseconds, at most 2147483647 (the longest timer). 0 keeps it
-   * open, and then close() is the only way to release it. Default 60000.
+   * open, and then close() is the only way to release it. A connection of a session the main client ended is closed at
+   * once, whatever the idle timeout. Default 60000.
    */
   idleTimeout?: number;
   /**
@@ -356,6 +357,7 @@ export class RpcPool {
     }
     this.closed = true;
     this.source?.unlisten(this.mainListener);
+    this.source?.release(this.mainListener);
     for (const endpoint of this.endpoints.values()) {
       endpoint.hold?.clear();
       endpoint.hold = null;
@@ -790,6 +792,7 @@ export class RpcPool {
       });
     });
     endpoint.add(conn);
+    this.syncHolding();
     this.armIdle(conn);
     try {
       client.connect();
@@ -797,6 +800,7 @@ export class RpcPool {
       // The connection carries no call, so nothing is lost: the calls waiting stay in their line, and the endpoint holds
       // its opens after the error.
       endpoint.remove(conn);
+      this.syncHolding();
       conn.retired = true;
       conn.closeCode = disconnectedCodes.disconnectCalled;
       conn.idle?.clear();
@@ -900,6 +904,7 @@ export class RpcPool {
     conn.live = false;
     this.source?.forget(conn);
     conn.endpoint.remove(conn);
+    this.syncHolding();
     if (conn.inflight > 0) {
       this.retiring.add(conn);
       return;
@@ -946,6 +951,7 @@ export class RpcPool {
     conn.idle = null;
     const endpoint: RpcPoolEndpoint = conn.endpoint;
     endpoint.remove(conn);
+    this.syncHolding();
     this.retiring.delete(conn);
     this.source?.forget(conn);
     // A stale connection is retired at this, its next event: its end is no error, and holds no open.
@@ -1060,6 +1066,7 @@ export class RpcPool {
       return;
     }
     conn.endpoint.remove(conn);
+    this.syncHolding();
     conn.live = false;
     this.shut(conn);
   }
@@ -1246,13 +1253,41 @@ export class RpcPool {
   }
 
 
-  // An event of the main client: the keys with waiting calls are placed or failed, and no other key is looked at.
+  // An event of the main client: the keys with waiting calls are placed or failed, and the connections of an earlier
+  // generation are retired, so an idle one of an ended session is closed. No other key is looked at.
   private mainEvent(): void {
     this.pass((): void => {
       for (const key of this.waitingKeys) {
         this.dirtyKeys.add(key);
       }
+      if (this.source !== null) {
+        this.retireStale(Array.from(this.endpoints.values()), this.source.generation());
+      }
     });
+  }
+
+
+  // The source tells the pool of the events that end a session while the pool holds a connection: see TokenSource.hold.
+  private syncHolding(): void {
+    if (this.source === null) {
+      return;
+    }
+    if (this.closed || !this.holdsConnection()) {
+      this.source.release(this.mainListener);
+    } else {
+      this.source.hold(this.mainListener);
+    }
+  }
+
+
+  // Whether a connection of any endpoint is held, idle or busy.
+  private holdsConnection(): boolean {
+    for (const endpoint of this.endpoints.values()) {
+      if (endpoint.count() > 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
 
