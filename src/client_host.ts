@@ -67,8 +67,6 @@ export interface TokenExchangeHost extends ClientHost {
   disconnect(code: number, reason: string, reconnect: boolean): void;
   /** Ends the session as unauthorized, with no reconnect. */
   failUnauthorized(): void;
-  /** Reports an exception a handler threw while the flow ran. */
-  reportDispatchError(err: any): void;
   /** The generation of the connection token: moves on with every refresh(token) call. */
   tokenGeneration(): number;
 }
@@ -83,7 +81,7 @@ export interface TokenExchangeHost extends ClientHost {
  * _callbacks, _rpcOptionsSupported, _methodCall, _call, _getToken, _token, _debug, _getRefreshRetryDelay,
  * _clearRefreshTimeout, _refreshTimeout, _refresh, _client, _identity, _dispatchFailed, _rpc, _codec, _transport,
  * _disconnect, _tokenExchange, _refreshRequired, _transportId, _isConnecting, _session, _node, _emitError,
- * _failUnauthorized, _reportDispatchError, _host (createTokenSourceHost), and the in-flight fields callInFlight and
+ * _failUnauthorized, _host (createTokenSourceHost), and the in-flight fields callInFlight and
  * commandInFlight of _refreshSlot (createTokenSourceHost).
  * Accepted by the wave's contract (section 10); the bracket reads are not counted as uses by noUnusedLocals.
  */
@@ -255,9 +253,6 @@ export function createTokenExchangeHost(client: Centrifuge, host: ClientHost): T
     },
     failUnauthorized: (): void => {
       client['_failUnauthorized']();
-    },
-    reportDispatchError: (err: any): void => {
-      client['_reportDispatchError'](err);
     },
     tokenGeneration: (): number => client['_refreshSlot'].currentTokenGeneration(),
   };

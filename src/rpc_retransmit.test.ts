@@ -1,5 +1,5 @@
 import { Centrifuge } from './centrifuge';
-import { connectingCodes, errorCodes } from './codes';
+import { connectingCodes, disconnectedCodes, errorCodes } from './codes';
 import { Options, RpcResult, State } from './types';
 import { format } from 'util';
 import {
@@ -1399,6 +1399,10 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
   test('an app handler that throws on the connecting event of a write failure settles the call once, and nothing of it is sent again', async (): Promise<void> => {
     const c: Centrifuge = create({ minReconnectDelay: 50, maxReconnectDelay: 50 });
     await connect(c);
+    const reported: any[] = [];
+    (c as any)._reportDispatchError = (err: any): void => {
+      reported.push(err);
+    };
     let armed: boolean = true;
     c.on('connecting', (): void => {
       if (armed) {
@@ -1406,14 +1410,18 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
         throw new Error('app handler failed');
       }
     });
-    const reconnected: Promise<void> = nextEvent(c, 'connected');
+    const disconnects: any[] = [];
+    c.on('disconnected', (ctx: any): void => {
+      disconnects.push(ctx);
+    });
     failNextWrite(c);
 
-    await expect(c.rpc('work', codecCase.encode({}))).rejects.toThrow('app handler failed');
-    await reconnected;
-    // The server gets the frames of the client in order: the reply to this call means the reconnect's writes arrived.
-    await c.rpc('echo', codecCase.encode({}));
-
+    // The exception of the handler stops the client (see Centrifuge._handlerFailed): it does not reconnect, so the
+    // call is cancelled with the disconnect and nothing of it is sent.
+    await expect(c.rpc('work', codecCase.encode({}))).rejects.toMatchObject({ code: errorCodes.cancelled });
+    expect(reported.map((err: any): string => err.message)).toEqual(['app handler failed']);
+    expect(disconnects.map((ctx: any): number => ctx.code)).toEqual([disconnectedCodes.badProtocol]);
+    expect(c.state).toBe(State.Disconnected);
     expect(server.received.filter((cmd: any): boolean => cmd.rpc?.method === 'work')).toHaveLength(0);
   });
 

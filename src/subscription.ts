@@ -997,6 +997,16 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
     this._centrifuge._debug(...args);
   }
 
+  /** @internal An exception escaping a handler stops the client: see Centrifuge._handlerFailed. */
+  emit(event: any, ...args: any[]): boolean {
+    try {
+      return (EventEmitter.prototype.emit as any).call(this, event, ...args);
+    } catch (e) {
+      this._centrifuge._handlerFailed(e);
+      return true;
+    }
+  }
+
   private _handleSubscribeError(error) {
     if (!this._isSubscribing()) {
       return;
@@ -1149,8 +1159,8 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
       ctx = this._centrifuge._getPublicationContext(this.channel, pub);
     }
     // The position moves after the app has the publication, so the position it can
-    // observe never runs ahead of what it received: a handler that throws, or that
-    // unsubscribes before the last event, doesn't skip it. A subscribe command built
+    // observe never runs ahead of what it received: a handler that throws (which
+    // stops the client), or that unsubscribes before the last event, doesn't skip it. A subscribe command built
     // while a handler runs still recovers after this publication, because _getOffset
     // prefers the pending offset — a resubscribe from the handler gets no duplicate.
     if (this._map || this._sharedPoll) {
@@ -1162,10 +1172,16 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
       this.emit('update', ctx);
     } else {
       this._pendingOffset = hasOffset(pub.offset) ? toOffset(pub.offset) : null;
+      const failures = this._centrifuge._handlerFailures;
       try {
         this.emit('publication', ctx);
       } finally {
         this._pendingOffset = null;
+      }
+      // A publication whose handler threw isn't delivered: the position stays before
+      // it, so the next recovery delivers it again.
+      if (this._centrifuge._handlerFailures !== failures) {
+        return;
       }
       this._setPublicationPosition(pub);
     }
@@ -1289,9 +1305,8 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
     this._debug('resubscribe scheduled after ' + delay, this.channel);
   }
 
-  // Emits an error event, then runs the continuation: also when a handler threw (the
-  // exception propagates afterwards), not when a handler unsubscribed, maybe to
-  // subscribe again, whose new subscribe the continuation must not touch.
+  // Emits an error event, then runs the continuation: not when a handler unsubscribed,
+  // maybe to subscribe again, whose new subscribe the continuation must not touch.
   protected _emitError(ctx: any, continuation: () => void) {
     const flow = this._subscribeFlow;
     try {
@@ -1608,11 +1623,30 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
     }
   }
 
-  private _failUnauthorized() {
+  protected _failUnauthorized() {
     this._setUnsubscribed(unsubscribedCodes.unauthorized, 'unauthorized', true);
   }
 
   // ============ Shared Poll Internal Helpers ============
+
+  // The track batch for a signature getSignature returned. The server verifies
+  // the signature over the keys of the track request, so the batch carries
+  // every key it covers: those no longer tracked - untracked by the app while
+  // getSignature ran, or never asked for - go to the request's inline untrack,
+  // which the server applies after verifying. tracked is false when no key of
+  // the signature is tracked any more: nothing to send then.
+  protected _signedBatch(keys: string[]): { items: SharedPollTrackItem[]; untrack: string[]; tracked: boolean } {
+    const items: SharedPollTrackItem[] = [];
+    const untrack: string[] = [];
+    for (const key of keys) {
+      const version = this._sharedPollTrackedItems.get(key);
+      if (version === undefined) {
+        untrack.push(key);
+      }
+      items.push({ key, version: version ?? 0 });
+    }
+    return { items, untrack, tracked: untrack.length < keys.length };
+  }
 
   // Send ONE or MORE signature batches in a single sub_refresh frame.
   // Splits across frames when the estimated payload exceeds the wire frame
@@ -2004,14 +2038,8 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
         });
       }
 
-      // Re-track only keys covered by the returned signature.
-      const items: { key: string; version: number }[] = [];
-      for (const key of result.keys) {
-        const version = self._sharedPollTrackedItems.get(key);
-        if (version !== undefined) {
-          items.push({ key, version });
-        }
-      }
+      // Re-track the keys the returned signature covers.
+      const { items, untrack, tracked } = self._signedBatch(result.keys);
 
       // Replace the signature library with the consolidated entry. Keep
       // any entries that cover keys NOT in the consolidation — those keys
@@ -2025,13 +2053,13 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
       // during getSignature has set its own target if its TTL was tighter.
       // The consolidated track response below will set a target unless
       // something earlier is already in place.
-      self._sharedPollSignatures = items.length > 0
+      self._sharedPollSignatures = tracked
         ? [{ keys: result.keys, signature: result.signature }, ...uncovered]
         : uncovered;
 
-      if (items.length === 0) return;
+      if (!tracked) return;
 
-      self._sendTrackRequest([{ items, signature: result.signature }]).catch(e => {
+      self._sendTrackRequest([{ items, signature: result.signature }], untrack).catch(e => {
         self._handleTrackError(e.error, e.keys);
       });
     }).catch(e => {
@@ -2039,6 +2067,11 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
       self._sharedPollSignatureRefreshInFlight = false;
       // The retry below covers it.
       self._sharedPollSignatureRefreshAgain = false;
+      // As from getToken: the user may not use the subscription any more.
+      if (e instanceof UnauthorizedError) {
+        if (self._isSubscribed()) self._failUnauthorized();
+        return;
+      }
       self._emitError({
         type: 'signatureRefresh',
         channel: self.channel,
@@ -2178,22 +2211,21 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
         });
       }
 
-      const items: SharedPollTrackItem[] = [];
-      for (const key of result.keys) {
-        const version = self._sharedPollTrackedItems.get(key);
-        if (version !== undefined) {
-          items.push({ key, version });
-        }
-      }
-      if (items.length === 0) return;
+      const { items, untrack, tracked } = self._signedBatch(result.keys);
+      if (!tracked) return;
 
       // Cache the obtained signature for subsequent reconnect replays.
       self._addSharedPollSignature(result.keys, result.signature);
-      self._sendTrackRequest([{ items, signature: result.signature }]).catch(e => {
+      self._sendTrackRequest([{ items, signature: result.signature }], untrack).catch(e => {
         self._handleTrackError(e.error, e.keys);
       });
     }).catch(e => {
       if (generation !== self._refreshGeneration || !self._isSubscribed()) return;
+      // As from getToken: the user may not use the subscription any more.
+      if (e instanceof UnauthorizedError) {
+        self._failUnauthorized();
+        return;
+      }
       self._emitError({
         type: 'signatureRefresh',
         channel: self.channel,
@@ -2985,22 +3017,21 @@ export class SharedPollSubscription extends BaseSubscription {
       }
       // A getSignature that works again: the next failure starts the backoff over.
       this._sharedPollReplayRetryAttempts = 0;
-      // Track authorized keys.
-      const authorizedItems: { key: string; version: number }[] = [];
-      for (const key of result.keys) {
-        const version = this._sharedPollTrackedItems.get(key);
-        if (version !== undefined) {
-          authorizedItems.push({ key, version });
-        }
-      }
-      if (authorizedItems.length === 0) return;
+      // Track the authorized keys.
+      const { items, untrack, tracked } = this._signedBatch(result.keys);
+      if (!tracked) return;
       // Cache the obtained signature for reconnect replay.
       this._addSharedPollSignature(result.keys, result.signature);
-      this._sendTrackRequest([{ items: authorizedItems, signature: result.signature }]).catch(e => {
+      this._sendTrackRequest([{ items, signature: result.signature }], untrack).catch(e => {
         this._handleTrackError(e.error, e.keys);
       });
     }).catch(e => {
       if (generation !== this._refreshGeneration || !this._isSubscribed()) return;
+      // As from getToken: the user may not use the subscription any more.
+      if (e instanceof UnauthorizedError) {
+        this._failUnauthorized();
+        return;
+      }
       this._emitError({
         type: 'track',
         channel: this.channel,

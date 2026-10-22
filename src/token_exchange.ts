@@ -812,18 +812,14 @@ export class TokenExchangeFlow {
   }
 
 
-  // Reports a failing read or store of a rotated refresh token as a tokenStore error. An error handler that throws is
-  // reported as a dispatch error, so the exchange still goes on with its access token.
+  // Reports a failing read or store of a rotated refresh token as a tokenStore error. An error handler that throws
+  // stops the client (see Centrifuge._handlerFailed), and the exchange goes on with its access token.
   private reportStoreFailure(err: any): void {
-    try {
-      const ctx: any = {
-        type: 'tokenStore',
-        error: this.host.createError(errorCodes.clientRefreshToken, err?.toString() ?? ''),
-      };
-      this.host.emitError(ctx, (): void => {});
-    } catch (handlerErr: any) {
-      this.host.reportDispatchError(handlerErr);
-    }
+    const ctx: any = {
+      type: 'tokenStore',
+      error: this.host.createError(errorCodes.clientRefreshToken, err?.toString() ?? ''),
+    };
+    this.host.emitError(ctx, (): void => {});
   }
 
 

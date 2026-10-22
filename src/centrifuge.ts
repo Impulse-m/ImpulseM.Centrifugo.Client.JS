@@ -97,6 +97,7 @@ const defaults: Options = {
   timeout: 5000,
   maxServerPingDelay: 10000,
   networkEventTarget: null,
+  pageEventTarget: null,
 }
 
 const websocketNotFound = 'WebSocket constructor not found, make sure it is available globally or passed as a dependency in Centrifuge options';
@@ -110,6 +111,15 @@ interface serverSubscription {
 }
 
 export { UnauthorizedError };
+
+function errorMessage(err: any): string {
+  try {
+    return err instanceof Error ? err.message : String(err);
+  } catch (e) {
+    // E.g. a thrown Object.create(null): it has no string form.
+    return 'value without a string form';
+  }
+}
 
 /** Centrifuge is a Centrifuge/Centrifugo bidirectional client. */
 export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<ClientEvents>) {
@@ -154,7 +164,11 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _promises: Record<number, any>;
   private _promiseId: number;
   private _networkEvents: { target: EventTarget; onOffline: () => void; onOnline: () => void } | null;
+  private _pageEvents: { target: EventTarget; onPageHide: (e: Event) => void; onPageShow: (e: Event) => void } | null;
+  private _pageCached: boolean;
   private _stateTransitions: number;
+  /** @internal The number of exceptions escaped from event handlers (see _handlerFailed). */
+  _handlerFailures = 0;
   private _disconnects: number;
   private _abortedTransportId: number;
   private _reconnectAttemptsResetPending: boolean;
@@ -217,6 +231,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     this._promiseId = 0;
     this._debugEnabled = false;
     this._networkEvents = null;
+    this._pageEvents = null;
+    this._pageCached = false;
     this._stateTransitions = 0;
     this._disconnects = 0;
     this._abortedTransportId = 0;
@@ -758,8 +774,10 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       // handler may call connect() or disconnect() synchronously.
       if (newState === State.Connecting) {
         this._setNetworkEvents();
+        this._setPageEvents();
       } else if (newState === State.Disconnected) {
         this._clearNetworkEvents();
+        this._clearPageEvents();
       }
       this.emit('state', { newState, oldState });
       return transition;
@@ -848,6 +866,70 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     target.removeEventListener('offline', onOffline);
     target.removeEventListener('online', onOnline);
     this._networkEvents = null;
+  }
+
+  // A page entering the back/forward cache is frozen, but the browser may keep its
+  // socket open: the server then sees a client that stopped answering pings. So the
+  // transport is closed when the page is hidden into the cache, and the client
+  // reconnects as soon as the page is restored from it. The reconnect is scheduled
+  // as usual too: its timer does not run in a frozen page, and it still reconnects
+  // a page which was not frozen, or was restored without a pageshow event.
+  private _setPageEvents() {
+    if (this._pageEvents !== null) {
+      return;
+    }
+    let eventTarget: EventTarget | null = null;
+    if (this._config.pageEventTarget !== null) {
+      eventTarget = this._config.pageEventTarget;
+    } else if (typeof globalThis.addEventListener !== 'undefined') {
+      eventTarget = globalThis as EventTarget;
+    }
+    if (!eventTarget) {
+      return;
+    }
+    const onPageHide = (e: Event) => {
+      if (!(e as PageTransitionEvent).persisted) {
+        return;
+      }
+      this._debug('page entered back/forward cache');
+      if (this.state === State.Connected || this.state === State.Connecting) {
+        // Set first: a handler of the events emitted by the disconnect may call
+        // disconnect(), which resets it.
+        this._pageCached = true;
+        this._disconnect(connectingCodes.transportClosed, 'page entered back/forward cache', true);
+      }
+    };
+    const onPageShow = (e: Event) => {
+      if (!(e as PageTransitionEvent).persisted) {
+        return;
+      }
+      this._debug('page restored from back/forward cache');
+      const cached = this._pageCached;
+      this._pageCached = false;
+      if (!cached || this.state !== State.Connecting) {
+        return;
+      }
+      this._clearReconnectTimeout();
+      this._startReconnecting();
+    };
+    eventTarget.addEventListener('pagehide', onPageHide);
+    eventTarget.addEventListener('pageshow', onPageShow);
+    this._pageEvents = { target: eventTarget, onPageHide, onPageShow };
+  }
+
+  // Removed once the client is disconnected, like the network listeners.
+  private _clearPageEvents() {
+    if (this._pageEvents === null) {
+      return;
+    }
+    const { target, onPageHide, onPageShow } = this._pageEvents;
+    if (!isFunction(target.removeEventListener)) {
+      this._debug('page event target has no removeEventListener, listeners kept');
+      return;
+    }
+    target.removeEventListener('pagehide', onPageHide);
+    target.removeEventListener('pageshow', onPageShow);
+    this._pageEvents = null;
   }
 
   private _getReconnectDelay() {
@@ -1415,9 +1497,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     });
   }
 
-  // Emits an error event, then runs the continuation: also when a handler threw
-  // (the exception propagates afterwards), not when a handler disconnected the
-  // client, maybe to connect again, whose new attempt the continuation must not touch.
+  // Emits an error event, then runs the continuation: not when a handler disconnected
+  // the client (or threw, which disconnects it), maybe to connect again, whose new
+  // attempt the continuation must not touch.
   private _emitError(ctx: any, continuation: () => void) {
     const disconnects = this._disconnects;
     try {
@@ -1690,25 +1772,36 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     });
   }
 
-  // An exception while handling a reply, e.g. thrown by an application event
-  // handler, may have left the application state inconsistent. The client stops
-  // in a state the application can see: it disconnects without reconnecting, so
-  // no later reply is processed.
+  /** @internal Every event reaches the application's handlers through here. */
+  emit(event: any, ...args: any[]): boolean {
+    try {
+      return (EventEmitter.prototype.emit as any).call(this, event, ...args);
+    } catch (e) {
+      this._handlerFailed(e);
+      return true;
+    }
+  }
+
+  // An exception escaping an application event handler. The SDK can't know what the
+  // handler left undone, so it fails loudly instead of going on as if nothing
+  // happened: the client disconnects without reconnecting, and the exception is
+  // re-raised as an unhandled rejection. The SDK's own work continues as if the
+  // handler had returned, as for a handler calling disconnect(), so no state change
+  // is left half done.
+  /** @internal */
+  _handlerFailed(err: any) {
+    this._handlerFailures++;
+    this._reportDispatchError(err);
+    this._disconnect(disconnectedCodes.badProtocol, `exception in event handler: ${errorMessage(err)}`, false);
+  }
+
+  // An exception while handling a reply, other than one of an event handler (see
+  // _handlerFailed), may have left the client's state inconsistent. The client stops
+  // in a state the application can see: it disconnects without reconnecting, so no
+  // later reply is processed.
   private _dispatchFailed(err: any) {
     this._reportDispatchError(err);
-    let message: string;
-    try {
-      message = err instanceof Error ? err.message : String(err);
-    } catch (e) {
-      // E.g. a thrown Object.create(null): it has no string form.
-      message = 'value without a string form';
-    }
-    try {
-      this._disconnect(disconnectedCodes.badProtocol, `exception during message handling: ${message}`, false);
-    } catch (e) {
-      // Thrown by a handler of the disconnect events.
-      this._reportDispatchError(e);
-    }
+    this._disconnect(disconnectedCodes.badProtocol, `exception during message handling: ${errorMessage(err)}`, false);
   }
 
   // The exception is surfaced as an unhandled rejection, as before.
@@ -1717,10 +1810,11 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     Promise.reject(err);
   }
 
-  // An exception while handling a rejected command. A rejection with next() carries
-  // a reply, and is handled as any reply (see _dispatchFailed). A timeout or a teardown
-  // doesn't: stopping the client would cancel the reconnect or retry the handling
-  // scheduled, so the exception is only reported.
+  // An exception, other than one of an event handler, while handling a rejected
+  // command. A rejection with next() carries a reply, and is handled as any reply
+  // (see _dispatchFailed). A timeout or a teardown doesn't: stopping the client would
+  // cancel the reconnect or retry the handling scheduled, so the exception is only
+  // reported.
   private _rejectionFailed(err: any, rejectCtx: any) {
     if (rejectCtx.next !== undefined) {
       this._dispatchFailed(err);
@@ -1775,10 +1869,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   private _startConnecting() {
     this._debug('start connecting');
-    // The attempt starts also when a handler of the events throws (the exception
-    // propagates afterwards), or the client stays connecting with nothing scheduled,
-    // and connect() does nothing. So the number of the transition is taken before its
-    // state event.
+    // The attempt starts unless a handler of the events disconnected the client (or
+    // threw, which disconnects it). So the number of the transition is taken before
+    // its state event.
     const transition = this.state !== State.Connecting ? this._stateTransitions + 1 : 0;
     try {
       this._setState(State.Connecting);
@@ -1883,6 +1976,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       // Network listeners are removed with the state change below, so no online
       // event can reset it.
       this._deviceWentOffline = false;
+      this._pageCached = false;
     }
 
     this._tokenExchange?.reset(reconnect);
@@ -1890,10 +1984,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       code: code,
       reason: reason
     };
-    // The rest runs also when a handler of the events throws (the exception
-    // propagates afterwards): subscriptions must move to subscribing and a reconnect
-    // must be scheduled, or the client is left stuck. So the number of the
-    // transition is taken before its state event.
+    // The rest runs whatever the handlers of the events do: subscriptions must move to
+    // subscribing and a reconnect must be scheduled, or the client is left stuck. So
+    // the number of the transition is taken before its state event.
     const transition = this.state !== newState ? this._stateTransitions + 1 : 0;
     try {
       try {
@@ -2209,6 +2302,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     // Connected again: a later online event must not take the device for having been
     // offline and abort a transport that works.
     this._deviceWentOffline = false;
+    // Reconnected by the timer, in a page that was not frozen.
+    this._pageCached = false;
     if (this._tokenExchange?.intercept(result, (merged: any): void => this._connectResponse(merged))) {
       // A bootstrap's anonymous connection is pinged too: its pong settings apply now, the timer is armed once connected.
       this._serverPing = result.ping > 0 ? result.ping * 1000 : 0;
@@ -2605,10 +2700,16 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         // _constructConnectCommand), so a connect() from that handler still recovers
         // after it instead of receiving it again.
         this._pendingServerSubOffsets[channel] = hasOffset(pub.offset) ? toOffset(pub.offset) : null;
+        const failures = this._handlerFailures;
         try {
           this.emit('publication', ctx);
         } finally {
           delete this._pendingServerSubOffsets[channel];
+        }
+        // A publication whose handler threw isn't delivered: the position stays before
+        // it, so the next recovery delivers it again.
+        if (this._handlerFailures !== failures) {
+          return;
         }
         if (hasOffset(pub.offset)) {
           this._serverSubs[channel].offset = toOffset(pub.offset);

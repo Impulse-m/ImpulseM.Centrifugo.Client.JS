@@ -1,5 +1,5 @@
 import { Centrifuge, UnauthorizedError } from './centrifuge';
-import { errorCodes } from './codes';
+import { disconnectedCodes, errorCodes } from './codes';
 import { RefreshSlot } from './refresh_slot';
 import { CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, holdReply, until } from './testing/codecs';
 import { FakeRefreshHost } from './testing/refresh_slot_host';
@@ -1755,7 +1755,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1']);
   });
 
-  test('an error handler that throws on tokenStore does not end the exchange: the bootstrap completes with its access token', async (): Promise<void> => {
+  test('an error handler that throws on tokenStore stops the client, as any handler that throws does: no refresh is sent', async (): Promise<void> => {
     serve();
     const reported: any[] = [];
     const c: Centrifuge = create({
@@ -1771,13 +1771,20 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
         throw new Error('broken logger');
       }
     });
-    const events: string[] = record(c);
-    await connectClient(c);
+    const disconnects: number[] = [];
+    c.on('disconnected', (ctx: any): void => {
+      disconnects.push(ctx.code);
+    });
+    const done: Promise<void> = new Promise<void>((resolve: () => void): void => {
+      c.once('disconnected', (): void => resolve());
+    });
+    c.connect();
+    await done;
 
     expect(reported.map((err: any): string => err.message)).toEqual(['broken logger']);
-    expect(events).toContain('connected');
-    expect(c.state).toBe(State.Connected);
-    expect(commands('refresh').map((cmd: any): string => cmd.refresh.token)).toEqual(['access-1']);
+    expect(disconnects).toEqual([disconnectedCodes.badProtocol]);
+    expect(c.state).toBe(State.Disconnected);
+    expect(commands('refresh')).toEqual([]);
   });
 
   test('tokenExchange together with getToken throws at construction', async (): Promise<void> => {
