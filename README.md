@@ -664,7 +664,7 @@ A `refresh()` without a token that a `refresh(token)` call superseded resolves w
 
 #### Token exchange over the connection
 
-The `tokenExchange` option lets the SDK obtain and renew the connection token over the connection itself, from a refresh token the application persists. Its callbacks, the flow, the refusal run and grace, the events and the server requirements are described in [docs/token_exchange.md](docs/token_exchange.md).
+The `tokenExchange` option lets the SDK obtain and renew the connection token over the connection itself, from a refresh token the application persists. Its callbacks, the flow, the refusal run and grace, the events and the server requirements are described in [docs/token_exchange.md](docs/token_exchange.md). The renewal starts at a random moment between 0.7 and 0.9 of the token's ttl; `earlyRenewal: true` (off by default) starts it from 0.6 instead, which spreads renewals further. Token issuers can also add jitter to the ttl.
 
 ## RPC pool for large payloads
 
