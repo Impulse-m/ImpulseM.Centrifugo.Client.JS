@@ -151,7 +151,8 @@ export class RpcTracker {
 
 
   // Takes a slot of maxPendingRpc, and returns the function that gives it back, once. The function is made here and
-  // not in call: with the closure made in the async call, the regression test of a timed-out call keeps the payload.
+  // not in call: with the closure made in the async call, the timed-out call of the regression test keeps its payload
+  // (measured: the test fails with the closure made inline, and passes with this split).
   private takeSlot(): () => void {
     this.pending++;
     let held: boolean = true;
