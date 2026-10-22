@@ -1,4 +1,4 @@
-import { addWaiter, callTimer, CallTimer, raceCall } from './call_timer';
+import { addWaiter, callTimer, CallTimer, maxTimerDelay, raceCall } from './call_timer';
 import { errorCodes } from './codes';
 
 describe('callTimer', () => {
@@ -17,6 +17,17 @@ describe('callTimer', () => {
     jest.advanceTimersByTime(99);
     expect(onDue).not.toHaveBeenCalled();
     jest.advanceTimersByTime(5);
+    expect(onDue).toHaveBeenCalledTimes(1);
+  });
+
+  test('a due time beyond the longest timer runs at the due time, not at once', () => {
+    const onDue: jest.Mock = jest.fn();
+    const due: number = Date.now() + maxTimerDelay + 1000;
+    callTimer(due, onDue);
+
+    jest.advanceTimersByTime(maxTimerDelay);
+    expect(onDue).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(1000 + 5);
     expect(onDue).toHaveBeenCalledTimes(1);
   });
 

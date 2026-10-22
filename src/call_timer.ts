@@ -11,6 +11,8 @@ const lateCallTimer: number = 1000;
 // How long such a call still waits for its reply, or the connection for a ping,
 // before failing.
 const lateCallGrace: number = 1000;
+/** The longest delay of a timer, in milliseconds: a longer one would fire at once. */
+export const maxTimerDelay: number = 2147483647;
 
 /**
  * Runs onDue at the due time, local time in milliseconds. A timer running late by lateCallTimer or
@@ -20,13 +22,25 @@ const lateCallGrace: number = 1000;
  */
 export function callTimer(due: number, onDue: () => void): CallTimer {
   let timer: ReturnType<typeof setTimeout> | null = null;
-  timer = setTimeout((): void => {
-    const late: boolean = Date.now() - due >= lateCallTimer;
+  const arm: () => void = (): void => {
+    const remaining: number = due - Date.now();
+    if (remaining > maxTimerDelay) {
+      // The runtime fires a longer delay at once: the wait is made in steps of the longest timer, and checked at each.
+      timer = setTimeout((): void => {
+        timer = null;
+        arm();
+      }, maxTimerDelay);
+      return;
+    }
     timer = setTimeout((): void => {
-      timer = null;
-      onDue();
-    }, late ? lateCallGrace : 0);
-  }, Math.max(0, due - Date.now()));
+      const late: boolean = Date.now() - due >= lateCallTimer;
+      timer = setTimeout((): void => {
+        timer = null;
+        onDue();
+      }, late ? lateCallGrace : 0);
+    }, Math.max(0, remaining));
+  };
+  arm();
   return {
     clear: (): void => {
       if (timer !== null) {
