@@ -2,7 +2,7 @@ import WebSocket from 'ws';
 import { errorCodes, disconnectedCodes } from './codes';
 import { Centrifuge as ProtobufCentrifuge } from './protobuf';
 import { RpcPool, RpcPoolOptions } from './rpc_pool';
-import { tokenSourceOf } from './token_source';
+import { placingInterest, tokenSourceOf } from './token_source';
 import { State, TokenExchange, TokenExchangeContext, TokenExchangeResult, RpcResult } from './types';
 import { UnauthorizedError } from './unauthorized_error';
 import {
@@ -81,19 +81,19 @@ function listenerCountOf(c: ProtobufCentrifuge, name: string): number {
   return (c as any).listenerCount(name);
 }
 
-// Records the rejections of the requests the source waits with, as they are answered: the requests present now.
-// The pools the source tells of placements: those whose entry holds the placing bit (1). A pool that only holds a connection
-// is kept with the holding bit (2) alone, and is not listed here.
+// The pools the source tells of placements: those whose entry holds the placing interest. A pool that only holds a
+// connection is kept with the holding interest alone, and is not listed here.
 function placingPools(source: any): object[] {
   const pools: object[] = [];
   for (const [pool, interests] of source.pools as Map<object, number>) {
-    if ((interests & 1) !== 0) {
+    if ((interests & placingInterest) !== 0) {
       pools.push(pool);
     }
   }
   return pools;
 }
 
+// Records the rejections of the requests the source waits with, as they are answered: the requests present now.
 function watchRejection(source: any): any[] {
   const rejections: any[] = [];
   for (const waiter of source.waiting.values()) {
@@ -609,12 +609,23 @@ describe('RpcPool tokenFrom', () => {
     expect(fromBytes((await pool.rpc('work', bytes({ n: 'a' }))).data)).toEqual({ n: 'a' });
     expect(pool.stats().connections).toBe(1);
     stored = '';
-    // The session ends, and the client takes it: a wait past the logout leaves the idle connection open.
+    // The session ends, and the client takes it: a wait past the logout leaves the idle connection open. The close of an
+    // idle connection of an ended session is driven by the event of the logout, and the pool keeps no timer for it, so
+    // the wait only bounds the check: a close that the default would make is at the event, not after the wait.
     await eventually((): boolean => c.state === State.Disconnected, 15000, 'the main client ended its session');
     await new Promise<void>((resolve: () => void): void => {
       setTimeout(resolve, 1000);
     });
     expect(pool.stats().connections).toBe(1);
+  });
+
+  test('by default the source keeps no pool that holds an idle connection', async (): Promise<void> => {
+    const c: ProtobufCentrifuge = await connectedMain();
+    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url] });
+    expect(fromBytes((await pool.rpc('work', bytes({ n: 'a' }))).data)).toEqual({ n: 'a' });
+    expect(pool.stats().connections).toBe(1);
+    const source: any = tokenSourceOf(c);
+    expect(source.pools.size).toBe(0);
   });
 
   test('maxQueuedZeroAdmitsOnlyTheOpener', async (): Promise<void> => {

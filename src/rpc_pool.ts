@@ -1282,8 +1282,9 @@ export class RpcPool {
 
 
   // The source tells the pool of the events that end a session while the pool holds a connection: see TokenSource.hold.
+  // Without closeEndedSession the pool is never told, so it is not kept by the source at all.
   private syncHolding(): void {
-    if (this.source === null) {
+    if (this.source === null || !this.closeEndedSession) {
       return;
     }
     if (this.closed || !this.holdsConnection()) {

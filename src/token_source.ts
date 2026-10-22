@@ -24,7 +24,7 @@ export interface MainListener {
 }
 
 // The interests of a pool the source keeps, as the bits of its entry: the placements, and the holding of a connection.
-const placingInterest: number = 1;
+export const placingInterest: number = 1;
 const holdingInterest: number = 2;
 
 // A request of a pool connection waiting for the token: the token it was refused, and how to answer it.
@@ -331,9 +331,9 @@ export class TokenSource {
 
 
   // Tells the pools of the main client an event which may place or fail their waiting calls, or end a session. Each pool
-  // takes its own pass. A pool that joins during the pass is told of the event too.
+  // takes its own pass. The pools are walked over a copy: a pool that joins during the walk is told of the next event.
   private notify(): void {
-    for (const pool of this.pools.keys()) {
+    for (const pool of Array.from(this.pools.keys())) {
       pool.onMainEvent();
     }
   }
