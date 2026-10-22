@@ -15,10 +15,11 @@ const maxGrace: number = 300;
 // The re-presentations of an unchanged refresh token a refusal run allows: the issuer's answer to the same token does not
 // change, so one is enough to pick up a late store of another client.
 const maxRefusalRetries: number = 1;
-// The renewal window of the access token, as fractions of its ttl: the default starts at renewFrom, earlyRenewal at earlyRenewFrom.
+// The renewal window of the access token, as fractions of its ttl: the default is 0.7 to 0.9, and earlyRenewal is 0.6 to 0.9.
 const renewFrom: number = 0.7;
+const renewWidth: number = 0.2;
 const earlyRenewFrom: number = 0.6;
-const renewTo: number = 0.9;
+const earlyRenewWidth: number = 0.3;
 // The message of a refusal inside the grace horizon: it names the cause, and never a token.
 const refusedMessage: string = 'refresh token refused, retrying within the grace';
 
@@ -175,8 +176,9 @@ export class TokenExchangeFlow {
   private optionGrace: number;
   // The grace in use: the one the latest accepted result published, else optionGrace. Seconds.
   private grace: number;
-  // The renewal of the access token is due at a random moment from this fraction of its ttl, to renewTo.
+  // The renewal of the access token is due at a random moment from this fraction of its ttl, over renewWidth of it.
   private renewFrom: number;
+  private renewWidth: number;
   // The monotonic time (performance.now, milliseconds) of the first refusal of the open refusal run; null without one.
   private refusedSince: number | null = null;
   // The refused attempts of the open refusal run whose re-read found the value unchanged: one retry is allowed per run.
@@ -202,6 +204,7 @@ export class TokenExchangeFlow {
     this.optionGrace = Math.min(options.grace ?? defaultGrace, maxGrace);
     this.grace = this.optionGrace;
     this.renewFrom = options.earlyRenewal === true ? earlyRenewFrom : renewFrom;
+    this.renewWidth = options.earlyRenewal === true ? earlyRenewWidth : renewWidth;
   }
 
 
@@ -304,11 +307,11 @@ export class TokenExchangeFlow {
 
   /**
    * Called with the ttl of a reply that set the access token: records its expiry, and returns the delay of the refresh
-   * timer in milliseconds, a random moment between renewFrom and 0.9 of the ttl.
+   * timer in milliseconds, a random moment in the renewal window of the ttl.
    */
   expiryDelay(ttl: number): number {
     this.expiry = { token: this.host.token(), expiresAt: Date.now() + ttl * 1000 };
-    return ttlMilliseconds(ttl * (this.renewFrom + (renewTo - this.renewFrom) * Math.random()));
+    return ttlMilliseconds(ttl * (this.renewFrom + this.renewWidth * Math.random()));
   }
 
 
