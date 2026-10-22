@@ -26,6 +26,8 @@ const maxNewIdResends: number = 2;
 export const maxLaterResends: number = 3;
 // The bound of the delay of a later attempt: attempt n waits a uniform delay in [0, 250 ms * 2^n] (full jitter).
 const laterResendBase: number = 250;
+// The release of a call that holds no slot, see call.
+const noRelease: () => void = (): void => {};
 
 /** The retry signal of a server error, see retrySignal. @internal */
 export type RetrySignal = 'new_msg_id' | 'later' | null;
@@ -134,24 +136,31 @@ export class RpcTracker {
    */
   async call(method: string, data: any, opts: RpcOptions | undefined, deadline: number): Promise<RpcResult> {
     if (!this.host.hasInstance()) {
-      return this.attempt({ method, data, opts, deadline, release: (): void => {} });
+      return this.attempt({ method, data, opts, deadline, release: noRelease });
     }
     if (this.pending >= this.maxPendingRpc) {
       throw this.host.createError(errorCodes.limitExceeded, 'too many pending rpc calls');
     }
-    this.pending++;
-    let held: boolean = true;
-    const release: () => void = (): void => {
-      if (held) {
-        held = false;
-        this.pending--;
-      }
-    };
+    const release: () => void = this.takeSlot();
     try {
       return await this.attempt({ method, data, opts, deadline, release });
     } finally {
       release();
     }
+  }
+
+
+  // Takes a slot of maxPendingRpc, and returns the function that gives it back, once. The function is made here and
+  // not in call: a closure made in an async function keeps the function's data argument alive for as long as it lives.
+  private takeSlot(): () => void {
+    this.pending++;
+    let held: boolean = true;
+    return (): void => {
+      if (held) {
+        held = false;
+        this.pending--;
+      }
+    };
   }
 
 
@@ -640,6 +649,9 @@ export class RpcTracker {
   private settle(call: TrackedRpc): void {
     this.unlink(call);
     call.release();
+    // The callbacks of a settled call may outlive it for a late reply: they must not keep its payload.
+    call.data = null;
+    call.request.data = null;
   }
 
 

@@ -1,6 +1,16 @@
+import * as v8 from 'v8';
+import * as vm from 'vm';
+
 import { errorCodes } from './codes';
 import { CallResolveContext, RpcCallbacks, RpcHost, RpcTracker } from './rpc_tracker';
 import { RpcResult } from './types';
+
+// The weak reference of the runtime, which the compiler target of the project does not type.
+interface WeakRefLike<T> {
+  deref(): T | undefined;
+}
+
+declare const WeakRef: new <T extends object>(target: T) => WeakRefLike<T>;
 
 // The tracker against a host that records what it writes, without a client or a socket.
 
@@ -111,6 +121,14 @@ function settleMicrotasks(): Promise<void> {
   return new Promise<void>((resolve: () => void): void => {
     setImmediate(resolve);
   });
+}
+
+// Runs a full garbage collection. The flag is set at run time, since the test runner does not start Node with it.
+async function collectGarbage(): Promise<void> {
+  v8.setFlagsFromString('--expose-gc');
+  const gc: () => void = vm.runInNewContext('gc');
+  gc();
+  await settleMicrotasks();
 }
 
 describe('RpcTracker', () => {
@@ -316,5 +334,22 @@ describe('RpcTracker', () => {
 
     tracker.sendWaiting();
     expect(host.commands).toHaveLength(2);
+  });
+
+  test('a timed-out call does not keep its payload while the callbacks of its late reply wait', async (): Promise<void> => {
+    const host: StubHost = new StubHost();
+    const tracker: RpcTracker = new RpcTracker(host, 32, 30000);
+    const payloadRef: WeakRefLike<any> = new WeakRef({ blob: 'x'.repeat(1 << 20) });
+    const call: Promise<RpcResult> = tracker.call('m', payloadRef.deref(), undefined, Date.now() + 20);
+    await settleMicrotasks();
+    // The stub keeps every written command, which is not the tracker's retention: it is dropped here.
+    host.commands = [];
+
+    await expect(call).rejects.toMatchObject({ code: errorCodes.timeout });
+    // The callbacks of the call stay for the call timeout, to acknowledge a late reply.
+    expect(host.callbacks.size).toBeGreaterThan(0);
+
+    await collectGarbage();
+    expect(payloadRef.deref()).toBeUndefined();
   });
 });
