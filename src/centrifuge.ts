@@ -1966,7 +1966,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
   }
 
-  private _refresh() {
+  // refused: the token the server refused as expired in the attempt before, if any.
+  private _refresh(refused?: string) {
     const clientId = this._client;
     const self = this;
     // See _startReconnecting.
@@ -1980,6 +1981,12 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       }
       if (!token) {
         self._failUnauthorized();
+        return;
+      }
+      if (token === refused) {
+        // The getter gave the token the server refused as expired: it would be refused again, so it is not sent. The
+        // connection is left to expire, and the next connect asks for a token.
+        self._refreshRequired = true;
         return;
       }
       if (!self._isConnected()) {
@@ -2005,7 +2012,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
           // A disconnect rejects the pending command too: nothing to retry then,
           // the connection this refresh was for is gone.
           if (clientId === self._client) {
-            self._refreshError(rejectCtx.error);
+            self._refreshError(rejectCtx.error, token);
           }
         } catch (err) {
           self._rejectionFailed(err, rejectCtx);
@@ -2038,13 +2045,14 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     });
   }
 
-  private _refreshError(err: any) {
+  // token: the token the refused refresh sent. After 109 the retry does not send it again, see _refresh.
+  private _refreshError(err: any, token: string) {
     if (refreshRetries(err.code, err.temporary === true)) {
       this._emitError({
         type: 'refresh',
         error: err
       }, () => {
-        this._host.scheduleRefresh(this._getRefreshRetryDelay(), () => this._refresh());
+        this._host.scheduleRefresh(this._getRefreshRetryDelay(), () => this._refresh(err.code === 109 ? token : undefined));
       });
     } else if (refreshKeepsConnection(err.code)) {
       this._emitError({ type: 'refresh', error: err }, () => {});

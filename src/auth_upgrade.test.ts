@@ -580,6 +580,36 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
     }
   });
 
+  test('a timer refresh refused with 109 is not sent again with the same token', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', expires: true, ttl: 1 };
+    server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? { id: cmd.id, error: { code: 109, message: 'token expired' } } : undefined);
+    // The real timer lets the fake server answer a command sent in the retry, which the fake timers would hold back.
+    const realSetTimeout: typeof setTimeout = setTimeout;
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      const c: Centrifuge = create({ getToken: async (): Promise<string> => 'expired-token' });
+      const failed: Promise<any> = new Promise<any>((resolve: (ctx: any) => void): void => {
+        c.once('error', (ctx: any): void => resolve(ctx));
+      });
+      await connect(c);
+
+      jest.advanceTimersByTime(1000);
+      await expect(failed).resolves.toMatchObject({ type: 'refresh', error: { code: 109 } });
+      await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 1);
+
+      // The retry gets the token the server refused: it is not sent again, and no further retry is scheduled.
+      jest.advanceTimersByTime(10000);
+      await new Promise<void>((resolve: () => void): void => {
+        realSetTimeout(resolve, 200);
+      });
+      expect(refreshCommands()).toHaveLength(1);
+      expect(jest.getTimerCount()).toBe(0);
+      expect(c.state).toBe(State.Connected);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a timer refresh whose token arrives after a refresh() call started is dropped, and the identity of the call stays', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated', expires: true, ttl: 1 };
     server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? {
