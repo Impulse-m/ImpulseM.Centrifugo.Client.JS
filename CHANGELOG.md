@@ -1,6 +1,11 @@
 Unreleased
 ==========
 
+* Add the `stopOnRefusedToken` option: a timer refresh refused as expired (109) is not retried with the same token when `getToken` gives it again. Off by default, so the retry keeps sending the token `getToken` gives.
+* Add the `closeEndedSession` option of `RpcPool`: the idle connections of a session the main client ended are closed as the client ends it. Off by default: such a connection closes at its idle timeout or at the next call on it.
+* `RpcPool` `maxRedirectsInflight` above 16 throws `badConfiguration` at construction, as its ceiling. A value from 17 to 1000 that was accepted before now throws. Lower the value to 16 or below.
+* A publish debounce longer than the longest timer (`2147483647` milliseconds) waits for its full length, and no longer fires at once.
+* Add the `earlyRenewal` option of `tokenExchange`: the renewal runs from 0.6 of the ttl instead of 0.7. Off by default.
 * `RpcPool` with `tokenFrom` fails the calls that no connection can take once the fleet refuses the client's token and no renewal can replace it: they fail with `token refused` at once, without opening a connection, and the next confirmation of the client lets calls through again. A call in flight on a connection that ends as unauthorized settles with the connection loss, not resent. A pool made after a logout reads the client as disconnected until its next connect.
 * `RpcPool` places calls by one behaviour table: a call is bound to the identity of its `tokenFrom` client, is placed only on a live connection of that identity, and fails with `identity changed` when the identity moves on before it is placed. A connection is opened only while the client is connected, and a connection whose server confirms another identity is closed and reported with `identity mismatch`.
 * `RpcPool` connections belong to the endpoint URL, so keys which resolve to one URL share their connections; `maxConnectionsPerEndpoint` counts per URL. A connect is serialised per URL, and its opener waits in its line, counted in `queued`.
@@ -18,7 +23,7 @@ Unreleased
 * Add error code `18` (`redirectFailed`): a redirect of a pool call could not be fetched. Codes 15 to 19 are still reserved for client-local errors.
 * The retry signal, the count of later attempts and the later delay of the rpc tracker are exported for the pool, with no change of behaviour.
 * Add the `tokenExchange` option: the client obtains and renews its connection token over the connection from a refresh token the application persists. See [docs/token_exchange.md](docs/token_exchange.md).
-* With `tokenExchange`, the renewal of the connection token runs at a random moment between 0.7 and 0.9 of its ttl, so clients that connected together spread their renewals. Without the option the renewal stays at the ttl, as before.
+* With `tokenExchange`, the renewal of the connection token runs at a random moment between 0.7 and 0.9 of its ttl, so clients that connected together spread their renewals. Set `earlyRenewal` to renew from 0.6 of the ttl instead. Without the option the renewal stays at the ttl, as before.
 * Add the `tokenStore` error type: the `store` callback of `tokenExchange` failed, and the exchange went on. See [docs/token_exchange.md](docs/token_exchange.md).
 * Add `refusalTypes` and `grace` to `tokenExchange`: a refusal is classified by the server's application error name, and a refused refresh token is presented again once inside a grace horizon. See [docs/token_exchange.md](docs/token_exchange.md).
 * Document publish debouncing (the window of `client_publish_debounce_interval`, per key on map subscriptions, pending data dropped on unsubscribe and disconnect), channel compaction, and delta without positioning when the server keeps the latest publication.
