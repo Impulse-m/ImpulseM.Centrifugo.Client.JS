@@ -194,6 +194,9 @@ export interface Options {
   /** Lets the client obtain and renew its connection token itself, over the connection, from a refresh token the
    * application persists. Exclusive with `getToken`: setting both throws at construction. Default null. */
   tokenExchange?: TokenExchange | null;
+  /** Stops a timer refresh refused as expired (109) from sending the same token again: the connection then stays until
+   * the server ends it. Default false: the retry sends the token `getToken` gives, as before. */
+  stopOnRefusedToken?: boolean;
 }
 
 /**

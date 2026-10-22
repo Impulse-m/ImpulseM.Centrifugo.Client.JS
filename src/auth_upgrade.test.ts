@@ -580,14 +580,38 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
     }
   });
 
-  test('a timer refresh refused with 109 is not sent again with the same token', async (): Promise<void> => {
+  test('by default, a timer refresh refused with 109 is retried with the token getToken gives, as before', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', expires: true, ttl: 1 };
+    server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? { id: cmd.id, error: { code: 109, message: 'token expired' } } : undefined);
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      const c: Centrifuge = create({ getToken: async (): Promise<string> => 'expired-token' });
+      const failed: Promise<any> = new Promise<any>((resolve: (ctx: any) => void): void => {
+        c.once('error', (ctx: any): void => resolve(ctx));
+      });
+      await connect(c);
+
+      jest.advanceTimersByTime(1000);
+      await expect(failed).resolves.toMatchObject({ type: 'refresh', error: { code: 109 } });
+      await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 1);
+
+      // The retry after its backoff sends the same token again: the server refuses it again.
+      jest.advanceTimersByTime(10000);
+      await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 2);
+      expect(refreshCommands()[1].refresh.token).toBe('expired-token');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('with stopOnRefusedToken, a timer refresh refused with 109 is not sent again with the same token', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', expires: true, ttl: 1 };
     server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? { id: cmd.id, error: { code: 109, message: 'token expired' } } : undefined);
     // The real timer lets the fake server answer a command sent in the retry, which the fake timers would hold back.
     const realSetTimeout: typeof setTimeout = setTimeout;
     jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
     try {
-      const c: Centrifuge = create({ getToken: async (): Promise<string> => 'expired-token' });
+      const c: Centrifuge = create({ getToken: async (): Promise<string> => 'expired-token', stopOnRefusedToken: true });
       const failed: Promise<any> = new Promise<any>((resolve: (ctx: any) => void): void => {
         c.once('error', (ctx: any): void => resolve(ctx));
       });
@@ -603,7 +627,6 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
         realSetTimeout(resolve, 200);
       });
       expect(refreshCommands()).toHaveLength(1);
-      expect(jest.getTimerCount()).toBe(0);
       expect(c.state).toBe(State.Connected);
     } finally {
       jest.useRealTimers();

@@ -35,6 +35,7 @@ import { writeCommands } from './write_commands';
 import { RefreshSlot, refreshKeepsConnection, refreshRetries } from './refresh_slot';
 import { ConnectionIdentity } from './identity';
 import { TokenExchangeFlow, createTokenExchangeFlow } from './token_exchange';
+import { isRefused, refusedAfter } from './refresh_refused';
 import { UnauthorizedError } from './unauthorized_error';
 
 import {
@@ -1983,9 +1984,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         self._failUnauthorized();
         return;
       }
-      if (token === refused) {
-        // The getter gave the token the server refused as expired: it would be refused again, so it is not sent. The
-        // connection is left to expire, and the next connect asks for a token.
+      if (isRefused(token, refused)) {
+        // The getter gave the token the server refused as expired: it would be refused again, so it is not sent.
+        // The connection is left to expire, and the next connect asks for a token.
         self._refreshRequired = true;
         return;
       }
@@ -2045,14 +2046,13 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     });
   }
 
-  // token: the token the refused refresh sent. After 109 the retry does not send it again, see _refresh.
   private _refreshError(err: any, token: string) {
     if (refreshRetries(err.code, err.temporary === true)) {
       this._emitError({
         type: 'refresh',
         error: err
       }, () => {
-        this._host.scheduleRefresh(this._getRefreshRetryDelay(), () => this._refresh(err.code === 109 ? token : undefined));
+        this._host.scheduleRefresh(this._getRefreshRetryDelay(), () => this._refresh(refusedAfter(this._config, err.code, token)));
       });
     } else if (refreshKeepsConnection(err.code)) {
       this._emitError({ type: 'refresh', error: err }, () => {});
