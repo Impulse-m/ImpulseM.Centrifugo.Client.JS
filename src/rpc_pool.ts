@@ -138,6 +138,8 @@ const defaultMaxInflightPerConnection: number = 1;
 const defaultMaxQueued: number = 64;
 const defaultIdleTimeout: number = 60000;
 const defaultMaxRedirectsInflight: number = 4;
+// The most redirect fetches in flight over a pool: each may hold a body of maxBytes, see fetchRedirect.
+const maxRedirectsInflightCeiling: number = 16;
 // The reconnect delays of a client when none is set: the defaults of centrifuge.ts, which time the hold of opens.
 const defaultMinReconnectDelay: number = 500;
 const defaultMaxReconnectDelay: number = 20000;
@@ -238,7 +240,7 @@ export class RpcPool {
       throw poolError(errorCodes.badConfiguration, `connection.minReconnectDelay and connection.maxReconnectDelay must be at most ${maxTimerDelay} milliseconds`);
     }
     this.retries = integerOption('retries', options.retries, maxLaterResends, 0);
-    this.redirects = new RedirectGate(integerOption('maxRedirectsInflight', options.maxRedirectsInflight, defaultMaxRedirectsInflight, 1));
+    this.redirects = new RedirectGate(integerOption('maxRedirectsInflight', options.maxRedirectsInflight, defaultMaxRedirectsInflight, 1, maxRedirectsInflightCeiling));
     this.rerouteHook = options.reroute;
     this.redirectHook = options.redirect;
     this.fetchOption = options.fetch;
@@ -1350,11 +1352,12 @@ function connectionOptionsOf(connection: Partial<Options> | undefined): Partial<
 }
 
 
-// An integer option of the pool, with its default when unset; a value out of range is a configuration error.
-function integerOption(name: string, value: number | undefined, fallback: number, min: number): number {
+// An integer option of the pool, with its default when unset, and its bounds: a value out of them is a configuration error.
+function integerOption(name: string, value: number | undefined, fallback: number, min: number, max?: number): number {
   const actual: number = value ?? fallback;
-  if (!Number.isInteger(actual) || actual < min) {
-    throw poolError(errorCodes.badConfiguration, name + ' must be an integer of at least ' + min);
+  if (!Number.isInteger(actual) || actual < min || (max !== undefined && actual > max)) {
+    const bound: string = max === undefined ? ' of at least ' + min : ' from ' + min + ' to ' + max;
+    throw poolError(errorCodes.badConfiguration, name + ' must be an integer' + bound);
   }
   return actual;
 }
