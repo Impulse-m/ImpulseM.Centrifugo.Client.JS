@@ -11,6 +11,7 @@ import {
   SubscriptionErrorContext
 } from './types';
 import { ttlMilliseconds, backoff, hasOffset, toOffset } from './utils';
+import { maxTimerDelay } from './call_timer';
 
 // Internal-only — phases the SDK walks through during a map subscribe.
 // Not exposed on the public surface; kept here so it doesn't leak via
@@ -287,8 +288,8 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
         // this send, so swallow errors like the timer-driven send above does.
         this._debouncePending.delete(key);
         this._debouncedPublish(key, p.data, isMap).catch(() => {});
-      }, this._debounceMs);
-    }, this._debounceMs);
+      }, Math.min(this._debounceMs, maxTimerDelay));
+    }, Math.min(this._debounceMs, maxTimerDelay));
     this._debouncePending.set(key, entry);
     // Send first publish immediately.
     const sendFn = isMap
