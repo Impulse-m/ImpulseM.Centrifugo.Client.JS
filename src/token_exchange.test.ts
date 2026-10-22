@@ -307,12 +307,42 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
     expect(c.state).toBe(State.Connected);
   });
 
-  test('renews at a random moment between 0.6 and 0.9 of the ttl, over the connection', async (): Promise<void> => {
+  test('renews at a random moment between 0.7 and 0.9 of the ttl by default, over the connection', async (): Promise<void> => {
     serve({ ttl: 10 });
     useFakeClock();
     try {
       for (let run: number = 0; run < 20; run++) {
         const c: Centrifuge = create();
+        const events: string[] = record(c);
+        await connectClient(c);
+        const rpcs: number = commands('rpc').length;
+        const refreshes: number = commands('refresh').length;
+
+        // Not before 0.7 of the ttl: 6.9 seconds pass, and no exchange has gone out.
+        jest.advanceTimersByTime(6900);
+        await flush();
+        expect(commands('rpc')).toHaveLength(rpcs);
+
+        // Not after 0.9 of the ttl: the exchange and the refresh have gone out by 9 seconds.
+        jest.advanceTimersByTime(2100);
+        await until((): boolean => commands('refresh').length === refreshes + 1);
+        expect(commands('rpc')).toHaveLength(rpcs + 1);
+        expect(commands('refresh')[refreshes].refresh.token).not.toBe(commands('refresh')[refreshes - 1].refresh.token);
+        // The identity is the same: no auth event.
+        expect(events).toEqual(['connected', 'auth']);
+        disconnectAll(clients);
+      }
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('with earlyRenewal, renews at a random moment between 0.6 and 0.9 of the ttl, over the connection', async (): Promise<void> => {
+    serve({ ttl: 10 });
+    useFakeClock();
+    try {
+      for (let run: number = 0; run < 20; run++) {
+        const c: Centrifuge = create({ earlyRenewal: true });
         const events: string[] = record(c);
         await connectClient(c);
         const rpcs: number = commands('rpc').length;
