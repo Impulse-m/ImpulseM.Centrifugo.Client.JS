@@ -1,7 +1,7 @@
 import { Centrifuge } from './centrifuge';
 import { CentrifugeProtobuf } from './protobuf_client';
 import { disconnectedCodes, errorCodes } from './codes';
-import { callTimer } from './call_timer';
+import { callTimer, maxTimerDelay } from './call_timer';
 import { presentedTokenOf } from './client_host';
 import { laterResendDelay, maxLaterResends, retrySignal } from './rpc_tracker';
 import { RpcPoolEndpoint, RpcPoolLine } from './rpc_pool_endpoint';
@@ -68,10 +68,15 @@ export interface RpcPoolOptions {
   maxQueued?: number;
   /**
    * Closes a connection without calls for this long, in milliseconds, at most 2147483647 (the longest timer). 0 keeps it
-   * open, and then close() is the only way to release it. A connection of a session the main client ended is closed at
-   * once, whatever the idle timeout. Default 60000.
+   * open, and then close() is the only way to release it. With closeEndedSession, a connection of a session the main
+   * client ended is closed at once, whatever the idle timeout. Default 60000.
    */
   idleTimeout?: number;
+  /**
+   * Closes the idle connections of a session the main client ended at once, when the client ends it, instead of at the
+   * idle timeout or the next call. Default false.
+   */
+  closeEndedSession?: boolean;
   /**
    * Resends of a call lost with its connection, refused with the later signal, or moved by reroute, counted together.
    * Default 3, the main client's count for the later signal. A later resend waits a delay drawn uniformly from
@@ -88,7 +93,7 @@ export interface RpcPoolOptions {
    * Called once per call with the outcome the server or the connection gave; not for a timeout or a cancel of the pool.
    */
   redirect?: (reply: RpcResult | null, error: any | null) => RpcPoolRedirect | undefined;
-  /** Redirect fetches in flight at most, over the pool. Default 4. */
+  /** Redirect fetches in flight at most, over the pool, from 1 to 16 (a value above 16 throws badConfiguration). Default 4. */
   maxRedirectsInflight?: number;
   /** Fetch function for redirects. Default the global fetch. */
   fetch?: typeof fetch;
@@ -144,8 +149,6 @@ const maxRedirectsInflightCeiling: number = 16;
 // The reconnect delays of a client when none is set: the defaults of centrifuge.ts, which time the hold of opens.
 const defaultMinReconnectDelay: number = 500;
 const defaultMaxReconnectDelay: number = 20000;
-// The longest delay a timer runs for, as ttlMilliseconds in utils.ts: no duration the pool arms may be longer.
-const maxTimerDelay: number = 2147483647;
 // Codes from this one up are the server's errors; the ones below are the client's own, see errorCodes.
 const serverErrorFloor: number = 100;
 const noop: () => void = (): void => {};
@@ -174,6 +177,7 @@ export class RpcPool {
   private readonly maxInflightPerConnection: number;
   private readonly maxQueued: number;
   private readonly idleTimeout: number;
+  private readonly closeEndedSession: boolean;
   private readonly retries: number;
   private readonly minReconnectDelay: number;
   private readonly maxReconnectDelay: number;
@@ -227,6 +231,7 @@ export class RpcPool {
     this.maxInflightPerConnection = integerOption('maxInflightPerConnection', options.maxInflightPerConnection, defaultMaxInflightPerConnection, 1);
     this.maxQueued = integerOption('maxQueued', options.maxQueued, defaultMaxQueued, 0);
     this.idleTimeout = integerOption('idleTimeout', options.idleTimeout, defaultIdleTimeout, 0);
+    this.closeEndedSession = options.closeEndedSession === true;
     if (this.idleTimeout > maxTimerDelay) {
       throw poolError(errorCodes.badConfiguration, `idleTimeout must be at most ${maxTimerDelay} milliseconds`);
     }
@@ -791,16 +796,14 @@ export class RpcPool {
         this.lost(conn, ctx);
       });
     });
-    endpoint.add(conn);
-    this.syncHolding();
+    this.attach(conn);
     this.armIdle(conn);
     try {
       client.connect();
     } catch (error: any) {
       // The connection carries no call, so nothing is lost: the calls waiting stay in their line, and the endpoint holds
       // its opens after the error.
-      endpoint.remove(conn);
-      this.syncHolding();
+      this.detach(conn);
       conn.retired = true;
       conn.closeCode = disconnectedCodes.disconnectCalled;
       conn.idle?.clear();
@@ -903,8 +906,7 @@ export class RpcPool {
     conn.retired = true;
     conn.live = false;
     this.source?.forget(conn);
-    conn.endpoint.remove(conn);
-    this.syncHolding();
+    this.detach(conn);
     if (conn.inflight > 0) {
       this.retiring.add(conn);
       return;
@@ -950,8 +952,7 @@ export class RpcPool {
     conn.idle?.clear();
     conn.idle = null;
     const endpoint: RpcPoolEndpoint = conn.endpoint;
-    endpoint.remove(conn);
-    this.syncHolding();
+    this.detach(conn);
     this.retiring.delete(conn);
     this.source?.forget(conn);
     // A stale connection is retired at this, its next event: its end is no error, and holds no open.
@@ -1065,8 +1066,7 @@ export class RpcPool {
       this.armIdle(conn);
       return;
     }
-    conn.endpoint.remove(conn);
-    this.syncHolding();
+    this.detach(conn);
     conn.live = false;
     this.shut(conn);
   }
@@ -1253,17 +1253,31 @@ export class RpcPool {
   }
 
 
-  // An event of the main client: the keys with waiting calls are placed or failed, and the connections of an earlier
-  // generation are retired, so an idle one of an ended session is closed. No other key is looked at.
+  // An event of the main client: the keys with waiting calls are placed or failed, and, with closeEndedSession, the
+  // connections of an earlier generation are retired, so an idle one of an ended session is closed. No other key is looked at.
   private mainEvent(): void {
     this.pass((): void => {
       for (const key of this.waitingKeys) {
         this.dirtyKeys.add(key);
       }
-      if (this.source !== null) {
+      if (this.closeEndedSession && this.source !== null) {
         this.retireStale(Array.from(this.endpoints.values()), this.source.generation());
       }
     });
+  }
+
+
+  // A connection joins its endpoint, and the source holds the pool while one is held: the one place a connection joins.
+  private attach(conn: PoolConnection): void {
+    conn.endpoint.add(conn);
+    this.syncHolding();
+  }
+
+
+  // A connection leaves its endpoint, and the source's hold follows: the one place a connection leaves.
+  private detach(conn: PoolConnection): void {
+    conn.endpoint.remove(conn);
+    this.syncHolding();
   }
 
 

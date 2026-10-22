@@ -23,6 +23,10 @@ export interface MainListener {
   onMainEvent(): void;
 }
 
+// The interests of a pool the source keeps, as the bits of its entry: the placements, and the holding of a connection.
+const placingInterest: number = 1;
+const holdingInterest: number = 2;
+
 // A request of a pool connection waiting for the token: the token it was refused, and how to answer it.
 interface Waiter {
   refused: string;
@@ -50,11 +54,10 @@ export class TokenSource {
   private readonly onDisconnected: (ctx: any) => void = (ctx: any): void => {
     this.terminal(ctx);
   };
-  // The pools with a call in a key line, told of the events that may place or fail their calls (see MainListener).
-  private readonly pools: Set<MainListener> = new Set<MainListener>();
-  // The pools with a connection of their own, told of the events that end a session, so that an idle connection of the
-  // ended identity is closed. Kept apart from pools: a pool with no call waiting is not listened to for placements.
-  private readonly holders: Set<MainListener> = new Set<MainListener>();
+  // The pools the events of the main client reach, with what each one is told of: the events that may place or fail its
+  // calls (see MainListener), when it has a call in a key line, and the events that end a session, when it holds a
+  // connection of its own, so that an idle connection of the ended identity is closed. A pool with neither is not kept.
+  private readonly pools: Map<MainListener, number> = new Map<MainListener, number>();
   // The requests waiting for a token, one per requester: a new request of a requester replaces its waiting one.
   private readonly waiting: Map<object, Waiter> = new Map<object, Waiter>();
   // The token the main client confirmed last, null before its first confirmation.
@@ -179,25 +182,25 @@ export class TokenSource {
 
   /** Tells the pool the events of the main client that may place or fail its calls. */
   listen(pool: MainListener): void {
-    this.pools.add(pool);
+    this.setInterest(pool, placingInterest, true);
   }
 
 
   /** Stops telling the pool: a pool with no call in a key line, or a closed one, is not kept by the source. */
   unlisten(pool: MainListener): void {
-    this.pools.delete(pool);
+    this.setInterest(pool, placingInterest, false);
   }
 
 
   /** Tells the pool the events of the main client that end a session, while the pool holds a connection. */
   hold(pool: MainListener): void {
-    this.holders.add(pool);
+    this.setInterest(pool, holdingInterest, true);
   }
 
 
   /** Stops telling the pool: a pool with no connection, or a closed one, is not kept by the source. */
   release(pool: MainListener): void {
-    this.holders.delete(pool);
+    this.setInterest(pool, holdingInterest, false);
   }
 
 
@@ -315,9 +318,22 @@ export class TokenSource {
   }
 
 
-  // Tells the pools of the main client an event which may place or fail their waiting calls. Each pool takes its own pass.
+  // Sets or clears one interest of a pool, and keeps the pool only while one is set.
+  private setInterest(pool: MainListener, interest: number, on: boolean): void {
+    const current: number = this.pools.get(pool) ?? 0;
+    const next: number = on ? current | interest : current & ~interest;
+    if (next === 0) {
+      this.pools.delete(pool);
+    } else {
+      this.pools.set(pool, next);
+    }
+  }
+
+
+  // Tells the pools of the main client an event which may place or fail their waiting calls, or end a session. Each pool
+  // takes its own pass. A pool that joins during the pass is told of the event too.
   private notify(): void {
-    for (const pool of Array.from(new Set<MainListener>([...this.pools, ...this.holders]))) {
+    for (const pool of this.pools.keys()) {
       pool.onMainEvent();
     }
   }

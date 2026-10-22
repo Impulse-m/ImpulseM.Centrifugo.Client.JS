@@ -82,6 +82,18 @@ function listenerCountOf(c: ProtobufCentrifuge, name: string): number {
 }
 
 // Records the rejections of the requests the source waits with, as they are answered: the requests present now.
+// The pools the source tells of placements: those whose entry holds the placing bit (1). A pool that only holds a connection
+// is kept with the holding bit (2) alone, and is not listed here.
+function placingPools(source: any): object[] {
+  const pools: object[] = [];
+  for (const [pool, interests] of source.pools as Map<object, number>) {
+    if ((interests & 1) !== 0) {
+      pools.push(pool);
+    }
+  }
+  return pools;
+}
+
 function watchRejection(source: any): any[] {
   const rejections: any[] = [];
   for (const waiter of source.waiting.values()) {
@@ -582,12 +594,27 @@ describe('RpcPool tokenFrom', () => {
     mainTtl = 1;
     const c: ProtobufCentrifuge = await connectedMain();
     // No idle timeout: the connection stays open until the pool closes, unless its session ends.
-    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url], idleTimeout: 0 });
+    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url], idleTimeout: 0, closeEndedSession: true });
     expect(fromBytes((await pool.rpc('work', bytes({ n: 'a' }))).data)).toEqual({ n: 'a' });
     expect(pool.stats().connections).toBe(1);
     // The session ends with no call on the pool: its idle connection of the ended identity is closed.
     stored = '';
-    await eventually((): boolean => pool.stats().connections === 0, 6000, 'an idle connection closed at logout');
+    await eventually((): boolean => pool.stats().connections === 0, 15000, 'an idle connection closed at logout');
+  });
+
+  test('by default an idle connection of an ended session stays open until its idle timeout or next call', async (): Promise<void> => {
+    mainTtl = 1;
+    const c: ProtobufCentrifuge = await connectedMain();
+    const pool: RpcPool = createPool(c, { endpoints: (): string[] => [edgeA.url], idleTimeout: 0 });
+    expect(fromBytes((await pool.rpc('work', bytes({ n: 'a' }))).data)).toEqual({ n: 'a' });
+    expect(pool.stats().connections).toBe(1);
+    stored = '';
+    // The session ends, and the client takes it: a wait past the logout leaves the idle connection open.
+    await eventually((): boolean => c.state === State.Disconnected, 15000, 'the main client ended its session');
+    await new Promise<void>((resolve: () => void): void => {
+      setTimeout(resolve, 1000);
+    });
+    expect(pool.stats().connections).toBe(1);
   });
 
   test('maxQueuedZeroAdmitsOnlyTheOpener', async (): Promise<void> => {
@@ -1007,14 +1034,14 @@ describe('RpcPool tokenFrom', () => {
     // The source keeps the listener of each pool, which is the pool's own main listener.
     const listenerA: object = (poolA as any).mainListener;
     const listenerB: object = (poolB as any).mainListener;
-    await eventually((): boolean => source.pools.size === 1, 6000, 'sourceReferences: B listens to the source');
-    expect(source.pools.has(listenerB)).toBe(true);
-    expect(source.pools.has(listenerA)).toBe(false);
+    await eventually((): boolean => placingPools(source).length === 1, 6000, 'sourceReferences: B listens to the source');
+    expect(placingPools(source).includes(listenerB)).toBe(true);
+    expect(placingPools(source).includes(listenerA)).toBe(false);
     holdMainConnect = false;
     main.send({ id: heldMainConnect.id, connect: main.connectResult });
     await eventually((): boolean => heldB.length === 1, 6000, 'sourceReferences: the connect places B\'s call');
-    // The connect placed B's call, so the set is empty again, and A was never drained.
-    expect(source.pools.size).toBe(0);
+    // The connect placed B's call, so no pool is told of placements again, and A was never drained.
+    expect(placingPools(source)).toHaveLength(0);
     expect((poolA as any).drainedKeys).toBe(0);
     answer(edgeB, heldB[0]);
     await bCall;
@@ -1022,11 +1049,11 @@ describe('RpcPool tokenFrom', () => {
     const inFlight: Promise<RpcResult> = quiet(poolB.rpc('work', bytes({ n: 2 })));
     await eventually((): boolean => heldB.length === 2, 6000, 'sourceReferences: the next call is in flight');
     const waiting: Promise<any> = outcome(poolB.rpc('work', bytes({ n: 3 })));
-    await eventually((): boolean => source.pools.size === 1, 6000, 'sourceReferences: B listens while its call waits');
-    expect(source.pools.has(listenerB)).toBe(true);
+    await eventually((): boolean => placingPools(source).length === 1, 6000, 'sourceReferences: B listens while its call waits');
+    expect(placingPools(source).includes(listenerB)).toBe(true);
     // A pool closed with a waiting call leaves the set, and the waiting call settles cancelled.
     poolB.close();
-    expect(source.pools.size).toBe(0);
+    expect(placingPools(source)).toHaveLength(0);
     expect(await waiting).toMatchObject({ code: errorCodes.cancelled });
     await inFlight.catch((): void => {});
   });
