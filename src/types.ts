@@ -188,7 +188,8 @@ export interface Options {
    * means none. A value that does not match throws a configuration error. */
   instance?: string;
   /** Maximum number of rpc calls tracked for retransmit at once, sent or waiting for a
-   * connection. An rpc() beyond it rejects with errorCodes.limitExceeded. Default: 32. */
+   * connection. An rpc() beyond it rejects with errorCodes.limitExceeded. Only the calls of a client with an
+   * instance are tracked: a plain call of a client without one is bounded by its call timeout only. Default: 32. */
   maxPendingRpc?: number;
   /** Lets the client obtain and renew its connection token itself, over the connection, from a refresh token the
    * application persists. Exclusive with `getToken`: setting both throws at construction. Default null. */

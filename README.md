@@ -531,7 +531,7 @@ Identifier of the installation or the browser tab, sent with the connect command
 
 #### maxPendingRpc
 
-Maximum number of rpc calls of a client with an `instance` that are not settled, the calls waiting for a connection included. Beyond it `rpc` rejects at once with `errorCodes.limitExceeded`. Default is `32`. A client without an `instance` has no bound. See [Retransmit of calls across a lost connection](#retransmit-of-calls-across-a-lost-connection).
+Maximum number of rpc calls of a client with an `instance` that are not settled, the calls waiting for a connection included. Beyond it `rpc` rejects at once with `errorCodes.limitExceeded`. Default is `32`. A client without an `instance` has no bound: its plain calls are bounded by the call timeout only. See [Retransmit of calls across a lost connection](#retransmit-of-calls-across-a-lost-connection).
 
 #### debug
 
