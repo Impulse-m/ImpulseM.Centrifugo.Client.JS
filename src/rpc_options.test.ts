@@ -4,6 +4,7 @@ import { errorCodes } from './codes';
 import { Options, State } from './types';
 import { CodecCase, codecCases, rpcOptionsWireFlag } from './testing/codecs';
 import { loggedConfig } from './rpc_options';
+import { format } from 'util';
 
 // RPC options (per-call headers), the rpc capability, server error fields and server
 // time. Every case runs over both codecs (see testing/codecs.ts).
@@ -240,5 +241,19 @@ describe('loggedConfig', () => {
   test('an unset token stays unset in the debug config', () => {
     const config: Options = { token: '', instance: '' } as Options;
     expect(loggedConfig(config).token).toBe('');
+  });
+
+  test('the debug log of a client shows its config without the token', () => {
+    const debugSpy: jest.SpyInstance = jest.spyOn(console, 'debug').mockImplementation((): void => {});
+    try {
+      const c: Centrifuge = new Centrifuge('ws://localhost:1/connection/websocket', { token: 'secret-jwt-value', debug: true });
+      const logged: string = debugSpy.mock.calls.map((args: any[]): string => format(...args)).join('\n');
+
+      expect(c.state).toBe(State.Disconnected);
+      expect(debugSpy.mock.calls.some((args: any[]): boolean => args[0] === 'config')).toBe(true);
+      expect(logged).not.toContain('secret-jwt-value');
+    } finally {
+      debugSpy.mockRestore();
+    }
   });
 });
