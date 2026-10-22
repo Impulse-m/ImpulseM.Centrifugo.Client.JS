@@ -1985,8 +1985,6 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         return;
       }
       if (isRefused(token, refused)) {
-        // The getter gave the token the server refused as expired: it would be refused again, so it is not sent.
-        // The connection is left to expire, and the next connect asks for a token.
         self._refreshRequired = true;
         return;
       }

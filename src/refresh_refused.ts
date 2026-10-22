@@ -12,7 +12,10 @@ export function refusedAfter(options: Options, code: number, token: string): str
   return options.stopOnRefusedToken === true && code === refreshRefusedExpired ? token : undefined;
 }
 
-/** Whether a token is the one the server refused as expired, in the attempt before. */
+/**
+ * Whether a token is the one the server refused as expired, in the attempt before. Such a token is not sent: the
+ * connection is left to expire, and the next connect asks for a token.
+ */
 export function isRefused(token: string, refused: string | undefined): boolean {
   return refused !== undefined && token === refused;
 }
