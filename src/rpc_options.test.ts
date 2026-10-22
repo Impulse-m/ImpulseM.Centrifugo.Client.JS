@@ -1,8 +1,9 @@
 import { Centrifuge } from './centrifuge';
 import { FakeCentrifugoServer } from './fakeServer';
 import { errorCodes } from './codes';
-import { State } from './types';
+import { Options, State } from './types';
 import { CodecCase, codecCases, rpcOptionsWireFlag } from './testing/codecs';
+import { loggedConfig } from './rpc_options';
 
 // RPC options (per-call headers), the rpc capability, server error fields and server
 // time. Every case runs over both codecs (see testing/codecs.ts).
@@ -225,5 +226,19 @@ describe.each(codecCases)('RPC options over $name', (codecCase: CodecCase) => {
     expect(Math.abs(c.serverTime() - Date.now())).toBeLessThan(1000);
 
     await expect(c.rpc('fail', codecCase.encode({}))).rejects.toMatchObject({ code: 100, message: 'legacy failure' });
+  });
+});
+
+describe('loggedConfig', () => {
+  test('the debug config shows whether a token is set, not the token', () => {
+    const config: Options = { token: 'secret-jwt-value', instance: '' } as Options;
+    const logged: Options = loggedConfig(config);
+    expect(logged.token).toBe('<set>');
+    expect(JSON.stringify(logged)).not.toContain('secret-jwt-value');
+  });
+
+  test('an unset token stays unset in the debug config', () => {
+    const config: Options = { token: '', instance: '' } as Options;
+    expect(loggedConfig(config).token).toBe('');
   });
 });

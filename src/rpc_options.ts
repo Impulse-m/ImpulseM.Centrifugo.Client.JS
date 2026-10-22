@@ -37,9 +37,13 @@ export function normaliseRpcOptions(config: Options): void {
 }
 
 /**
- * The config as the debug log shows it: the instance is a secret, so only whether one is set is shown.
+ * The config as the debug log shows it: the instance and the token are secrets, so only whether one is set is shown.
  * @internal
  */
 export function loggedConfig(config: Options): Options {
-  return { ...config, instance: config.instance === '' ? '' : '<set>' };
+  return {
+    ...config,
+    instance: config.instance === '' ? '' : '<set>',
+    token: config.token ? '<set>' : config.token,
+  };
 }
