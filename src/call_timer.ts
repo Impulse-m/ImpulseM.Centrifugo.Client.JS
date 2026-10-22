@@ -11,7 +11,10 @@ const lateCallTimer: number = 1000;
 // How long such a call still waits for its reply, or the connection for a ping,
 // before failing.
 const lateCallGrace: number = 1000;
-/** The longest delay of a timer, in milliseconds: a longer one would fire at once. */
+/**
+ * The longest delay of a timer, in milliseconds: a longer one would fire at once. It is the limit of ttlMilliseconds in
+ * utils.ts, kept here as a constant of the fork files so that utils.ts is not touched.
+ */
 export const maxTimerDelay: number = 2147483647;
 
 /**
