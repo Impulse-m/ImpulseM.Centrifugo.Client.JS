@@ -13,6 +13,7 @@ import {
 import { ttlMilliseconds, backoff, hasOffset, toOffset } from './utils';
 import { refreshKeepsConnection, refreshRetries } from './refresh_slot';
 import { refreshRetryDelay } from './refresh_retry';
+import { isRefused, refusedAfter } from './refresh_refused';
 import { maxTimerDelay } from './call_timer';
 
 // Internal-only — phases the SDK walks through during a map subscribe.
@@ -36,6 +37,8 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
   private _refreshTimeout?: null | ReturnType<typeof setTimeout> = null;
   // The timer refreshes of this subscription that failed in a row: the ceiling of the next retry grows with them.
   private _refreshRetryStep: number = 0;
+  // The token the server refused as expired in a timer refresh, when stopOnRefusedToken keeps it from being sent again.
+  private _refusedRefreshToken?: string;
   private _getToken: null | ((ctx: SubscriptionTokenContext) => Promise<string>);
   private _minResubscribeDelay: number;
   private _maxResubscribeDelay: number;
@@ -1525,6 +1528,10 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
         self._failUnauthorized();
         return;
       }
+      // The token the server refused as expired is not sent again, see _refreshError.
+      if (isRefused(token, self._refusedRefreshToken)) {
+        return;
+      }
       self._token = token;
       const req = {
         channel: self.channel,
@@ -1547,7 +1554,7 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
         }
       }, rejectCtx => {
         try {
-          self._refreshError(rejectCtx.error);
+          self._refreshError(rejectCtx.error, token);
         } catch (err) {
           // @ts-ignore – we are hiding some symbols from public API autocompletion.
           self._centrifuge._rejectionFailed(err, rejectCtx);
@@ -1588,6 +1595,7 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
     }
     this._debug('subscription token refreshed, channel', this.channel);
     this._refreshRetryStep = 0;
+    this._refusedRefreshToken = undefined;
     this._clearRefreshTimeout();
     if (result.expires === true) {
       this._refreshTimeout = setTimeout(() => this._refresh(), ttlMilliseconds(result.ttl));
@@ -1597,11 +1605,14 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
   // The policy of a timer refresh of the subscription is the one of the connection's (see refreshRetries): a client error,
   // a temporary error and 109 are retried with a fresh token, 103 keeps the subscription without a retry, and any other
   // error unsubscribes with its code.
-  private _refreshError(err: any) {
+  private _refreshError(err: any, token: string) {
     if (!this._isSubscribed()) {
       return;
     }
     if (refreshRetries(err.code, err.temporary === true)) {
+      // With stopOnRefusedToken the refused token is not sent again, not even by the retry (see refusedAfter).
+      // @ts-ignore – we are hiding some symbols from public API autocompletion.
+      this._refusedRefreshToken = refusedAfter(this._centrifuge._config, err.code, token);
       this._emitError({
         type: 'refresh',
         channel: this.channel,
