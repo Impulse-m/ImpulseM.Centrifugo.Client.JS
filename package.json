@@ -19,7 +19,8 @@
   },
   "files": [
     "dist/**",
-    "build/**"
+    "build/**",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "browser": {
     "events": "events"

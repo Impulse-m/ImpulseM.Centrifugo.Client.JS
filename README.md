@@ -1,8 +1,29 @@
 ## Fork of centrifuge-js
 
-This is a fork of [centrifuge-js](https://github.com/centrifugal/centrifuge-js), published to npm as [`@impulsem/centrifuge`](https://www.npmjs.com/package/@impulsem/centrifuge). Its API matches upstream, so the API documentation below applies unless noted otherwise. Install and import instructions in this README refer to `@impulsem/centrifuge`, not to the upstream `centrifuge` package.
+This is a fork of [centrifuge-js](https://github.com/centrifugal/centrifuge-js) (MIT), the JavaScript client SDK for [Centrifugo](https://github.com/centrifugal/centrifugo) and [Centrifuge](https://github.com/centrifugal/centrifuge). The fork is published to npm as [`@impulsem/centrifuge`](https://www.npmjs.com/package/@impulsem/centrifuge) from [Impulse-m/ImpulseM.Centrifugo.Client.JS](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS). Upstream master is merged into the fork. The API documentation below is upstream's, except for the additions and changed behaviour listed here.
 
-The package has its own versioning, starting at `1.0.0`, independent of upstream `centrifuge-js` versions. Releases are listed on the GitHub releases page of the repository the package is published from.
+```bash
+npm install @impulsem/centrifuge
+```
+
+Current version: **1.6.0**. The package has its own versioning, starting at `1.0.0`, independent of upstream `centrifuge-js` versions. Releases are listed on the [releases page](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS/releases), and the changes are in [CHANGELOG.md](CHANGELOG.md). Browser and other install options are in [Install](#install).
+
+What the fork adds:
+
+* [RPC options](#rpc-options-server-capabilities-and-server-fields): retransmit of calls across a lost connection, cancel with `AbortSignal`, the `instance` and `maxPendingRpc` options.
+* [Connection token refresh](#refreshing-the-connection-token-on-demand): the `refresh()` method and the `auth` event.
+* [Token exchange](#token-exchange-over-the-connection), described in [docs/token_exchange.md](docs/token_exchange.md).
+* [RPC pool for large payloads](#rpc-pool-for-large-payloads), exported from the protobuf entry.
+
+Behaviour that differs from upstream: a timer refresh refused with `103` or `109` is handled as described in [Refreshing the connection token on demand](#refreshing-the-connection-token-on-demand), and an `rpc` call waits for a refresh in flight before it is sent.
+
+Related repositories:
+
+* Server: [ImpulseM.Centrifugo](https://github.com/Impulse-m/ImpulseM.Centrifugo), a Centrifugo fork.
+* Core: [ImpulseM.Centrifugo.Core](https://github.com/Impulse-m/ImpulseM.Centrifugo.Core), the Go Centrifuge library used by the server.
+* Protocol: [ImpulseM.Centrifugo.Protocol](https://github.com/Impulse-m/ImpulseM.Centrifugo.Protocol). The `proto/client.proto` file of this repository is copied from it.
+* Java SDK: [ImpulseM.Centrifugo.Client.Java](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Java).
+* Swift SDK: [ImpulseM.Centrifugo.Client.Swift](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.Swift).
 
 This SDK provides a client to connect to [Centrifugo](https://github.com/centrifugal/centrifugo) or any [Centrifuge-based](https://github.com/centrifugal/centrifuge) server using pure WebSocket or one of the alternative transports (HTTP-streaming, SSE/EventSource, experimental WebTransport) from web browser, ReactNative, or NodeJS environments.
 
@@ -55,13 +76,13 @@ And then in your project:
 import { Centrifuge } from '@impulsem/centrifuge';
 ```
 
-In browser, you can import SDK from [unpkg](https://app.unpkg.com/@impulsem/centrifuge@latest) CDN (replace `1.0.0` with a concrete version number you want to use, see [releases](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS/releases)):
+In browser, you can import SDK from [unpkg](https://app.unpkg.com/@impulsem/centrifuge@latest) CDN (replace `1.6.0` with a concrete version number you want to use, see [releases](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS/releases)):
 
 ```html
-<script src="https://unpkg.com/@impulsem/centrifuge@1.0.0/dist/centrifuge.js"></script>
+<script src="https://unpkg.com/@impulsem/centrifuge@1.6.0/dist/centrifuge.js"></script>
 ```
 
-The same files are available from jsDelivr: `https://cdn.jsdelivr.net/npm/@impulsem/centrifuge@1.0.0/dist/centrifuge.js`, see [@impulsem/centrifuge on jsdelivr](https://www.jsdelivr.com/package/npm/@impulsem/centrifuge). Note that `@impulsem/centrifuge` browser builds target [ES6](https://caniuse.com/es6).
+The same files are available from jsDelivr: `https://cdn.jsdelivr.net/npm/@impulsem/centrifuge@1.6.0/dist/centrifuge.js`, see [@impulsem/centrifuge on jsdelivr](https://www.jsdelivr.com/package/npm/@impulsem/centrifuge). The `build/` output is compiled to [ES6](https://caniuse.com/es6). The browser bundles in `dist/` are built by esbuild without a target, so they keep the newer syntax of the source.
 
 **By default, library works with JSON only**, if you want to send binary payloads go to [Protobuf support](#protobuf-support) section to see how to import client with Protobuf support.
 
@@ -156,7 +177,7 @@ If you want to use SockJS you must also import SockJS client before centrifuge.j
 
 ```html
 <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js" type="text/javascript"></script>
-<script src="https://unpkg.com/@impulsem/centrifuge@1.0.0/dist/centrifuge.js" type="text/javascript"></script>
+<script src="https://unpkg.com/@impulsem/centrifuge@1.6.0/dist/centrifuge.js" type="text/javascript"></script>
 ```
 
 Or provide it explicitly as a dependency:
@@ -1245,7 +1266,7 @@ Additionally, Client has several top-level methods to call with server-side subs
 To import client which uses Protobuf protocol under the hood:
 
 ```html
-<script src="https://unpkg.com/@impulsem/centrifuge@1.0.0/dist/centrifuge.protobuf.js"></script>
+<script src="https://unpkg.com/@impulsem/centrifuge@1.6.0/dist/centrifuge.protobuf.js"></script>
 ```
 
 Or if you are developing with npm:
@@ -1321,11 +1342,11 @@ var centrifuge = new Centrifuge('ws://localhost:8000/connection/websocket', {
 });
 ```
 
-See a basic example with React Native where this technique is used in the upstream centrifuge-js discussion [#224](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS/issues) (upstream issue 224).
+See a basic example with React Native where this technique is used in the upstream centrifuge-js issue [#224](https://github.com/centrifugal/centrifuge-js/issues/224).
 
 ## Using with React Native on Android
 
-If you have issues with the connection on Android when using React Native – [check out the upstream centrifuge-js discussion](https://github.com/Impulse-m/ImpulseM.Centrifugo.Client.JS/issues) (upstream issue 242) – you may be using non-secure endpoint schemes and need to explicitly allow it.
+If you have issues with the connection on Android when using React Native – [check out the upstream centrifuge-js issue](https://github.com/centrifugal/centrifuge-js/issues/242) (upstream issue 242) – you may be using non-secure endpoint schemes and need to explicitly allow it.
 
 ## Errors in callbacks
 
@@ -1351,3 +1372,7 @@ Then:
 ```
 yarn test
 ```
+
+## License
+
+This package is released under the [MIT License](LICENSE). The copyright notice in `LICENSE` is the upstream one and is kept as it is. Third-party components that the package contains or bundles keep their own licenses, which are reproduced in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
