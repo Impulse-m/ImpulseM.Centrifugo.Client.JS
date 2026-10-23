@@ -1,4 +1,4 @@
-import { refreshRetryCeiling, refreshRetryDelay } from './refresh_retry';
+import { defaultTokenRetryCap, normaliseTokenRetryCap, refreshRetryCeiling, refreshRetryDelay } from './refresh_retry';
 
 // The retry after a failed timer refresh, of the connection and of a subscription: the delay is 10 s plus a draw over
 // the growing ceiling, the draw at 0 gives 10 s and the draw at its top gives the ceiling of the step, which doubles
@@ -36,5 +36,35 @@ describe('the delay of a retry after a failed timer refresh', (): void => {
 
     expect(refreshRetryCeiling(0, 10000)).toBe(20000);
     expect(refreshRetryDelay(3, 10000)).toBe(20000);
+  });
+
+  test('an unset, null, NaN, negative or infinite tokenRetryCap normalises to the default', (): void => {
+    expect(defaultTokenRetryCap).toBe(300000);
+    expect(normaliseTokenRetryCap(undefined)).toBe(defaultTokenRetryCap);
+    expect(normaliseTokenRetryCap(null as unknown as number)).toBe(defaultTokenRetryCap);
+    expect(normaliseTokenRetryCap(Number.NaN)).toBe(defaultTokenRetryCap);
+    expect(normaliseTokenRetryCap(-1)).toBe(defaultTokenRetryCap);
+    expect(normaliseTokenRetryCap(Number.POSITIVE_INFINITY)).toBe(defaultTokenRetryCap);
+    expect(normaliseTokenRetryCap('60000' as unknown as number)).toBe(defaultTokenRetryCap);
+  });
+
+  test('a finite tokenRetryCap from 0 up is kept as it is', (): void => {
+    expect(normaliseTokenRetryCap(0)).toBe(0);
+    expect(normaliseTokenRetryCap(60000)).toBe(60000);
+  });
+
+  test('a retry delay with an unset or NaN tokenRetryCap, once normalised, is the default delay, never 0 or NaN', (): void => {
+    const random: jest.SpyInstance = jest.spyOn(Math, 'random');
+    const cases: Array<number | undefined> = [undefined, Number.NaN];
+
+    for (const tokenRetryCap of cases) {
+      const cap: number = normaliseTokenRetryCap(tokenRetryCap);
+      random.mockReturnValue(0);
+      expect(refreshRetryDelay(0, cap)).toBe(10000);
+      random.mockReturnValue(0.9999999);
+      expect(refreshRetryDelay(0, cap)).toBe(20000);
+      random.mockReturnValue(0.9999999);
+      expect(refreshRetryDelay(5, cap)).toBe(300000);
+    }
   });
 });

@@ -1640,7 +1640,7 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
   // in a row, which the next retry's ceiling grows with.
   private _getRefreshRetryDelay() {
     // @ts-ignore – we are hiding some symbols from public API autocompletion.
-    const delay: number = refreshRetryDelay(this._refreshRetryStep, this._centrifuge._config.tokenRetryCap as number);
+    const delay: number = refreshRetryDelay(this._refreshRetryStep, this._centrifuge._refreshRetryCap);
     this._refreshRetryStep++;
     return delay;
   }

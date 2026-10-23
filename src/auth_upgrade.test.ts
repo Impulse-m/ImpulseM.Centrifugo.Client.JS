@@ -580,6 +580,46 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
     }
   });
 
+  test.each([undefined, Number.NaN])('a timer refresh retry with tokenRetryCap %p waits the default delay, never zero or NaN', async (tokenRetryCap: number | undefined): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', expires: true, ttl: 1 };
+    let refreshes: number = 0;
+    server.onCommand = (cmd: any): any => {
+      if (cmd.refresh === undefined) {
+        return undefined;
+      }
+      refreshes++;
+      return refreshes === 1
+        ? { id: cmd.id, error: { code: 109, message: 'token expired' } }
+        : { id: cmd.id, refresh: {} };
+    };
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      let tokens: number = 0;
+      const c: Centrifuge = create({ getToken: async (): Promise<string> => `timer-token-${++tokens}`, tokenRetryCap: tokenRetryCap });
+      const failed: Promise<any> = new Promise<any>((resolve: (ctx: any) => void): void => {
+        c.once('error', (ctx: any): void => resolve(ctx));
+      });
+      await connect(c);
+
+      jest.advanceTimersByTime(1000);
+      await expect(failed).resolves.toMatchObject({ type: 'refresh', error: { code: 109 } });
+
+      // The retry is armed for its default delay of 10 to 20 seconds. A zero or NaN delay would fire it at once, so the
+      // timers still pending after 9999 ms are the same as the ones armed at the failure.
+      const armed: number = jest.getTimerCount();
+      jest.advanceTimersByTime(9999);
+      expect(jest.getTimerCount()).toBe(armed);
+      expect(refreshCommands().length).toBe(1);
+
+      jest.advanceTimersByTime(10001);
+      await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 2);
+      expect(refreshCommands()[1].refresh.token).not.toBe(refreshCommands()[0].refresh.token);
+      expect(c.state).toBe(State.Connected);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   // The subscription refresh follows the connection's policy: a 109 is retried with a fresh token after the backoff of
   // refreshRetryDelay, a 103 keeps the subscription and is not retried.
   function subRefreshCommands(): any[] {

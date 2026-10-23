@@ -36,7 +36,7 @@ import { RefreshSlot, refreshKeepsConnection, refreshRetries } from './refresh_s
 import { ConnectionIdentity } from './identity';
 import { TokenExchangeFlow, createTokenExchangeFlow } from './token_exchange';
 import { isRefused, refusedAfter } from './refresh_refused';
-import { refreshRetryDelay } from './refresh_retry';
+import { defaultTokenRetryCap, normaliseTokenRetryCap, refreshRetryDelay } from './refresh_retry';
 import { UnauthorizedError } from './unauthorized_error';
 
 import {
@@ -97,7 +97,7 @@ const defaults: Options = {
   maxReconnectDelay: 20000,
   timeout: 5000,
   maxServerPingDelay: 10000,
-  tokenRetryCap: 300000,
+  tokenRetryCap: defaultTokenRetryCap,
   networkEventTarget: null,
   pageEventTarget: null,
 }
@@ -158,6 +158,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _refreshTimeout?: null | ReturnType<typeof setTimeout> = null;
   // The timer refreshes failed in a row: the ceiling of the next retry grows with it, see refreshRetryDelay.
   private _refreshRetryStep: number = 0;
+  // The tokenRetryCap in use, normalised at construction: the ceiling of the retry delays of the connection and of its
+  // subscriptions.
+  private _refreshRetryCap: number;
   private _callbacks: Record<number, any>;
   private _token: string;
   private _data: any;
@@ -243,9 +246,10 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     this._reconnectAttemptsResetPending = false;
 
     this._config = { ...defaults, ...options };
-    normaliseRpcOptions(this._config);
+    const maxPendingRpc: number = normaliseRpcOptions(this._config);
+    this._refreshRetryCap = normaliseTokenRetryCap(this._config.tokenRetryCap);
     this._host = createClientHost(this);
-    this._rpc = new RpcTracker(this._host, this._config.maxPendingRpc as number, this._config.timeout);
+    this._rpc = new RpcTracker(this._host, maxPendingRpc, this._config.timeout);
     this._refreshSlot = new RefreshSlot(this._host);
     this._configure();
 
@@ -2158,7 +2162,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   // The delay of the next retry of a failed timer refresh. Each delay taken counts one more failure in a row.
   private _getRefreshRetryDelay() {
-    const delay: number = refreshRetryDelay(this._refreshRetryStep, this._config.tokenRetryCap as number);
+    const delay: number = refreshRetryDelay(this._refreshRetryStep, this._refreshRetryCap);
     this._refreshRetryStep++;
     return delay;
   }

@@ -199,7 +199,8 @@ export interface Options {
    * one the server refused. */
   stopOnRefusedToken?: boolean;
   /** Ceiling in milliseconds of the retry delay after a failed timer refresh of the connection or of a subscription.
-   * The ceiling starts at 20 seconds and doubles with each failure in a row, up to this value. Default: 300000. */
+   * The ceiling starts at 20 seconds and doubles with each failure in a row, up to this value. A value that is not a
+   * finite number of milliseconds from 0 up (unset, NaN, negative) takes the default. Default: 300000. */
   tokenRetryCap?: number;
   /** EventTarget used to observe pagehide/pageshow events: the client closes its connection when
    * the page enters the back/forward cache, and reconnects when the page is restored from it. When

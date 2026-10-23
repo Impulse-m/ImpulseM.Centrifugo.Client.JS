@@ -9,6 +9,21 @@ const refreshRetryFirstCeilingMillis: number = 20000;
 // The failures in a row after which the ceiling no longer grows, so the power of two never overflows.
 const refreshRetryMaxStep: number = 30;
 
+/** The default of the tokenRetryCap option, in milliseconds. */
+export const defaultTokenRetryCap: number = 300000;
+
+/**
+ * The tokenRetryCap in use: the option when it is a finite number of milliseconds from 0 up, else the default. Unset,
+ * null, NaN, negative and non-number values all take the default, so a retry delay is never 0 or NaN.
+ * @internal
+ */
+export function normaliseTokenRetryCap(tokenRetryCap: number | undefined): number {
+  if (typeof tokenRetryCap !== 'number' || !Number.isFinite(tokenRetryCap) || tokenRetryCap < 0) {
+    return defaultTokenRetryCap;
+  }
+  return tokenRetryCap;
+}
+
 /**
  * The ceiling of the retry delay after the given failures in a row: 20 seconds for the first, doubling with each failure
  * up to the tokenRetryCap option. A cap below 20 seconds keeps the ceiling at 20 seconds.
