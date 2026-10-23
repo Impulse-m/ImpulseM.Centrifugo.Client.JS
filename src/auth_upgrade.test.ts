@@ -570,8 +570,8 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
       await expect(failed).resolves.toMatchObject({ type: 'refresh', error: { code: 109 } });
       expect(c.state).toBe(State.Connected);
 
-      // The retry waits for its backoff of 5 to 10 seconds, then asks for a token again.
-      jest.advanceTimersByTime(10000);
+      // The retry waits for its backoff of 10 to 20 seconds (refreshRetryDelay), then asks for a token again.
+      jest.advanceTimersByTime(20000);
       await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 2);
       expect(refreshCommands()[1].refresh.token).not.toBe(refreshCommands()[0].refresh.token);
       expect(c.state).toBe(State.Connected);
@@ -595,8 +595,8 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
       await expect(failed).resolves.toMatchObject({ type: 'refresh', error: { code: 109 } });
       await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 1);
 
-      // The retry after its backoff sends the same token again: the server refuses it again.
-      jest.advanceTimersByTime(10000);
+      // The retry after its backoff (10 to 20 seconds, refreshRetryDelay) sends the same token again: the server refuses it again.
+      jest.advanceTimersByTime(20000);
       await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 2);
       expect(refreshCommands()[1].refresh.token).toBe('expired-token');
     } finally {

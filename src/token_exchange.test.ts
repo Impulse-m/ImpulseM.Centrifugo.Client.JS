@@ -1390,8 +1390,8 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       await until((): boolean => events.includes('error:refreshToken'));
       expect(c.state).toBe(State.Connected);
 
-      jest.advanceTimersByTime(10000);
-      await until((): boolean => commands('refresh').length === 2);
+      // The retry waits 10 to 20 seconds (refreshRetryDelay): the wait runs until the retry sends its refresh.
+      await advanceUntil((): boolean => commands('refresh').length === 2);
       expect(commands('refresh')[1].refresh.token).toBe('access-2');
       expect(c.state).toBe(State.Connected);
     } finally {
@@ -1674,8 +1674,9 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       expect(await until((): boolean => events.includes('error:refreshToken'))).toBe(true);
       expect(c.state).toBe(State.Connected);
 
-      jest.advanceTimersByTime(10000);
-      expect(await until((): boolean => commands('refresh').length === 2)).toBe(true);
+      // The retry waits 10 to 20 seconds (refreshRetryDelay): the wait runs until the retry sends its refresh.
+      await advanceUntil((): boolean => commands('refresh').length === 2);
+      expect(commands('refresh')).toHaveLength(2);
       expect(c.state).toBe(State.Connected);
       expect(events.filter((entry: string): boolean => entry.startsWith('disconnected:'))).toEqual([]);
     } finally {
@@ -1929,9 +1930,9 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       await advanceUntil((): boolean => events.includes('error:refreshToken'));
       expect(c.state).toBe(State.Connected);
 
-      // The retry runs after the refresh backoff, with a new exchange over the same connection.
-      jest.advanceTimersByTime(10000);
-      await until((): boolean => commands('refresh').length === 2);
+      // The retry runs after the refresh backoff (10 to 20 seconds, refreshRetryDelay), with a new exchange over the same
+      // connection: the wait runs until the retry sends its refresh.
+      await advanceUntil((): boolean => commands('refresh').length === 2);
       expect(calls).toBe(3);
       expect(commands('connect')).toHaveLength(1);
       expect(stored).toBe('refresh-3');
@@ -2308,7 +2309,8 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       expect(events).not.toContain('error:refreshToken');
       expect(c.state).toBe(State.Connected);
 
-      jest.advanceTimersByTime(10000);
+      // Past the longest refresh retry (20 seconds, refreshRetryDelay): a retry that was armed would have run by now.
+      jest.advanceTimersByTime(20000);
       await flush();
       expect(calls).toBe(2);
       expect(events).not.toContain('error:refreshToken');
@@ -2352,7 +2354,8 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       expect(events).not.toContain('disconnected:1');
       expect(c.state).toBe(State.Connected);
 
-      jest.advanceTimersByTime(10000);
+      // Past the longest refresh retry (20 seconds, refreshRetryDelay): a retry that was armed would have run by now.
+      jest.advanceTimersByTime(20000);
       await flush();
       expect(calls).toBe(2);
       expect(events).not.toContain('error:refreshToken');
@@ -2405,7 +2408,8 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       expect(c.state).toBe(State.Connected);
 
       // No exchange follows from the dropped refusal, and the connection keeps the access token it was given.
-      jest.advanceTimersByTime(10000);
+      // Past the longest refresh retry (20 seconds, refreshRetryDelay): a retry that was armed would have run by now.
+      jest.advanceTimersByTime(20000);
       await flush();
       expect(calls).toBe(2);
       expect(events).not.toContain('error:refreshToken');

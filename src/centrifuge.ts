@@ -36,6 +36,7 @@ import { RefreshSlot, refreshKeepsConnection, refreshRetries } from './refresh_s
 import { ConnectionIdentity } from './identity';
 import { TokenExchangeFlow, createTokenExchangeFlow } from './token_exchange';
 import { isRefused, refusedAfter } from './refresh_refused';
+import { refreshRetryDelay } from './refresh_retry';
 import { UnauthorizedError } from './unauthorized_error';
 
 import {
@@ -96,6 +97,7 @@ const defaults: Options = {
   maxReconnectDelay: 20000,
   timeout: 5000,
   maxServerPingDelay: 10000,
+  tokenRetryCap: 300000,
   networkEventTarget: null,
   pageEventTarget: null,
 }
@@ -154,6 +156,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _batching: boolean;
   private _refreshRequired: boolean;
   private _refreshTimeout?: null | ReturnType<typeof setTimeout> = null;
+  // The timer refreshes failed in a row: the ceiling of the next retry grows with it, see refreshRetryDelay.
+  private _refreshRetryStep: number = 0;
   private _callbacks: Record<number, any>;
   private _token: string;
   private _data: any;
@@ -2152,8 +2156,11 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
   }
 
+  // The delay of the next retry of a failed timer refresh. Each delay taken counts one more failure in a row.
   private _getRefreshRetryDelay() {
-    return backoff(0, 5000, 10000);
+    const delay: number = refreshRetryDelay(this._refreshRetryStep, this._config.tokenRetryCap as number);
+    this._refreshRetryStep++;
+    return delay;
   }
 
   // A new subscription of the channel waits for the unsubscribe of a removed one, and
@@ -2299,6 +2306,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       this._reconnectAttempts = 0;
     }
     this._refreshRequired = false;
+    this._refreshRetryStep = 0;
     // Connected again: a later online event must not take the device for having been
     // offline and abort a transport that works.
     this._deviceWentOffline = false;

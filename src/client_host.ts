@@ -130,6 +130,8 @@ export function createClientHost(client: Centrifuge): ClientHost {
     applyReply: (result: any): void => {
       client['_tokenExchange']?.tokenAccepted();
       client['_clearRefreshTimeout']();
+      // An accepted refresh ends the failures in a row: the next retry starts from the first ceiling.
+      client['_refreshRetryStep'] = 0;
       if (result.expires) {
         // The client id of the connection only changes if the reply carries one — and
         // Centrifugo never sets that field of a refresh reply. Taking an absent one
