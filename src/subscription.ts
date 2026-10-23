@@ -1612,7 +1612,7 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
     if (refreshRetries(err.code, err.temporary === true)) {
       // With stopOnRefusedToken the refused token is not sent again, not even by the retry (see refusedAfter).
       // @ts-ignore – we are hiding some symbols from public API autocompletion.
-      this._refusedRefreshToken = refusedAfter(this._centrifuge._config, err.code, token);
+      this._refusedRefreshToken = refusedAfter(this._centrifuge._config, err.code, token, this._refusedRefreshToken);
       this._emitError({
         type: 'refresh',
         channel: this.channel,

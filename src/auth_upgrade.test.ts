@@ -783,6 +783,108 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
     }
   });
 
+  test('a timer refresh refused with 109 with A keeps A refused after a temporary error with B: connection', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0', expires: true, ttl: 1 };
+    server.onCommand = (cmd: any): any => {
+      if (cmd.refresh === undefined) {
+        return undefined;
+      }
+      return cmd.refresh.token === 'token-A'
+        ? { id: cmd.id, error: { code: 109, message: 'token expired' } }
+        : { id: cmd.id, error: { code: 100, message: 'internal', temporary: true } };
+    };
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      let next: string = 'token-A';
+      let tokenCalls: number = 0;
+      const c: Centrifuge = create({
+        getToken: async (): Promise<string> => {
+          tokenCalls++;
+          return next;
+        },
+      });
+      const errors: any[] = [];
+      c.on('error', (ctx: any): void => {
+        errors.push(ctx);
+      });
+      await connect(c);
+
+      jest.advanceTimersByTime(1000);
+      expect(await until((): boolean => errors.length === 1)).toBe(true);
+      expect(errors[0]).toMatchObject({ type: 'refresh', error: { code: 109 } });
+
+      // The retry sends B, answered by a temporary error: the marker of A is kept.
+      next = 'token-B';
+      jest.advanceTimersByTime(20000);
+      expect(await until((): boolean => errors.length === 2)).toBe(true);
+      expect(errors[1]).toMatchObject({ type: 'refresh', error: { code: 100 } });
+
+      // The next retry gets A from getToken: A is refused already, so it is not sent again.
+      const before: number = tokenCalls;
+      next = 'token-A';
+      jest.advanceTimersByTime(60000);
+      expect(await until((): boolean => tokenCalls > before)).toBe(true);
+      await flushTimers();
+      expect(refreshCommands().map((cmd: any): string => cmd.refresh.token)).toEqual(['token-A', 'token-B']);
+      expect(c.state).toBe(State.Connected);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a subscription refresh refused with 109 with A keeps A refused after a temporary error with B: subscription', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0' };
+    server.onSubscribe = (): any => ({ expires: true, ttl: 1 });
+    server.onCommand = (cmd: any): any => {
+      if (cmd.sub_refresh === undefined) {
+        return undefined;
+      }
+      return cmd.sub_refresh.token === 'sub-token-A'
+        ? { id: cmd.id, error: { code: 109, message: 'token expired' } }
+        : { id: cmd.id, error: { code: 100, message: 'internal', temporary: true } };
+    };
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      let next: string = 'sub-token-A';
+      let tokenCalls: number = 0;
+      const c: Centrifuge = create();
+      const sub: any = c.newSubscription('channel', {
+        getToken: async (): Promise<string> => {
+          tokenCalls++;
+          return next;
+        },
+      });
+      const errors: any[] = [];
+      sub.on('error', (ctx: any): void => {
+        errors.push(ctx);
+      });
+      sub.subscribe();
+      await connect(c);
+      expect(await until((): boolean => sub.state === SubscriptionState.Subscribed)).toBe(true);
+
+      jest.advanceTimersByTime(1000);
+      expect(await until((): boolean => errors.length === 1)).toBe(true);
+      expect(errors[0]).toMatchObject({ type: 'refresh', channel: 'channel', error: { code: 109 } });
+
+      // The retry sends B, answered by a temporary error: the marker of A is kept.
+      next = 'sub-token-B';
+      jest.advanceTimersByTime(20000);
+      expect(await until((): boolean => errors.length === 2)).toBe(true);
+      expect(errors[1]).toMatchObject({ type: 'refresh', channel: 'channel', error: { code: 100 } });
+
+      // The next retry gets A from getToken: A is refused already, so it is not sent again.
+      const before: number = tokenCalls;
+      next = 'sub-token-A';
+      jest.advanceTimersByTime(60000);
+      expect(await until((): boolean => tokenCalls > before)).toBe(true);
+      await flushTimers();
+      expect(subRefreshCommands().map((cmd: any): string => cmd.sub_refresh.token)).toEqual(['sub-token-A', 'sub-token-B']);
+      expect(sub.state).toBe(SubscriptionState.Subscribed);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a timer refresh whose token arrives after a refresh() call started is dropped, and the identity of the call stays', async (): Promise<void> => {
     server.connectResult = { client: 'fake-client', version: '0.0.0', user: 'alice', auth_class: 'authenticated', expires: true, ttl: 1 };
     server.onCommand = (cmd: any): any => (cmd.refresh !== undefined ? {

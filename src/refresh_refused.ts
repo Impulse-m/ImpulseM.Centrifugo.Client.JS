@@ -4,12 +4,13 @@ import type { Options } from './types';
 export const refreshRefusedExpired: number = 109;
 
 /**
- * The token a retry of a refused timer refresh must not send again, or undefined when the retry may send any token.
- * Unless the option stopOnRefusedToken is set to false, and only for a refusal as expired: the retry does not send the
- * token the server refused again, so a token that expired is not resent forever.
+ * The token a retry of a failed timer refresh must not send again. A refusal as expired (109) makes the token it was
+ * sent with the refused one, unless the option stopOnRefusedToken is set to false. Any other error keeps the marker
+ * of the attempts before, so a retry with another token answered by a temporary error does not send a refused token
+ * again. A successful refresh clears the marker.
  */
-export function refusedAfter(options: Options, code: number, token: string): string | undefined {
-  return options.stopOnRefusedToken !== false && code === refreshRefusedExpired ? token : undefined;
+export function refusedAfter(options: Options, code: number, token: string, previous: string | undefined): string | undefined {
+  return options.stopOnRefusedToken !== false && code === refreshRefusedExpired ? token : previous;
 }
 
 /**

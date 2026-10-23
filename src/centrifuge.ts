@@ -158,6 +158,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
   private _refreshTimeout?: null | ReturnType<typeof setTimeout> = null;
   // The timer refreshes failed in a row: the ceiling of the next retry grows with it, see refreshRetryDelay.
   private _refreshRetryStep: number = 0;
+  // The token the server refused as expired in a timer refresh, not sent again (see refusedAfter). Kept over the
+  // failures of the retries, cleared by an accepted refresh.
+  private _refusedRefreshToken?: string;
   // The tokenRetryCap in use, normalised at construction: the ceiling of the retry delays of the connection and of its
   // subscriptions.
   private _refreshRetryCap: number;
@@ -2068,8 +2071,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
   }
 
-  // refused: the token the server refused as expired in the attempt before, if any.
-  private _refresh(refused?: string) {
+  private _refresh() {
     const clientId = this._client;
     const self = this;
     // See _startReconnecting.
@@ -2085,7 +2087,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
         self._failUnauthorized();
         return;
       }
-      if (isRefused(token, refused)) {
+      if (isRefused(token, self._refusedRefreshToken)) {
         self._refreshRequired = true;
         return;
       }
@@ -2099,6 +2101,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
           return;
         }
         try {
+          self._refusedRefreshToken = undefined;
           self._refreshSlot.accepted(token, resolveCtx.reply.refresh);
         } catch (err) {
           self._dispatchFailed(err);
@@ -2147,11 +2150,12 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   private _refreshError(err: any, token: string) {
     if (refreshRetries(err.code, err.temporary === true)) {
+      this._refusedRefreshToken = refusedAfter(this._config, err.code, token, this._refusedRefreshToken);
       this._emitError({
         type: 'refresh',
         error: err
       }, () => {
-        this._host.scheduleRefresh(this._getRefreshRetryDelay(), () => this._refresh(refusedAfter(this._config, err.code, token)));
+        this._host.scheduleRefresh(this._getRefreshRetryDelay(), () => this._refresh());
       });
     } else if (refreshKeepsConnection(err.code)) {
       this._emitError({ type: 'refresh', error: err }, () => {});
