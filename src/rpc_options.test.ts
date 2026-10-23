@@ -25,8 +25,8 @@ describe.each(codecCases)('RPC options over $name', (codecCase: CodecCase) => {
     await server.close();
   });
 
-  async function connect(): Promise<Centrifuge> {
-    const c = codecCase.createClient(server.url);
+  async function connect(options?: Partial<Options>): Promise<Centrifuge> {
+    const c = codecCase.createClient(server.url, options);
     clients.push(c);
     const connected = new Promise<void>(resolve => c.once('connected', () => resolve()));
     c.connect();
@@ -208,6 +208,35 @@ describe.each(codecCases)('RPC options over $name', (codecCase: CodecCase) => {
     await c.rpc('echo', codecCase.encode({}));
 
     expect(Math.abs(c.serverTime() - (Date.now() + skewMs))).toBeLessThan(1000);
+  });
+
+  // The late reply of a call that timed out arrives after the call settled: it answers no pending command, so its
+  // server time does not move the offset. The next reply (no time) follows it on the same connection, so once it is
+  // handled the late one was handled too.
+  test('a late reply to a timed out call does not set the server time', async () => {
+    const skewMs = 100000;
+    const lateCommandIds: number[] = [];
+    server.onCommand = (cmd: any) => {
+      if (cmd.rpc === undefined) {
+        return undefined;
+      }
+      if (cmd.rpc.method === 'slow') {
+        lateCommandIds.push(cmd.id);
+        return undefined;
+      }
+      return { id: cmd.id, rpc: { data: codecCase.encode(null) } };
+    };
+    const c = await connect({ timeout: 200 });
+    await expect(c.rpc('slow', codecCase.encode({}))).rejects.toMatchObject({ code: errorCodes.timeout });
+
+    server.send({
+      id: lateCommandIds[0],
+      time: Date.now() + skewMs,
+      rpc: { data: codecCase.encode(null) },
+    });
+    await c.rpc('echo', codecCase.encode({}));
+
+    expect(Math.abs(c.serverTime() - Date.now())).toBeLessThan(1000);
   });
 
   test('old-shape replies without the new fields still work', async () => {

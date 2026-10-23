@@ -2508,7 +2508,8 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     return ctx;
   }
 
-  // A reply without a server time keeps the last offset.
+  // A reply without a server time keeps the last offset. Only a reply that answers a pending command gets here: a late
+  // reply to a call that already settled does not move the offset (see _handleReply).
   private _observeServerTime(reply: any): void {
     const offset = serverTimeOffsetFrom(reply.time, Date.now());
     if (offset !== null) {
@@ -2518,12 +2519,12 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   private _handleReply(reply: any, next: any) {
     this._resetReconnectAttemptsIfPending();
-    this._observeServerTime(reply);
     const id = reply.id;
     if (!(id in this._callbacks)) {
       next();
       return;
     }
+    this._observeServerTime(reply);
     const callbacks = this._callbacks[id];
     this._callbacks[id].timeout?.clear();
     delete this._callbacks[id];
