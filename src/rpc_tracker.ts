@@ -290,8 +290,10 @@ export class RpcTracker {
       cmd.rpc.headers = headers;
     }
     // The reply has a call timeout from the moment it is sent, as an upstream call has: the wait for the
-    // connection, bounded by the deadline of the call, does not shorten it.
-    const result: any = await this.host.plainCall(cmd, Date.now() + this.callTimeout);
+    // connection does not shorten it. A call that sets its own timeout ends at the deadline of the call instead.
+    const replyDeadline: number = Date.now() + this.callTimeout;
+    const ownDeadline: boolean = request.opts?.timeout !== undefined;
+    const result: any = await this.host.plainCall(cmd, ownDeadline ? Math.min(replyDeadline, request.deadline) : replyDeadline);
     return rpcResult(result);
   }
 

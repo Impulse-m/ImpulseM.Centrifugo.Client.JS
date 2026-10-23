@@ -1,8 +1,7 @@
 import { Centrifuge } from './centrifuge';
-import { FakeCentrifugoServer } from './fakeServer';
 import { errorCodes } from './codes';
 import { Options, State } from './types';
-import { CodecCase, codecCases, rpcOptionsWireFlag } from './testing/codecs';
+import { CodecCase, WaitableFakeServer, codecCases, holdReply, rpcOptionsWireFlag } from './testing/codecs';
 import { loggedConfig } from './rpc_options';
 import { format } from 'util';
 
@@ -10,11 +9,11 @@ import { format } from 'util';
 // time. Every case runs over both codecs (see testing/codecs.ts).
 
 describe.each(codecCases)('RPC options over $name', (codecCase: CodecCase) => {
-  let server: FakeCentrifugoServer;
+  let server: WaitableFakeServer;
   const clients: Centrifuge[] = [];
 
   beforeEach(async () => {
-    server = await FakeCentrifugoServer.start(codecCase.serverCodec);
+    server = await WaitableFakeServer.start(codecCase.serverCodec);
   });
 
   afterEach(async () => {
@@ -222,7 +221,7 @@ describe.each(codecCases)('RPC options over $name', (codecCase: CodecCase) => {
       }
       if (cmd.rpc.method === 'slow') {
         lateCommandIds.push(cmd.id);
-        return undefined;
+        return holdReply;
       }
       return { id: cmd.id, rpc: { data: codecCase.encode(null) } };
     };
@@ -253,7 +252,7 @@ describe.each(codecCases)('RPC options over $name', (codecCase: CodecCase) => {
   });
 
   test('an rpc timeout shorter than the client timeout ends the call at its own deadline', async () => {
-    server.onCommand = (): undefined => undefined;
+    server.onCommand = (cmd: any): any => (cmd.rpc !== undefined ? holdReply : undefined);
     const c = await connect({ timeout: 5000 });
 
     await expect(c.rpc('silent', codecCase.encode({}), { timeout: 200 })).rejects.toMatchObject({

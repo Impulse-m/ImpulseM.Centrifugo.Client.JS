@@ -910,7 +910,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       const events: string[] = record(c);
       await connectClient(c);
 
-      // Renewal 1 (70 to 90 seconds on) is accepted; renewal 2 (70 to 90 seconds later) is refused; the retry, 5 to 10
+      // Renewal 1 (70 to 90 seconds on) is accepted; renewal 2 (70 to 90 seconds later) is refused; the retry, 10 to 20
       // seconds on, is refused past the horizon of 2 seconds, and ends the session.
       await advanceUntil((): boolean => exchanges >= 2);
       await advanceUntil((): boolean => exchanges >= 3);
@@ -1257,7 +1257,7 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       expect(c.state).toBe(State.Connected);
       expect(events).not.toContain('disconnected:1');
 
-      // The retry, 5 to 10 seconds on, exchanges again and is accepted: the connection stays connected with the new token.
+      // The retry, 10 to 20 seconds on, exchanges again and is accepted: the connection stays connected with the new token.
       await advanceUntil((): boolean => commands('refresh').length === 2);
       expect(commands('refresh')[1].refresh.token).toBe('access-2');
       expect(c.state).toBe(State.Connected);
@@ -1296,12 +1296,13 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
       await connectClient(c);
       await advanceUntil((): boolean => c.state === State.Disconnected);
 
-      // The bootstrap, the refused renewal and its refused retry: the verdict comes at the retry, 5 to 10 seconds after the
-      // refusal, not at the 30 second horizon.
+      // The bootstrap, the refused renewal and its refused retry: the verdict comes at the retry, 10 to 20 seconds after the
+      // refusal (refreshRetryDelay), not at the 30 second horizon.
       expect(exchanges).toBe(3);
       expect(events.filter((entry: string): boolean => entry === 'error:refreshToken')).toHaveLength(1);
       expect(events.filter((entry: string): boolean => entry === 'disconnected:1')).toHaveLength(1);
-      expect(verdictAt - refusedAt).toBeLessThanOrEqual(10500);
+      expect(verdictAt - refusedAt).toBeGreaterThanOrEqual(10000);
+      expect(verdictAt - refusedAt).toBeLessThanOrEqual(20000);
     } finally {
       jest.useRealTimers();
     }
