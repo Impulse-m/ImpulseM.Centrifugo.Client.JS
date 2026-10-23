@@ -125,7 +125,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ## Client protocol definition (`proto/client.proto`)
 
-* Copied from: `definitions/client.proto` of the Centrifugo/Centrifuge protocol, at the commit named in the header of the file. Source: https://github.com/centrifugal/protocol (fork: https://github.com/Impulse-m/ImpulseM.Centrifugo.Protocol).
+* Copied from: `definitions/client.proto` of the fork [ImpulseM.Centrifugo.Protocol](https://github.com/Impulse-m/ImpulseM.Centrifugo.Protocol) at commit `70f37c2`, as named in the header of the file. Upstream: https://github.com/centrifugal/protocol.
 * Generated code: `src/client_proto.js` and `src/client_proto.d.ts` are generated from this file with the protobufjs command line tools. Generated output carries no license of its own.
 * License: MIT License.
 
