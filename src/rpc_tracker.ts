@@ -34,11 +34,12 @@ export type RetrySignal = 'new_msg_id' | 'later' | null;
 
 /**
  * The delay of a later attempt, n being the resends the call made before it: drawn uniformly from [0, 250 ms * 2^n]
- * (full jitter), so refused calls do not return as a wave.
+ * (full jitter), so refused calls do not return as a wave. The range is capped at the time left before the deadline of
+ * the call, remainingMillis: a draw never waits past the deadline.
  * @internal
  */
-export function laterResendDelay(n: number): number {
-  return randomInt(0, laterResendBase * 2 ** n);
+export function laterResendDelay(n: number, remainingMillis: number): number {
+  return randomInt(0, Math.min(laterResendBase * 2 ** n, Math.max(0, remainingMillis)));
 }
 
 // The result of an rpc reply: cached is true when the server answered from the record of an earlier attempt.
@@ -537,7 +538,7 @@ export class RpcTracker {
       if (call.deadline <= Date.now()) {
         return false;
       }
-      const delay: number = laterResendDelay(call.laterResends);
+      const delay: number = laterResendDelay(call.laterResends, call.deadline - Date.now());
       call.laterResends++;
       // Waits as a waiting call: a connection lost meanwhile sends it with the reconnect.
       call.commandId = 0;

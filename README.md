@@ -746,7 +746,7 @@ A pool with no call waiting in a key line is not told of an identity change, so 
 The calls are plain requests: they carry no message id and no instance, so the server never retransmits them and never runs a second copy of one. A call is sent again only where the contract allows it, and its method must be idempotent:
 
 - after its connection was lost before the reply, on a connection of its key;
-- when the server refuses it with the `later` signal, after the delay of the client's retry rule (uniform in `[0, 250 ms * 2^n]` for the `n`-th resend);
+- when the server refuses it with the `later` signal, after the delay of the client's retry rule (uniform in `[0, 250 ms * 2^n]` for the `n`-th resend, capped at the time left before the call's deadline);
 - when `reroute` moves it to another key.
 
 A call never goes out again after its timeout or its cancel, and a connection the server closes for message size (close code 1009) settles its calls with `connectionClosed` without a resend: the chunk is over the frame limit of the server, and every attempt would fail the same way. The pool then emits `error` with the disconnect, and the next call opens a new connection.
