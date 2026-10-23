@@ -792,24 +792,32 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
         return issue(ctx);
       },
     });
-    useFakeClock();
-    const events: string[] = record(c);
-    c.connect();
-    await advanceUntil((): boolean => events.includes('error:connectToken'));
+    // The connection is real, so this test runs on the real clock, as the other socket tests of this file do: a fake clock
+    // moves in steps ahead of the socket, so the client's connect timeout (5 seconds of fake time) can run out while a
+    // connect is still in flight under load, and then a third connect breaks the count below. The random moment of the
+    // refused bootstrap's retry is held at its middle, so the retry is not due before the connection is lost.
+    const random: jest.SpyInstance = jest.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      const events: string[] = record(c);
+      c.connect();
+      expect(await until((): boolean => events.includes('error:connectToken'))).toBe(true);
 
-    // The connection is lost with the refusal run open. The connect proxy authenticates the connection with a user, and the
-    // connect sent no token, so the server accepted nothing: the run stays open.
-    proxy = true;
-    server.closeConnection();
-    await advanceUntil((): boolean => commands('connect').length === 2 && c.state === State.Connected);
-    await flush();
-    expect(events).not.toContain('disconnected:1');
+      // The connection is lost with the refusal run open. The connect proxy authenticates the connection with a user, and the
+      // connect sent no token, so the server accepted nothing: the run stays open.
+      proxy = true;
+      server.closeConnection();
+      expect(await until((): boolean => commands('connect').length === 2 && c.state === State.Connected)).toBe(true);
+      await flush();
+      expect(events).not.toContain('disconnected:1');
 
-    // A refresh that the issuer refuses again, with the storage unchanged, is the verdict of the open run.
-    c.refresh();
-    await advanceUntil((): boolean => events.includes('disconnected:1'));
-    expect(calls).toBe(2);
-    expect(commands('connect')).toHaveLength(2);
+      // A refresh that the issuer refuses again, with the storage unchanged, is the verdict of the open run.
+      c.refresh();
+      expect(await until((): boolean => events.includes('disconnected:1'))).toBe(true);
+      expect(calls).toBe(2);
+      expect(commands('connect')).toHaveLength(2);
+    } finally {
+      random.mockRestore();
+    }
   });
 
   test('an accepted refresh(token) closes the refusal run: a later refusal starts its own run, and does not end the session at once', async (): Promise<void> => {
