@@ -1281,7 +1281,7 @@ Or if you are developing with npm:
 import { Centrifuge } from '@impulsem/centrifuge/build/protobuf';
 ```
 
-This client uses [protobuf.js](https://github.com/dcodeIO/ProtoBuf.js/) under the hood.
+This client uses [protobuf.js](https://github.com/protobufjs/protobuf.js) under the hood.
 
 When running with Protobuf-based client, you can send and receive any binary data as `Uint8Array`. Make sure data is properly encoded when calling methods of Centrifuge Protobuf-based instance. For example, you can not just send JSON-like objects like in JSON protocol case, you need to encode data to `Uint8Array` first:
 
