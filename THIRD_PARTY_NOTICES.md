@@ -351,7 +351,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## TypeScript helper functions (0BSD)
 
-* Used by: `build/index.js` and `build/protobuf/index.js` contain helper functions that the TypeScript compiler emits (the same helper code as `tslib`), with the banner `Copyright (c) Microsoft Corporation.`. The banner is kept in those files.
+* Used by: `build/index.js` and `build/protobuf/index.js` contain helper functions that the TypeScript compiler emits (the same helper code as `tslib`). The compiler emits them without a banner, and the `tslib` package itself is not bundled (`importHelpers` is off). The 0BSD terms below are listed for completeness; 0BSD asks for no notice.
 * Source: https://github.com/Microsoft/tslib (`LICENSE.txt` of tslib 2.8.1, whose `license` field is 0BSD).
 * License: BSD Zero Clause License (0BSD). The text below is copied verbatim from the `LICENSE.txt` of tslib 2.8.1 (https://registry.yarnpkg.com/tslib/-/tslib-2.8.1.tgz).
 
