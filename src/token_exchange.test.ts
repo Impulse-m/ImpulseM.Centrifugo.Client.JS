@@ -1294,7 +1294,9 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
         }
       });
       await connectClient(c);
-      await advanceUntil((): boolean => c.state === State.Disconnected);
+      // The renewal comes 70 to 90 seconds after the connect (ttl 100) and its retry 10 to 20 seconds after the refusal
+      // (refreshRetryDelay), so the verdict can come at 110 seconds: the wait covers 150 seconds of fake time.
+      await advanceUntil((): boolean => c.state === State.Disconnected, 300);
 
       // The bootstrap, the refused renewal and its refused retry: the verdict comes at the retry, 10 to 20 seconds after the
       // refusal (refreshRetryDelay), not at the 30 second horizon.
