@@ -11,6 +11,8 @@ import {
   SubscriptionErrorContext
 } from './types';
 import { ttlMilliseconds, backoff, hasOffset, toOffset } from './utils';
+import { refreshKeepsConnection, refreshRetries } from './refresh_slot';
+import { refreshRetryDelay } from './refresh_retry';
 import { maxTimerDelay } from './call_timer';
 
 // Internal-only — phases the SDK walks through during a map subscribe.
@@ -32,6 +34,8 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
   private _promises: Record<number, any>;
   private _resubscribeTimeout?: null | ReturnType<typeof setTimeout> = null;
   private _refreshTimeout?: null | ReturnType<typeof setTimeout> = null;
+  // The timer refreshes of this subscription that failed in a row: the ceiling of the next retry grows with them.
+  private _refreshRetryStep: number = 0;
   private _getToken: null | ((ctx: SubscriptionTokenContext) => Promise<string>);
   private _minResubscribeDelay: number;
   private _maxResubscribeDelay: number;
@@ -545,6 +549,8 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
     }
 
     this._clearSubscribingState();
+    // A subscribe that succeeds ends the timer refreshes that failed before it.
+    this._refreshRetryStep = 0;
 
     if (result.id) {
       this._id = result.id;
@@ -1581,17 +1587,21 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
       return;
     }
     this._debug('subscription token refreshed, channel', this.channel);
+    this._refreshRetryStep = 0;
     this._clearRefreshTimeout();
     if (result.expires === true) {
       this._refreshTimeout = setTimeout(() => this._refresh(), ttlMilliseconds(result.ttl));
     }
   }
 
+  // The policy of a timer refresh of the subscription is the one of the connection's (see refreshRetries): a client error,
+  // a temporary error and 109 are retried with a fresh token, 103 keeps the subscription without a retry, and any other
+  // error unsubscribes with its code.
   private _refreshError(err: any) {
     if (!this._isSubscribed()) {
       return;
     }
-    if (err.code < 100 || err.temporary === true) {
+    if (refreshRetries(err.code, err.temporary === true)) {
       this._emitError({
         type: 'refresh',
         channel: this.channel,
@@ -1603,13 +1613,25 @@ export class BaseSubscription extends (EventEmitter as new () => TypedEventEmitt
         }
         this._refreshTimeout = setTimeout(() => this._refresh(), this._getRefreshRetryDelay());
       });
+    } else if (refreshKeepsConnection(err.code)) {
+      // The same token would be refused again: the subscription keeps its identity and is not retried.
+      this._emitError({
+        type: 'refresh',
+        channel: this.channel,
+        error: err
+      }, () => {});
     } else {
       this._setUnsubscribed(err.code, err.message, true);
     }
   }
 
+  // The delay of the next retry of a failed timer refresh of this subscription. Each delay taken counts one more failure
+  // in a row, which the next retry's ceiling grows with.
   private _getRefreshRetryDelay() {
-    return backoff(0, 10000, 20000);
+    // @ts-ignore – we are hiding some symbols from public API autocompletion.
+    const delay: number = refreshRetryDelay(this._refreshRetryStep, this._centrifuge._config.tokenRetryCap as number);
+    this._refreshRetryStep++;
+    return delay;
   }
 
   // Calls an app callback expected to return a promise: one throwing instead of

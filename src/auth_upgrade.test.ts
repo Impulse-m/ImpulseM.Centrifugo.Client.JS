@@ -1,7 +1,7 @@
 import { Centrifuge } from './centrifuge';
 import { errorCodes } from './codes';
 import { maxRefreshCalls } from './refresh_slot';
-import { AuthContext, Options, State } from './types';
+import { AuthContext, Options, State, SubscriptionState } from './types';
 import { CodecCase, WaitableFakeServer, codecCases, connectClient, disconnectAll, holdReply, until } from './testing/codecs';
 
 // The identity of a connection: the user and auth class of the connect and refresh replies,
@@ -574,6 +574,84 @@ describe.each(codecCases)('auth identity over $name', (codecCase: CodecCase): vo
       jest.advanceTimersByTime(20000);
       await server.waitForCount((cmd: any): boolean => cmd.refresh !== undefined, 2);
       expect(refreshCommands()[1].refresh.token).not.toBe(refreshCommands()[0].refresh.token);
+      expect(c.state).toBe(State.Connected);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // The subscription refresh follows the connection's policy: a 109 is retried with a fresh token after the backoff of
+  // refreshRetryDelay, a 103 keeps the subscription and is not retried.
+  function subRefreshCommands(): any[] {
+    return server.received.filter((cmd: any): boolean => cmd.sub_refresh !== undefined);
+  }
+
+  test('a subscription refresh refused with 109 is retried with a fresh token after the backoff', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0' };
+    server.onSubscribe = (): any => ({ expires: true, ttl: 1 });
+    let refreshes: number = 0;
+    server.onCommand = (cmd: any): any => {
+      if (cmd.sub_refresh === undefined) {
+        return undefined;
+      }
+      refreshes++;
+      return refreshes === 1
+        ? { id: cmd.id, error: { code: 109, message: 'token expired' } }
+        : { id: cmd.id, sub_refresh: {} };
+    };
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      let tokens: number = 0;
+      const c: Centrifuge = create();
+      const sub: any = c.newSubscription('channel', { getToken: async (): Promise<string> => `sub-token-${++tokens}` });
+      const errors: any[] = [];
+      sub.on('error', (ctx: any): void => {
+        errors.push(ctx);
+      });
+      sub.subscribe();
+      await connect(c);
+      expect(await until((): boolean => sub.state === SubscriptionState.Subscribed)).toBe(true);
+
+      jest.advanceTimersByTime(1000);
+      expect(await until((): boolean => errors.length === 1)).toBe(true);
+      expect(errors[0]).toMatchObject({ type: 'refresh', channel: 'channel', error: { code: 109 } });
+      expect(sub.state).toBe(SubscriptionState.Subscribed);
+
+      // The retry waits 10 to 20 seconds (refreshRetryDelay), then sends a fresh token.
+      jest.advanceTimersByTime(20000);
+      expect(await until((): boolean => subRefreshCommands().length === 2)).toBe(true);
+      expect(subRefreshCommands()[1].sub_refresh.token).not.toBe(subRefreshCommands()[0].sub_refresh.token);
+      expect(sub.state).toBe(SubscriptionState.Subscribed);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a subscription refresh refused with 103 keeps the subscription and is not retried', async (): Promise<void> => {
+    server.connectResult = { client: 'fake-client', version: '0.0.0' };
+    server.onSubscribe = (): any => ({ expires: true, ttl: 1 });
+    server.onCommand = (cmd: any): any => (cmd.sub_refresh !== undefined ? { id: cmd.id, error: { code: 103, message: 'refused' } } : undefined);
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    try {
+      const c: Centrifuge = create();
+      const sub: any = c.newSubscription('channel', { getToken: async (): Promise<string> => 'sub-token' });
+      const errors: any[] = [];
+      sub.on('error', (ctx: any): void => {
+        errors.push(ctx);
+      });
+      sub.subscribe();
+      await connect(c);
+      expect(await until((): boolean => sub.state === SubscriptionState.Subscribed)).toBe(true);
+
+      jest.advanceTimersByTime(1000);
+      expect(await until((): boolean => errors.length === 1)).toBe(true);
+      expect(errors[0]).toMatchObject({ type: 'refresh', channel: 'channel', error: { code: 103 } });
+      expect(sub.state).toBe(SubscriptionState.Subscribed);
+
+      // Past the longest retry: a refused subscription refresh is not sent again.
+      jest.advanceTimersByTime(20000);
+      await flushTimers();
+      expect(subRefreshCommands()).toHaveLength(1);
       expect(c.state).toBe(State.Connected);
     } finally {
       jest.useRealTimers();
