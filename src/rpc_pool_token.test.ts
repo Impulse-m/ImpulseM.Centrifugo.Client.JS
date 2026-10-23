@@ -942,17 +942,17 @@ describe('RpcPool tokenFrom', () => {
     // The call waits out the client's retry of its refresh: its deadline is the connection timeout, which is longer here.
     const pool: RpcPool = createPool(c, {
       endpoints: (): string[] => [edgeA.url],
-      connection: { websocket: WebSocket, minReconnectDelay: 10, maxReconnectDelay: 50, timeout: 20000 },
+      connection: { websocket: WebSocket, minReconnectDelay: 10, maxReconnectDelay: 50, timeout: 30000 },
     });
     const held: any[] = [];
     holdCalls(edgeA, held);
     const result: Promise<RpcResult> = quiet(pool.rpc('work', bytes({ n: 1 })));
-    // The client retries its refresh after a backoff of five to ten seconds.
-    await eventually((): boolean => held.length === 1, 15000);
+    // The client retries its refresh after a backoff of 10 to 20 seconds (refreshRetryDelay), so the wait covers 25 seconds.
+    await eventually((): boolean => held.length === 1, 25000);
     expect(refreshes).toBe(2);
     answer(edgeA, held[0]);
     expect(fromBytes((await result).data)).toEqual({ n: 1 });
-  });
+  }, 40000);
 
   test('connectAnswersTheWaiterWithoutAPoolCall', async (): Promise<void> => {
     const c: ProtobufCentrifuge = await connectedMain();
