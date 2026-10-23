@@ -1332,7 +1332,8 @@ describe.each(codecCases)('token exchange over $name', (codecCase: CodecCase): v
         }
       });
       await connectClient(c);
-      await advanceUntil((): boolean => commands('refresh').length === 2);
+      // The refresh replies travel over the real socket, which needs more real turns than the default 200 steps give.
+      await advanceUntil((): boolean => commands('refresh').length === 2, 2000);
 
       expect(presented).toEqual(['refresh-1', 'refresh-2', 'refresh-9']);
       expect(events).not.toContain('disconnected:1');
