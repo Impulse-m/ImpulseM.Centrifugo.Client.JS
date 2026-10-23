@@ -541,6 +541,10 @@ export interface RpcOptions {
    * error code `errorCodes.cancelled`. Needs a server that supports RPC options and an `instance`
    * option; otherwise rpc() rejects with `errorCodes.unsupported` without sending the call. */
   signal?: AbortSignal;
+  /** Deadline of this call in milliseconds, counted from the rpc() call across its attempts. Default: the client
+   * `timeout`. Must be above 0 and no more than the client `timeout`; otherwise rpc() rejects with
+   * `errorCodes.badConfiguration` without sending the call. */
+  timeout?: number;
 }
 
 /** Capabilities the server confirmed for the current connection. */

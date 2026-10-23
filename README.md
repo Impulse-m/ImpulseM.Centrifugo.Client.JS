@@ -351,6 +351,8 @@ On a connection without RPC options (legacy mode), calls are sent as plain reque
 
 Without an `instance`, a call is a plain request too: it is not kept on a lost connection and is not sent again, so a call lost on the connection may already have run. Headers are sent with it on a connection with RPC options.
 
+A call takes its own deadline with the `timeout` option, in milliseconds, counted from the `rpc()` call across its attempts. It must be above 0 and no more than the client `timeout`; any other value rejects with `errorCodes.badConfiguration` before the call is sent. Without it, the call has the client `timeout`.
+
 ##### Cancel an rpc call
 
 Pass an `AbortSignal` in the options to cancel a call:

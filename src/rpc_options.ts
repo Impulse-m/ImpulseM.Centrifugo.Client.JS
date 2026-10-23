@@ -1,5 +1,5 @@
 import { errorCodes } from './codes';
-import { Options } from './types';
+import { Options, RpcOptions } from './types';
 
 /** Default of maxPendingRpc: the calls tracked at once. */
 const defaultMaxPendingRpc: number = 32;
@@ -34,6 +34,22 @@ export function normaliseRpcOptions(config: Options): void {
   if (!Number.isInteger(config.maxPendingRpc) || config.maxPendingRpc < 1) {
     throw { code: errorCodes.badConfiguration, message: 'maxPendingRpc must be a positive integer' };
   }
+}
+
+/**
+ * The deadline in milliseconds of an rpc call: its own timeout when the call sets one, else the client timeout. An own
+ * timeout must be above 0 and no more than the client timeout; any other value rejects the call before it is sent.
+ * @internal
+ */
+export function rpcCallTimeout(opts: RpcOptions | undefined, clientTimeout: number): number {
+  const timeout: number | undefined = opts?.timeout;
+  if (timeout === undefined) {
+    return clientTimeout;
+  }
+  if (typeof timeout !== 'number' || !(timeout > 0) || timeout > clientTimeout) {
+    throw { code: errorCodes.badConfiguration, message: 'rpc timeout must be above 0 and no more than the client timeout' };
+  }
+  return timeout;
 }
 
 /**

@@ -26,7 +26,7 @@ import {
 import {
   rpcOptionsFlag, hasFlag, serverErrorFields, serverTimeOffsetFrom,
 } from './extensions';
-import { normaliseRpcOptions, loggedConfig } from './rpc_options';
+import { normaliseRpcOptions, loggedConfig, rpcCallTimeout } from './rpc_options';
 
 import { addWaiter, CallTimer, callTimer } from './call_timer';
 import { CallRejectContext, CallResolveContext, RpcTracker } from './rpc_tracker';
@@ -558,7 +558,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
   /** rpc to a server - i.e. a call which waits for a response with data. */
   async rpc(method: string, data: any, opts?: RpcOptions): Promise<RpcResult> {
-    return this._rpc.call(method, data, opts, Date.now() + this._config.timeout);
+    return this._rpc.call(method, data, opts, Date.now() + rpcCallTimeout(opts, this._config.timeout));
   }
 
   /** publish data to a channel. */

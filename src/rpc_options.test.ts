@@ -239,6 +239,29 @@ describe.each(codecCases)('RPC options over $name', (codecCase: CodecCase) => {
     expect(Math.abs(c.serverTime() - Date.now())).toBeLessThan(1000);
   });
 
+  test('an rpc timeout above the client timeout is refused before the call is sent', async () => {
+    server.onCommand = (cmd: any) => (cmd.rpc ? { id: cmd.id, rpc: { data: codecCase.encode(null) } } : undefined);
+    const c = await connect({ timeout: 5000 });
+
+    await expect(c.rpc('echo', codecCase.encode({}), { timeout: 6000 })).rejects.toMatchObject({
+      code: errorCodes.badConfiguration,
+    });
+    await expect(c.rpc('echo', codecCase.encode({}), { timeout: 0 })).rejects.toMatchObject({
+      code: errorCodes.badConfiguration,
+    });
+    expect(rpcCommands()).toHaveLength(0);
+  });
+
+  test('an rpc timeout shorter than the client timeout ends the call at its own deadline', async () => {
+    server.onCommand = (): undefined => undefined;
+    const c = await connect({ timeout: 5000 });
+
+    await expect(c.rpc('silent', codecCase.encode({}), { timeout: 200 })).rejects.toMatchObject({
+      code: errorCodes.timeout,
+    });
+    expect(rpcCommands()).toHaveLength(1);
+  });
+
   test('old-shape replies without the new fields still work', async () => {
     server.onCommand = (cmd: any) => {
       if (cmd.rpc === undefined) {
