@@ -1,4 +1,4 @@
-import { EncodedBatch, encodeBatch, WriteHost, writeCommands } from './write_commands';
+import { EncodedBatch, encodeBatch, RefusedCommand, WriteHost, writeCommands } from './write_commands';
 
 // An encoder that refuses a command whose id is a BigInt, as JSON.stringify refuses one.
 function encodeRefusingBigInt(commands: any[]): string {
@@ -25,7 +25,10 @@ class RecordingHost implements WriteHost {
   sends: number = 0;
   // A frame longer than this is refused by the codec, as a codec with a size limit does.
   frameLimit: number = Infinity;
-  handled: Array<{ commands: any[]; refused: boolean }> = [];
+  // The commands of each write that the transport did not write.
+  handled: any[][] = [];
+  // The commands the codec refused, with the error the codec threw for each.
+  encodeErrors: RefusedCommand[] = [];
   disconnects: number = 0;
   writeFailedAnswer: boolean = true;
 
@@ -58,8 +61,12 @@ class RecordingHost implements WriteHost {
 
   debug(): void {}
 
-  handleWriteError(commands: any[], refused: boolean): void {
-    this.handled.push({ commands: commands, refused: refused });
+  handleEncodeError(command: any, error: any): void {
+    this.encodeErrors.push({ command: command, error: error });
+  }
+
+  handleWriteError(commands: any[]): void {
+    this.handled.push(commands);
   }
 
   writeFailed(): boolean {
@@ -86,7 +93,7 @@ describe('encodeBatch', () => {
     const alsoValid: any = { id: 3 };
     const batch: EncodedBatch = encodeBatch(encodeRefusingBigInt, [valid, refused, alsoValid]);
 
-    expect(batch.refused).toEqual([refused]);
+    expect(batch.refused).toEqual([{ command: refused, error: expect.any(TypeError) }]);
     expect(batch.frames).toEqual([{ data: JSON.stringify([valid, alsoValid]), commands: [valid, alsoValid] }]);
   });
 
@@ -115,7 +122,7 @@ describe('encodeBatch', () => {
     const short: any = { id: 2 };
     const batch: EncodedBatch = encodeBatch(encodeWithLimit(50), [long, short]);
 
-    expect(batch.refused).toEqual([long]);
+    expect(batch.refused).toEqual([{ command: long, error: expect.any(RangeError) }]);
     expect(batch.frames).toEqual([{ data: JSON.stringify([short]), commands: [short] }]);
   });
 
@@ -132,14 +139,43 @@ describe('writeCommands', () => {
     const host: RecordingHost = new RecordingHost();
     expect(writeCommands(host, [{ id: 1 }, { id: 2 }])).toBe(true);
     expect(host.sent).toEqual([JSON.stringify([{ id: 1 }, { id: 2 }])]);
-    expect(host.handled).toEqual([{ commands: [], refused: true }]);
+    expect(host.handled).toEqual([]);
   });
 
   test('a command the codec refuses is refused alone, and the others of the write are sent', () => {
     const host: RecordingHost = new RecordingHost();
     const refused: any = { id: BigInt(2) };
     expect(writeCommands(host, [{ id: 1 }, refused, { id: 3 }])).toBe(true);
-    expect(host.handled[0]).toEqual({ commands: [refused], refused: true });
+    expect(host.encodeErrors).toEqual([{ command: refused, error: expect.any(TypeError) }]);
+    expect(host.sent).toEqual([JSON.stringify([{ id: 1 }, { id: 3 }])]);
+    expect(host.disconnects).toBe(0);
+  });
+
+  test('a refused command carries the codec\'s own error, and the host settles its call with it', () => {
+    const host: RecordingHost = new RecordingHost();
+    const refused: any = { id: BigInt(2) };
+    expect(writeCommands(host, [refused, { id: 3 }])).toBe(true);
+    expect(host.encodeErrors).toHaveLength(1);
+    expect(host.encodeErrors[0].command).toBe(refused);
+    expect(host.encodeErrors[0].error).toBeInstanceOf(TypeError);
+    expect(host.encodeErrors[0].error.message).toBe('BigInt');
+    expect(host.handled).toEqual([]);
+    expect(host.sent).toEqual([JSON.stringify([{ id: 3 }])]);
+  });
+
+  test('with onEncodeError, a refused command goes to the callback and the host is not asked to settle it, the others are written', () => {
+    const host: RecordingHost = new RecordingHost();
+    const refused: any = { id: BigInt(2) };
+    const seen: RefusedCommand[] = [];
+    const onEncodeError = (command: any, error: any): void => {
+      seen.push({ command: command, error: error });
+    };
+    expect(writeCommands(host, [{ id: 1 }, refused, { id: 3 }], '', '', onEncodeError)).toBe(true);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].command).toBe(refused);
+    expect(seen[0].error).toBeInstanceOf(TypeError);
+    expect(host.encodeErrors).toEqual([]);
+    expect(host.handled).toEqual([]);
     expect(host.sent).toEqual([JSON.stringify([{ id: 1 }, { id: 3 }])]);
     expect(host.disconnects).toBe(0);
   });
@@ -159,7 +195,7 @@ describe('writeCommands', () => {
     expect(writeCommands(host, commands)).toBe(true);
 
     expect(host.sent).toEqual([JSON.stringify([commands[0]]), JSON.stringify([commands[1]])]);
-    expect(host.handled).toEqual([{ commands: [], refused: true }]);
+    expect(host.handled).toEqual([]);
     expect(host.disconnects).toBe(0);
   });
 
@@ -167,10 +203,7 @@ describe('writeCommands', () => {
     const host: RecordingHost = new RecordingHost();
     host.failSend = 0;
     expect(writeCommands(host, [{ id: 1 }])).toBe(false);
-    expect(host.handled).toEqual([
-      { commands: [], refused: true },
-      { commands: [{ id: 1 }], refused: false },
-    ]);
+    expect(host.handled).toEqual([[{ id: 1 }]]);
     expect(host.disconnects).toBe(1);
   });
 
@@ -183,10 +216,7 @@ describe('writeCommands', () => {
     expect(writeCommands(host, commands)).toBe(false);
 
     expect(host.sent).toEqual([JSON.stringify([commands[0]])]);
-    expect(host.handled).toEqual([
-      { commands: [], refused: true },
-      { commands: [commands[1], commands[2]], refused: false },
-    ]);
+    expect(host.handled).toEqual([[commands[1], commands[2]]]);
     expect(host.disconnects).toBe(1);
   });
 

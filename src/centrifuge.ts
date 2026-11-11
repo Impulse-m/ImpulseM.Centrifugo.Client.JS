@@ -15,7 +15,7 @@ import { HttpStreamTransport } from './transport_http_stream';
 import { SseTransport } from './transport_sse';
 import { WebtransportTransport } from './transport_webtransport';
 
-import { JsonCodec } from './json';
+import { JsonCodec, jsonSourceTextSupported } from './json';
 
 import {
   isFunction, log, startsWith, errorExists,
@@ -84,6 +84,7 @@ const defaults: Options = {
   data: null,
   getData: null,
   debug: false,
+  bigIntegers: false,
   name: 'js',
   version: '',
   fetch: null,
@@ -538,8 +539,15 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
     await this._methodCall();
 
-    const sent = this._transportSendCommands([cmd]); // can send message to server without id set
+    let encodeError: any = null;
+    // can send message to server without id set
+    const sent = this._transportSendCommands([cmd], (_cmd, error) => {
+      encodeError = error;
+    });
 
+    if (encodeError) {
+      throw encodeError;
+    }
     if (!sent) {
       throw this._createErrorObject(
         errorCodes.transportWriteError,
@@ -740,7 +748,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
       this._data = this._config.data;
     }
 
-    this._codec = new JsonCodec();
+    this._codec = new JsonCodec(this._config.bigIntegers === true);
     this._formatOverride();
     this._tokenExchange = this._config.tokenExchange
       ? createTokenExchangeFlow(createTokenExchangeHost(this, this._host), this._config)
@@ -751,6 +759,9 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
 
     this._debug('config', loggedConfig(this._config));
+    if (this._config.bigIntegers === true && !jsonSourceTextSupported()) {
+      this._debug('bigIntegers needs JSON.parse source text access, which this runtime lacks: integers past 2^53 are rounded');
+    }
 
     if (typeof this._endpoint === 'string') {
       // Single address.
@@ -1001,8 +1012,12 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
     }
   }
 
-  private _transportSendCommands(commands: any[]) {
-    return writeCommands(this._host, commands, this._session, this._node);
+  // _transportSendCommands writes commands to the transport. A command whose
+  // data cannot be encoded - a cyclic object, say - fails alone with the
+  // encoder's error, through onEncodeError or its callback: the others are
+  // written.
+  private _transportSendCommands(commands: any[], onEncodeError?: (command: any, error: any) => void) {
+    return writeCommands(this._host, commands, this._session, this._node, onEncodeError);
   }
 
   private _advanceTransportIndex() {
@@ -1356,7 +1371,7 @@ export class Centrifuge extends (EventEmitter as new () => TypedEventEmitter<Cli
 
     let initialized: any;
     try {
-      // Encoded here: commands the codec can't encode, e.g. connect data with a BigInt,
+      // Encoded here: commands the codec can't encode, e.g. cyclic connect data,
       // fail the attempt as a transport failing to initialize, not connect().
       initialized = transport.initialize(this._codecName(), callbacks, this._codec.encodeCommands(initialCommands));
     } catch (e) {

@@ -624,14 +624,14 @@ export class TokenExchangeFlow {
         if (ctx.reply.refresh) {
           this.finish(bootstrap, result, resume, ctx.reply.refresh);
         } else {
-          this.refreshFailed(bootstrap, result, resume, token, this.host.createError(errorCodes.clientConnectToken, 'refresh reply without identity'));
+          this.refreshFailed(bootstrap, result, resume, token, this.host.createError(errorCodes.clientConnectToken, 'refresh reply without identity'), false);
         }
       } finally {
         ctx.next?.();
       }
     }, (rejectCtx: CallRejectContext): void => {
       try {
-        this.refreshFailed(bootstrap, result, resume, token, rejectCtx.error);
+        this.refreshFailed(bootstrap, result, resume, token, rejectCtx.error, rejectCtx.refused === true);
       } finally {
         rejectCtx.next?.();
       }
@@ -643,14 +643,16 @@ export class TokenExchangeFlow {
 
   // A refresh of a bootstrap that the server refused, or that gave no identity. The access token is dropped while it is
   // still the one held, whatever became of the connection: an unaccepted token is never kept. A refresh that timed out
-  // or failed to write has an unknown outcome: the connection is closed and the reconnect bootstraps again. A temporary
-  // refusal is retried with a new exchange; any other ends the connection.
+  // or failed to write has an unknown outcome: the connection is closed and the reconnect bootstraps again. A refresh
+  // the codec refused (refused) was never written, and is ended the same way: its error is the one of the encoder,
+  // which carries no code. A temporary refusal is retried with a new exchange; any other ends the connection.
   private refreshFailed(
     bootstrap: Bootstrap,
     result: any,
     resume: (result: any) => void,
     token: string,
     err: any,
+    refused: boolean,
   ): void {
     if (this.host.token() === token) {
       this.host.setToken('');
@@ -658,7 +660,7 @@ export class TokenExchangeFlow {
     if (!this.isCurrent(bootstrap)) {
       return;
     }
-    if (err.code === errorCodes.timeout || err.code === errorCodes.transportWriteError) {
+    if (refused || err.code === errorCodes.timeout || err.code === errorCodes.transportWriteError) {
       this.abandon(bootstrap, 'connect', err);
     } else if (refreshRetries(err.code, err.temporary === true)) {
       this.retry(bootstrap, result, resume, 'connect', err);
@@ -874,7 +876,7 @@ export class TokenExchangeFlow {
     // no-transport rule of writeCommands (write_commands.ts:82). Otherwise writeCommands settles the commands it refused
     // or could not write.
     if (!this.host.hasTransport()) {
-      this.host.handleWriteError([cmd], false);
+      this.host.handleWriteError([cmd]);
     }
     writeCommands(this.host, [cmd], session, node);
     return call;

@@ -96,6 +96,17 @@ export function createClientHost(client: Centrifuge): ClientHost {
       refresh();
     }, delay);
   };
+  // Settles the call of a command that was not written, with the error: the callbacks and the timer of the call go.
+  const settleUnwritten = (command: any, error: any, refused: boolean): void => {
+    const id: number = command.id;
+    if (!(id in client['_callbacks'])) {
+      return;
+    }
+    const callbacks: RpcCallbacks = client['_callbacks'][id];
+    callbacks.timeout?.clear();
+    delete client['_callbacks'][id];
+    callbacks.errback({ error: error, refused: refused, unwritten: true });
+  };
   const host: ClientHost = {
     onRefreshAccepted: null,
     onRefreshFailed: null,
@@ -155,20 +166,12 @@ export function createClientHost(client: Centrifuge): ClientHost {
     send: (data: any, session: string, node: string): void => {
       client['_transport'].send(data, session, node);
     },
-    handleWriteError: (commands: any[], refused: boolean): void => {
+    handleEncodeError: (command: any, error: any): void => {
+      settleUnwritten(command, error, true);
+    },
+    handleWriteError: (commands: any[]): void => {
       for (const command of commands) {
-        const id: number = command.id;
-        if (!(id in client['_callbacks'])) {
-          continue;
-        }
-        const callbacks: RpcCallbacks = client['_callbacks'][id];
-        callbacks.timeout?.clear();
-        delete client['_callbacks'][id];
-        callbacks.errback({
-          error: client['_createErrorObject'](errorCodes.transportWriteError, 'transport write error'),
-          refused: refused,
-          unwritten: true,
-        });
+        settleUnwritten(command, client['_createErrorObject'](errorCodes.transportWriteError, 'transport write error'), false);
       }
     },
     writeFailed: (commands: any[]): boolean => client['_rpc'].writeFailed(commands),

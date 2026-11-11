@@ -110,9 +110,9 @@ class StubHost implements RpcHost {
     this.callbacks.get(id)?.errback({ error: undefined });
   }
 
-  // The codec refuses the command before any write: it never reaches the connection.
+  // The codec refuses the command before any write: it never reaches the connection, and the error is the codec's.
   refuse(id: number): void {
-    this.callbacks.get(id)?.errback({ error: { code: errorCodes.transportWriteError, message: 'refused' }, refused: true });
+    this.callbacks.get(id)?.errback({ error: new TypeError('refused'), refused: true, unwritten: true });
   }
 }
 
@@ -251,7 +251,7 @@ describe('RpcTracker', () => {
     // The acknowledgement of the first call rode on the refused command: it is not lost with it.
     expect(host.commands[1].rpc.ack).toEqual([firstMsgId]);
     host.refuse(host.commands[1].id);
-    await expect(refused).rejects.toMatchObject({ code: errorCodes.transportWriteError });
+    await expect(refused).rejects.toBeInstanceOf(TypeError);
     expect(host.commands).toHaveLength(2);
 
     const next: Promise<RpcResult> = tracker.call('c', {}, undefined, Date.now() + 30000);

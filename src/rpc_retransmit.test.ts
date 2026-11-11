@@ -1344,7 +1344,7 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     expect(callCommands()[0].rpc.msg_id).toBeUndefined();
   });
 
-  test('a call that cannot be encoded rejects with transportWriteError, without a reconnect, and the next call still succeeds', async (): Promise<void> => {
+  test('a call that cannot be encoded rejects with the error of the encoder, without a reconnect, and the next call still succeeds', async (): Promise<void> => {
     const c: Centrifuge = create();
     await connect(c);
     server.onCommand = (cmd: any): any => (isCall(cmd)
@@ -1355,9 +1355,12 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
       connecting++;
     });
 
-    // A method that is not a string cannot be encoded, by either codec: the call is refused by the write, not lost
-    // with the connection, so the connection stays and the other calls on it go on.
-    await expect(c.rpc(BigInt(1) as any, codecCase.encode({}))).rejects.toMatchObject({ code: errorCodes.transportWriteError });
+    // A method that holds itself cannot be encoded, by either codec: the call is refused by the write, not lost
+    // with the connection, so the connection stays and the other calls on it go on. The JSON codec encodes a bigint,
+    // so a bigint is not such a method.
+    const cyclic: any = {};
+    cyclic.self = cyclic;
+    await expect(c.rpc(cyclic, codecCase.encode({}))).rejects.toMatchObject({ name: 'TypeError' });
     const result: RpcResult = await c.rpc('echo', codecCase.encode({}));
 
     expect(codecCase.decode(result.data)).toEqual({ n: 2 });
@@ -1386,9 +1389,11 @@ describe.each(codecCases)('tracked RPC calls over $name', (codecCase: CodecCase)
     server.onCommand = (cmd: any): any => (isCall(cmd)
       ? { id: cmd.id, rpc: { data: codecCase.encode({ n: 3 }) } }
       : undefined);
-    const refused: Promise<RpcResult> = quiet(c.rpc(BigInt(1) as any, codecCase.encode({})));
+    const cyclic: any = {};
+    cyclic.self = cyclic;
+    const refused: Promise<RpcResult> = quiet(c.rpc(cyclic, codecCase.encode({})));
     const valid: Promise<RpcResult> = c.rpc('echo', codecCase.encode({ n: 3 }));
-    await expect(refused).rejects.toMatchObject({ code: errorCodes.transportWriteError });
+    await expect(refused).rejects.toMatchObject({ name: 'TypeError' });
 
     const result: RpcResult = await valid;
     expect(codecCase.decode(result.data)).toEqual({ n: 3 });

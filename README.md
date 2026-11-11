@@ -362,7 +362,7 @@ The calls of a client with an `instance` are bounded by the `maxPendingRpc` opti
 
 A write error of a tracked call on an open transport is handled as a lost transport: the client reconnects, and the call is sent again on that connection with the same message id.
 
-A command the codec cannot encode, for example an rpc method that is not a string, is refused by its write: its call rejects with `errorCodes.transportWriteError` (10), the connection stays, and the other calls written with it are sent.
+A command the codec cannot encode, for example data JSON cannot hold such as a cyclic object, is refused by its write: its call rejects with the error the encoder threw for it (a `TypeError` for JSON), the connection stays, and the other calls written with it are sent.
 
 A server error reply that carries the metadata key `x-centrifugo-retry` says that the server did not run the call, and the client sends the call again. The value `new_msg_id` means that the server refused the message id: the client re-syncs its message ids to the server time of that reply and sends the call again with a new id, at most twice. The value `later` means that the message id is still good: the call is sent again with the same id after a random delay, drawn uniformly from zero up to 250 ms, then up to 500 ms, then up to 1000 ms (full jitter), at most three times. All attempts stay within the call's timeout. When the attempts are used up, or the error carries no such key, the call rejects with the error as the server sent it, unchanged.
 
@@ -561,6 +561,29 @@ Maximum number of rpc calls of a client with an `instance` that are not settled,
 `debug` is a boolean option which is `false` by default. When enabled lots of various debug
 messages will be logged into javascript console. Mostly useful for development or
 troubleshooting.
+
+#### bigIntegers
+
+`bigIntegers` is a boolean option which is `false` by default. JavaScript numbers hold integers exactly only up to 2^53, so `JSON.parse` silently rounds larger ones - an ID `12345678901234567890` arrives as `12345678901234567000`.
+
+The best fix is in the payload: send integers which may pass 2^53 - 64-bit IDs, say - as JSON strings, `{"orderId": "12345678901234567890"}`. A string has one type in every message and is read exactly by every language and tool, with no option needed. `bigIntegers` is for applications which cannot change how their payloads are written.
+
+With `bigIntegers: true`, integers a number cannot hold exactly are decoded as `bigint`, in every payload the client receives: publication data, presence and join/leave info, RPC results, history. Every other number stays a `number`.
+
+```javascript
+const centrifuge = new Centrifuge('ws://localhost:8000/connection/websocket', {
+    bigIntegers: true
+});
+
+sub.on('publication', ctx => {
+    ctx.data.orderId; // 12345678901234567890n - exact
+    ctx.data.price;   // 12.5 - still a number
+});
+```
+
+It is off by default because a `bigint` does not mix with a `number` - `ctx.data.orderId + 1` throws - and `JSON.stringify` refuses it. It needs `JSON.parse` source text access - Chrome 114+, Firefox 135+, Safari 18.4+, Node.js 21+ - and does nothing on older runtimes. JSON protocol only: with Protobuf, data is bytes the application decodes.
+
+Whatever the option, a `bigint` in data the client sends is written as a JSON number, exactly: `sub.publish({ orderId: 12345678901234567890n })`. Data which cannot be encoded - a cyclic object, or a `bigint` on a runtime without `JSON.rawJSON` - fails its own call with the `TypeError` JSON encoding raised, and other calls sent together with it go through.
 
 #### minReconnectDelay
 

@@ -6,8 +6,10 @@ export interface WriteHost {
   /** Writes encoded commands on the transport of the session and node. Throws when the transport refuses the write. */
   send(data: any, session: string, node: string): void;
   debug(message: string, ...args: any[]): void;
-  /** Settles the calls of the commands, which were not written, with a write error; refused ones with a refusal. */
-  handleWriteError(commands: any[], refused: boolean): void;
+  /** Settles the call of a command the codec refuses, with the error the codec threw for it: refused and unwritten. */
+  handleEncodeError(command: any, error: any): void;
+  /** Settles the calls of the commands the transport did not write, with a transport write error. */
+  handleWriteError(commands: any[]): void;
   /** Whether the failed write of these commands ends the connection: a tracked call or a cancel was in them. */
   writeFailed(commands: any[]): boolean;
   /** Ends the connection after a failed write, for a reconnect. */
@@ -20,13 +22,19 @@ export interface WriteFrame {
   commands: any[];
 }
 
+/** A command the codec refuses, with the error the codec threw for it alone. */
+export interface RefusedCommand {
+  command: any;
+  error: any;
+}
+
 /** The commands of one write, split by what the codec can encode. */
 export interface EncodedBatch {
   // The frames to write, in order: the commands as one frame when the codec encodes them together, else one frame
   // per command that the codec encodes alone.
   frames: WriteFrame[];
   // The commands the codec refuses. They are not written, and each of them is refused on its own.
-  refused: any[];
+  refused: RefusedCommand[];
 }
 
 
@@ -41,12 +49,12 @@ export function encodeBatch(encode: (commands: any[]) => any, commands: any[]): 
     return { frames: [{ data: encode(commands), commands: commands }], refused: [] };
   } catch (e) {
     const alone: WriteFrame[] = [];
-    const refused: any[] = [];
+    const refused: RefusedCommand[] = [];
     for (const command of commands) {
       try {
         alone.push({ data: encode([command]), commands: [command] });
       } catch (refusal) {
-        refused.push(command);
+        refused.push({ command: command, error: refusal });
       }
     }
     return { frames: joinFrames(encode, alone), refused: refused };
@@ -71,11 +79,18 @@ function joinFrames(encode: (commands: any[]) => any, alone: WriteFrame[]): Writ
 
 /**
  * Writes commands on the transport of a client, and returns whether they were sent. A command the codec
- * refuses is refused alone, and the others of the write are sent (see encodeBatch). A transport that refuses
- * a write fails the commands of its frame and of the frames after it, and ends the connection when they include
- * a tracked call or a cancel.
+ * refuses is refused alone, and the others of the write are sent (see encodeBatch). A refused command goes to
+ * onEncodeError with the codec's error when that is given; otherwise the host settles its call with the error.
+ * A transport that refuses a write fails the commands of its frame and of the frames after it, and ends the
+ * connection when they include a tracked call or a cancel.
  */
-export function writeCommands(host: WriteHost, commands: any[], session: string = '', node: string = ''): boolean {
+export function writeCommands(
+  host: WriteHost,
+  commands: any[],
+  session: string = '',
+  node: string = '',
+  onEncodeError?: (command: any, error: any) => void,
+): boolean {
   if (!commands.length) {
     return true;
   }
@@ -83,7 +98,13 @@ export function writeCommands(host: WriteHost, commands: any[], session: string 
     return false;
   }
   const batch: EncodedBatch = encodeBatch((items: any[]): any => host.encode(items), commands);
-  host.handleWriteError(batch.refused, true);
+  for (const refusal of batch.refused) {
+    if (onEncodeError) {
+      onEncodeError(refusal.command, refusal.error);
+    } else {
+      host.handleEncodeError(refusal.command, refusal.error);
+    }
+  }
   for (let index: number = 0; index < batch.frames.length; index++) {
     const frame: WriteFrame = batch.frames[index];
     try {
@@ -94,7 +115,7 @@ export function writeCommands(host: WriteHost, commands: any[], session: string 
       for (const rest of batch.frames.slice(index)) {
         unwritten.push(...rest.commands);
       }
-      host.handleWriteError(unwritten, false);
+      host.handleWriteError(unwritten);
       if (host.writeFailed(unwritten)) {
         host.disconnectWriteFailed();
       }
