@@ -1,6 +1,8 @@
 Unreleased
 ==========
 
+* From upstream: a `bigint` in outgoing data is written as a JSON number, on a runtime with `JSON.rawJSON`. Add the `bigIntegers` option: incoming integers past 2^53 are decoded as `bigint`, on a runtime which gives `JSON.parse` the source text. Off by default. JSON protocol only.
+* A command that cannot be encoded rejects with the error the encoder threw (a `TypeError` for JSON), as upstream does now. It rejected with `transportWriteError` before. `send()` throws the same error. The connection stays, and the other commands of the write go on, as before.
 * Add the `stopOnRefusedToken` option: a timer refresh refused as expired (109) is not retried with the same token when `getToken` gives it again. On by default; set `false` to keep sending the token `getToken` gives.
 * Add the `closeEndedSession` option of `RpcPool`: the idle connections of a session the main client ended are closed as the client ends it. On by default; set `false` to keep such a connection until its idle timeout or the next call on it.
 * `RpcPool` `maxRedirectsInflight` above 16 throws `badConfiguration` at construction, as its ceiling. A value from 17 to 1000 that was accepted before now throws. Lower the value to 16 or below.

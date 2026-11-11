@@ -873,7 +873,7 @@ export class TokenExchangeFlow {
   private sendOnRoute(cmd: any, session: string, node: string): Promise<CallResolveContext> {
     const call: Promise<CallResolveContext> = this.host.sendPlainCommand(cmd);
     // Without a transport nothing is written, and writeCommands settles nothing: the call is settled here. This is the
-    // no-transport rule of writeCommands (write_commands.ts:82). Otherwise writeCommands settles the commands it refused
+    // no-transport rule of writeCommands. Otherwise writeCommands settles the commands it refused
     // or could not write.
     if (!this.host.hasTransport()) {
       this.host.handleWriteError([cmd]);
